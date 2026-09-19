@@ -26,6 +26,8 @@ export interface ProfileInfo {
   name: string;
   kind: "dir" | "file";
   path: string;
+  /** bundles 含 @deepseek-ai/dsh-web-app */
+  webType: boolean;
 }
 
 export interface EnvironmentInfo {
@@ -169,8 +171,6 @@ export interface ProfileDetail {
   profile: string;
   exists: boolean;
   bundles: BundleInfo[];
-  disabledBundles: string[];
-  packageRaw: string;
   patchRaw: string;
   patchEntries: PatchEntryInfo[];
 }
@@ -180,6 +180,14 @@ export interface PluginEntryInfo {
   bundle: string | null;
   disabled: boolean;
   managed: boolean;
+  isBundle: boolean;
+}
+
+export interface PluginJobEvent {
+  profile: string;
+  line: string;
+  done: boolean;
+  ok: boolean;
 }
 
 export interface Toast {

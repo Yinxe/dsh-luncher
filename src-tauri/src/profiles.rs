@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// dsh 自身的数据目录：$DSH_HOME，缺省 ~/.dsh
 pub fn dsh_native_home() -> PathBuf {
@@ -32,6 +32,29 @@ pub struct ProfileInfo {
     /// dir = profiles/ 下的子目录；file = yaml/json 配置文件（名字去掉扩展名）
     pub kind: String,
     pub path: String,
+    /// bundles 中包含 @deepseek-ai/dsh-web-app 即为 web 类型
+    pub web_type: bool,
+}
+
+/// bundles 含 @deepseek-ai/dsh-web-app ⇒ web 类型 profile
+fn is_web_type(dir: &Path) -> bool {
+    let Ok(txt) = std::fs::read_to_string(dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(j) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        return false;
+    };
+    let Some(bundles) = j
+        .get("dsh")
+        .and_then(|d| d.get("profile"))
+        .and_then(|p| p.get("bundles"))
+        .and_then(|b| b.as_array())
+    else {
+        return false;
+    };
+    bundles
+        .iter()
+        .any(|v| v.as_str() == Some("@deepseek-ai/dsh-web-app"))
 }
 
 /// 枚举可启动的 profile：profiles/ 下的子目录 + yaml/yml/json 文件（按名字排序）
@@ -57,6 +80,7 @@ pub fn scan_profiles() -> Vec<ProfileInfo> {
                 name: name.into_owned(),
                 kind: "dir".into(),
                 path: path.to_string_lossy().into_owned(),
+                web_type: is_web_type(&path),
             });
         } else if ft.is_file() {
             let ext = path
@@ -73,6 +97,7 @@ pub fn scan_profiles() -> Vec<ProfileInfo> {
                     name: stem,
                     kind: "file".into(),
                     path: path.to_string_lossy().into_owned(),
+                    web_type: false,
                 });
             }
         }

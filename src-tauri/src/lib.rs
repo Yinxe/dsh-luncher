@@ -56,6 +56,7 @@ pub fn run() {
             commands::get_patch_reload,
             commands::set_bundle_enabled,
             commands::uninstall_bundle,
+            commands::install_bundle,
             commands::read_profile_file,
             commands::write_profile_file,
             commands::read_global_config,

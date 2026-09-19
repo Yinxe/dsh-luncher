@@ -14,6 +14,7 @@ import type {
   ProfileInstance,
   PluginEntryInfo,
   ProfileDetail,
+  PluginJobEvent,
   RegistryInfo,
   RuntimeFinishedEvent,
   RuntimeProgressEvent,
@@ -53,7 +54,9 @@ export const api = {
   setBundleEnabled: (profile: string, name: string, enabled: boolean) =>
     invoke<void>("set_bundle_enabled", { profile, name, enabled }),
   uninstallBundle: (profile: string, name: string) =>
-    invoke<void>("uninstall_bundle", { profile, name }),
+    invoke<boolean>("uninstall_bundle", { profile, name }),
+  installBundle: (profile: string, name: string) =>
+    invoke<boolean>("install_bundle", { profile, name }),
   readProfileFile: (profile: string, file: string) =>
     invoke<string>("read_profile_file", { profile, file }),
   writeProfileFile: (profile: string, file: string, content: string) =>
@@ -84,6 +87,8 @@ export const events = {
     listen<RuntimeProgressEvent>("runtime-progress", (e) => cb(e.payload)),
   onRuntimeFinished: (cb: (e: RuntimeFinishedEvent) => void): Promise<UnlistenFn> =>
     listen<RuntimeFinishedEvent>("runtime-finished", (e) => cb(e.payload)),
+  onPluginLog: (cb: (e: PluginJobEvent) => void): Promise<UnlistenFn> =>
+    listen<PluginJobEvent>("plugin-log", (e) => cb(e.payload)),
   onToast: (cb: (text: string) => void): Promise<UnlistenFn> =>
     listen<string>("toast", (e) => cb(e.payload)),
 };

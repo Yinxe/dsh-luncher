@@ -1,3 +1,6 @@
+use tauri::Emitter;
+use crate::settings::Settings;
+use crate::util;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -41,8 +44,6 @@ pub struct ProfileDetail {
     pub profile: String,
     pub exists: bool,
     pub bundles: Vec<BundleInfo>,
-    /// 已被启动器停用的 bundle（保存在启动器侧车文件中）
-    pub disabled_bundles: Vec<String>,
     pub package_raw: String,
     pub patch_raw: String,
     pub patch_entries: Vec<PatchEntryInfo>,
@@ -58,40 +59,6 @@ fn profile_dir(profile: &str) -> Result<PathBuf, String> {
         return Err("非法 profile 名称".into());
     }
     Ok(profiles::profiles_dir().join(name))
-}
-
-fn sidecar_path(profile: &str) -> Result<PathBuf, String> {
-    Ok(crate::settings::launcher_home()
-        .join("profile-meta")
-        .join(format!("{profile}.json")))
-}
-
-fn read_sidecar(profile: &str) -> Vec<String> {
-    let Ok(path) = sidecar_path(profile) else {
-        return vec![];
-    };
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|j| {
-            j.get("disabledBundles").and_then(|v| v.as_array()).map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect()
-            })
-        })
-        .unwrap_or_default()
-}
-
-fn write_sidecar(profile: &str, disabled: &[String]) -> Result<(), String> {
-    let path = sidecar_path(profile)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
-    }
-    let json = serde_json::json!({ "disabledBundles": disabled });
-    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap())
-        .map_err(|e| format!("写入失败: {e}"))?;
-    Ok(())
 }
 
 fn source_of(version_value: Option<&str>) -> &'static str {
@@ -113,8 +80,8 @@ pub fn read_detail(profile: &str) -> Result<ProfileDetail, String> {
     let patch_raw = std::fs::read_to_string(&patch_path).unwrap_or_default();
     let exists = pkg_path.is_file();
 
+    let patch_disabled = patch_disabled_ids(profile);
     let mut bundles = Vec::new();
-    let disabled = read_sidecar(profile);
     if !package_raw.is_empty() {
         let pkg: serde_json::Value =
             serde_json::from_str(&package_raw).map_err(|e| format!("package.json 解析失败: {e}"))?;
@@ -135,7 +102,7 @@ pub fn read_detail(profile: &str) -> Result<ProfileDetail, String> {
                         name: name.to_string(),
                         version: dep_ver.clone(),
                         source: source_of(dep_ver.as_deref()).to_string(),
-                        enabled: !disabled.iter().any(|d| d == name),
+                        enabled: !patch_disabled.contains(name),
                     });
                 }
             }
@@ -188,11 +155,39 @@ pub fn read_detail(profile: &str) -> Result<ProfileDetail, String> {
         profile: profile.to_string(),
         exists,
         bundles,
-        disabled_bundles: disabled,
         package_raw,
         patch_raw,
         patch_entries,
     })
+}
+
+/// 用户 cordis.patch.yml 中被禁用的条目 id 集合
+fn patch_disabled_ids(profile: &str) -> std::collections::BTreeSet<String> {
+    let mut set = std::collections::BTreeSet::new();
+    let Ok(raw) = std::fs::read_to_string(user_patch_path(profile).unwrap_or_default()) else {
+        return set;
+    };
+    if let Ok(serde_yaml::Value::Sequence(seq)) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+        for item in seq {
+            let disabled = item.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !disabled {
+                continue;
+            }
+            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                set.insert(id.to_string());
+            }
+            if let Some(serde_yaml::Value::Sequence(inner)) = item.get("insert") {
+                for it in inner {
+                    if it.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
+                            set.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    set
 }
 
 /// 覆写前先备份原文件（.launcher-bak-<时间戳>）
@@ -220,77 +215,159 @@ fn validate_json(content: &str) -> Result<(), String> {
         .map_err(|e| format!("JSON 语法错误：{e}"))
 }
 
-/// 修改 bundle 启用状态：enabled=false 时从 bundles 移除并记入侧车；true 反之
+/// 修改 bundle 启用状态：通过用户 cordis.patch 层 `disabled: true`，
+/// 条目保留在 bundles 列表中（禁用 ≠ 移除，卸载才是真移除）
 pub fn set_bundle_enabled(profile: &str, name: &str, enabled: bool) -> Result<(), String> {
-    let dir = profile_dir(profile)?;
-    let pkg_path = dir.join("package.json");
-    let raw = std::fs::read_to_string(&pkg_path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
-    let mut pkg: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("package.json 解析失败: {e}"))?;
+    set_plugin_disabled(profile, name, !enabled)
+}
 
-    let bundles_ptr = pkg
-        .get_mut("dsh")
-        .and_then(|d| d.get_mut("profile"))
-        .and_then(|p| p.get_mut("bundles"))
-        .and_then(|b| b.as_array_mut())
-        .ok_or("package.json 中未找到 dsh.profile.bundles")?;
-
-    let mut disabled = read_sidecar(profile);
-    if enabled {
-        bundles_ptr.retain(|b| b.as_str() != Some(name));
-        if !bundles_ptr.iter().any(|b| b.as_str() == Some(name)) {
-            bundles_ptr.push(serde_json::Value::String(name.to_string()));
-        }
-        disabled.retain(|d| d != name);
+/// 解析用于插件命令的 dsh 可执行入口（当前版本优先）
+pub fn resolve_dsh_bin(settings: &Settings) -> Result<(PathBuf, PathBuf), String> {
+    let installed = crate::installed::collect_installed(settings);
+    let active = settings.active_version.trim();
+    let target = if active.is_empty() {
+        None
     } else {
-        bundles_ptr.retain(|b| b.as_str() != Some(name));
-        if !disabled.iter().any(|d| d == name) {
-            disabled.push(name.to_string());
-        }
-    }
-
-    backup(&pkg_path)?;
-    let out = serde_json::to_string_pretty(&pkg).map_err(|e| e.to_string())?;
-    std::fs::write(&pkg_path, out + "\n").map_err(|e| format!("写入失败: {e}"))?;
-    write_sidecar(profile, &disabled)?;
-    Ok(())
+        installed.iter().find(|i| i.version == active)
+    };
+    let target = match target {
+        Some(t) => t.clone(),
+        None => crate::installed::pick_latest(&installed)
+            .ok_or("未找到已安装的 dsh，无法执行插件命令")?,
+    };
+    let bin_js = target
+        .bin_js
+        .clone()
+        .ok_or("该版本缺少 bin.js，无法执行插件命令")?;
+    let node = util::find_node(settings).ok_or("未找到 Node.js，无法执行插件命令")?;
+    Ok((node, PathBuf::from(bin_js)))
 }
 
-/// 从 profile 卸载插件：移出 bundles 并删除 package.json 中的依赖声明
-pub fn uninstall_bundle(profile: &str, name: &str) -> Result<(), String> {
+/// 执行官方插件命令：dsh plugin --profile <p> <pnpm-args...>
+/// 安装 = add <pkg>；卸载 = remove <pkg>；升级 = update <pkg>
+pub fn run_plugin_cli(
+    settings: &Settings,
+    profile: &str,
+    pnpm_args: &[&str],
+) -> Result<String, String> {
+    let (node, bin_js) = resolve_dsh_bin(settings)?;
     let dir = profile_dir(profile)?;
-    let pkg_path = dir.join("package.json");
-    let raw = std::fs::read_to_string(&pkg_path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
-    let mut pkg: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("package.json 解析失败: {e}"))?;
-
-    if let Some(bundles) = pkg
-        .get_mut("dsh")
-        .and_then(|d| d.get_mut("profile"))
-        .and_then(|p| p.get_mut("bundles"))
-        .and_then(|b| b.as_array_mut())
-    {
-        bundles.retain(|b| b.as_str() != Some(name));
+    if !dir.join("package.json").is_file() {
+        return Err("该 profile 尚未初始化（缺少 package.json），请先启动一次".into());
     }
-    for key in ["dependencies", "devDependencies"] {
-        if let Some(deps) = pkg.get_mut(key).and_then(|d| d.as_object_mut()) {
-            deps.remove(name);
+    let out = std::process::Command::new(&node)
+        .arg(&bin_js)
+        .arg("plugin")
+        .arg("--profile")
+        .arg(profile)
+        .args(pnpm_args)
+        .current_dir(&dir)
+        .env(
+            "DSH_HOME",
+            profiles::dsh_native_home().to_string_lossy().into_owned(),
+        )
+        .output()
+        .map_err(|e| format!("执行 dsh plugin 失败: {e}"))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if !out.status.success() {
+        let tail: Vec<&str> = text.lines().rev().take(10).collect();
+        return Err(format!(
+            "命令失败（dsh plugin {}）:\n{}",
+            pnpm_args.join(" "),
+            tail.iter().rev().cloned().collect::<Vec<_>>().join("\n")
+        ));
+    }
+    let tail: Vec<&str> = text.lines().rev().take(6).collect();
+    Ok(tail.iter().rev().cloned().collect::<Vec<_>>().join("\n"))
+}
+
+/// 后台执行官方插件命令（不阻塞），输出逐行以 plugin-log 事件回传
+pub fn start_plugin_cli(
+    app: tauri::AppHandle,
+    settings: &Settings,
+    profile: &str,
+    pnpm_args: &[&str],
+) -> Result<(), String> {
+    let (node, bin_js) = resolve_dsh_bin(settings)?;
+    let dir = profile_dir(profile)?;
+    if !dir.join("package.json").is_file() {
+        return Err("该 profile 尚未初始化（缺少 package.json），请先启动一次".into());
+    }
+    let profile = profile.to_string();
+    let args: Vec<String> = pnpm_args.iter().map(|s| s.to_string()).collect();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+        let emit_line = |line: &str, done: bool, ok: bool| {
+            let _ = app.emit(
+                "plugin-log",
+                serde_json::json!({ "profile": profile, "line": line, "done": done, "ok": ok }),
+            );
+        };
+        emit_line(&format!("$ dsh plugin --profile {} {}", profile, args.join(" ")), false, true);
+        let dsh_home = profiles::dsh_native_home().to_string_lossy().into_owned();
+        let mut child = Command::new(&node);
+        child
+            .arg(&bin_js)
+            .arg("plugin")
+            .arg("--profile")
+            .arg(&profile)
+            .args(&args)
+            .current_dir(&dir)
+            .env("DSH_HOME", dsh_home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match child.output() {
+            Ok(o) => {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                for line in text.lines().filter(|l| !l.trim().is_empty()).take(40) {
+                    emit_line(line, false, true);
+                }
+                let ok = o.status.success();
+                emit_line(
+                    if ok { "✔ 完成" } else { "✘ 失败" },
+                    true,
+                    ok,
+                );
+            }
+            Err(e) => emit_line(&format!("✘ 执行失败: {e}"), true, false),
         }
-    }
-
-    backup(&pkg_path)?;
-    let out = serde_json::to_string_pretty(&pkg).map_err(|e| e.to_string())?;
-    std::fs::write(&pkg_path, out + "\n").map_err(|e| format!("写入失败: {e}"))?;
-
-    let mut disabled = read_sidecar(profile);
-    disabled.retain(|d| d != name);
-    write_sidecar(profile, &disabled)?;
+    });
     Ok(())
 }
 
-/// 读 profile 内的文本文件（package.json / cordis.patch.yml 等）
+/// 卸载插件：官方命令 dsh plugin --profile <p> remove <pkg>（后台执行）
+pub fn uninstall_bundle(
+    app: tauri::AppHandle,
+    settings: &Settings,
+    profile: &str,
+    name: &str,
+) -> Result<(), String> {
+    start_plugin_cli(app, settings, profile, &["remove", name])
+}
+
+/// 安装插件：官方命令 dsh plugin --profile <p> add <pkg>（后台执行）
+pub fn install_bundle(
+    app: tauri::AppHandle,
+    settings: &Settings,
+    profile: &str,
+    name: &str,
+) -> Result<(), String> {
+    start_plugin_cli(app, settings, profile, &["add", name])
+}
+
+/// 读 profile 内的文本文件（仅 cordis.patch.yml —— package.json 只归 dsh plugin 命令管）
 pub fn read_profile_file(profile: &str, file: &str) -> Result<String, String> {
-    let allowed = ["package.json", "cordis.patch.yml", "cordis.yml"];
+    let allowed = ["cordis.patch.yml"];
     if !allowed.contains(&file) {
         return Err("不允许读取该文件".into());
     }
@@ -300,7 +377,7 @@ pub fn read_profile_file(profile: &str, file: &str) -> Result<String, String> {
 
 /// 写 profile 内的文本文件（先备份 + 语法校验）
 pub fn write_profile_file(profile: &str, file: &str, content: &str) -> Result<(), String> {
-    let allowed = ["package.json", "cordis.patch.yml", "cordis.yml"];
+    let allowed = ["cordis.patch.yml"];
     if !allowed.contains(&file) {
         return Err("不允许写入该文件".into());
     }
@@ -345,6 +422,8 @@ pub struct PluginEntryInfo {
     pub disabled: bool,
     /// 该禁用条目是否由启动器管理（可通过开关自动移除）
     pub managed: bool,
+    /// true = bundle 插件包；false = bundle 内的服务插件
+    pub is_bundle: bool,
 }
 
 const MANAGE_MARKER: &str = "# dsh-launcher: disable";
@@ -376,6 +455,20 @@ pub fn plugin_inventory(profile: &str) -> Result<Vec<PluginEntryInfo>, String> {
 
     let mut out: Vec<PluginEntryInfo> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let patch_disabled = patch_disabled_ids(profile);
+
+    // 0) bundle 包本身也是插件条目（包名 ≠ 服务 id，禁用走 patch 层）
+    for bundle in &bundles {
+        if seen.insert(bundle.clone()) {
+            out.push(PluginEntryInfo {
+                id: bundle.clone(),
+                bundle: Some(bundle.clone()),
+                disabled: patch_disabled.contains(bundle),
+                managed: true,
+                is_bundle: true,
+            });
+        }
+    }
 
     // 1) 每个 bundle 自带 patch 列表中的服务 id
     for bundle in &bundles {
@@ -392,8 +485,9 @@ pub fn plugin_inventory(profile: &str) -> Result<Vec<PluginEntryInfo>, String> {
                         out.push(PluginEntryInfo {
                             id: id.to_string(),
                             bundle: Some(bundle.clone()),
-                            disabled: false,
+                            disabled: patch_disabled.contains(id),
                             managed: false,
+                            is_bundle: false,
                         });
                     }
                 }
@@ -427,13 +521,13 @@ pub fn plugin_inventory(profile: &str) -> Result<Vec<PluginEntryInfo>, String> {
                             bundle: None,
                             disabled,
                             managed,
+                            is_bundle: false,
                         });
                     }
                 }
             }
         }
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
 }
 
@@ -459,13 +553,7 @@ pub fn patch_reload_mode(profile: &str) -> String {
 /// 禁用 = 追加启动器管理的注释标记块；启用 = 按标记移除该块（不动用户手写内容）。
 pub fn set_plugin_disabled(profile: &str, id: &str, disabled: bool) -> Result<(), String> {
     let id = id.trim();
-    if id.is_empty()
-        || id.len() > 128
-        || id.contains('\n')
-        || id.contains('/')
-        || id.contains('\\')
-        || id.contains("..")
-    {
+    if id.is_empty() || id.len() > 200 || id.contains('\n') || id.contains("..") {
         return Err("非法插件 id".into());
     }
     let path = user_patch_path(profile)?;

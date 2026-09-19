@@ -1,20 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
-import { RotateCcw, Save } from "lucide-react";
+import { Plus, RotateCcw, Save } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
-import { api } from "../api";
+import YamlEditor from "@/components/YamlEditor";
+import { api, events } from "../api";
 import type { ProfileDetail, PluginEntryInfo } from "../types";
 
 interface Props {
   profiles: string[];
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
 }
-
-type FileKey = "cordis.patch.yml" | "package.json";
 
 export default function PluginsView({ profiles, onToast }: Props) {
   // 默认选中 web（与启动器整体默认一致）；不存在才取第一个
@@ -24,10 +23,12 @@ export default function PluginsView({ profiles, onToast }: Props) {
   const [detail, setDetail] = useState<ProfileDetail | null>(null);
   const [plugins, setPlugins] = useState<PluginEntryInfo[]>([]);
   const [reloadMode, setReloadMode] = useState<string>("live");
-  const [editFile, setEditFile] = useState<FileKey>("cordis.patch.yml");
+  const [editFile] = useState<string>("cordis.patch.yml");
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [jobLine, setJobLine] = useState<string | null>(null);
+  const [newPkg, setNewPkg] = useState("");
 
   useEffect(() => {
     // profiles 晚于挂载加载时，同样默认选中 web
@@ -47,10 +48,7 @@ export default function PluginsView({ profiles, onToast }: Props) {
       setDetail(d);
       setPlugins(p);
       setReloadMode(mode);
-      setEditFile((f) => {
-        setDraft(f === "package.json" ? d.packageRaw : d.patchRaw);
-        return f;
-      });
+      setDraft(d.patchRaw);
       setDirty(false);
     } catch (e) {
       onToast("err", `读取 profile 配置失败: ${e}`);
@@ -60,6 +58,26 @@ export default function PluginsView({ profiles, onToast }: Props) {
   useEffect(() => {
     reload();
   }, [reload]);
+
+  // 后台插件命令（dsh plugin）输出流
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    events
+      .onPluginLog?.((e) => {
+        if (e.profile !== profile) return;
+        if (e.done) {
+          setBusy(false);
+          setJobLine(null);
+          onToast(e.ok ? "ok" : "err", e.ok ? "插件命令执行完成" : `插件命令失败：${e.line}`);
+          reload();
+        } else {
+          setJobLine(e.line);
+        }
+      })
+      ?.then((u) => (un = u))
+      .catch(() => undefined);
+    return () => un?.();
+  }, [profile, reload, onToast]);
 
   const togglePlugin = useCallback(
     async (p: PluginEntryInfo) => {
@@ -133,20 +151,21 @@ export default function PluginsView({ profiles, onToast }: Props) {
     }
   }, [profile, editFile, draft, onToast, reload]);
 
-  const switchFile = useCallback(
-    async (f: FileKey) => {
-      if (dirty && !window.confirm("当前编辑未保存，确定切换文件？")) return;
-      try {
-        const text = await api.readProfileFile(profile, f);
-        setEditFile(f);
-        setDraft(text);
-        setDirty(false);
-      } catch (e) {
-        onToast("err", String(e));
-      }
-    },
-    [profile, dirty, onToast]
-  );
+  const installNew = useCallback(async () => {
+    const name = newPkg.trim();
+    if (!name) return;
+    setBusy(true);
+    try {
+      const tail = await api.installBundle(profile, name);
+      onToast("ok", `插件 ${name} 已安装（官方 dsh plugin 命令）\n${tail}`);
+      setNewPkg("");
+      await reload();
+    } catch (e) {
+      onToast("err", String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [profile, newPkg, reload, onToast]);
 
   if (profiles.length === 0) {
     return (
@@ -160,6 +179,11 @@ export default function PluginsView({ profiles, onToast }: Props) {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-base font-semibold">插件管理</h2>
+        {jobLine && (
+          <Badge variant="info" className="max-w-md truncate font-mono" title={jobLine}>
+            {jobLine}
+          </Badge>
+        )}
         <Select value={profile} onValueChange={setProfile}>
           <SelectTrigger className="w-52 font-mono">
             <SelectValue placeholder="选择 profile" />
@@ -215,11 +239,24 @@ export default function PluginsView({ profiles, onToast }: Props) {
       </Card>
 
       <Card className="p-4">
-        <div className="mb-2.5 text-[13px] font-semibold">
-          插件包
-          <span className="ml-2 text-xs font-normal text-muted-foreground">
-            dsh.profile.bundles，启停需重启实例
-          </span>
+        <div className="mb-2.5 flex flex-wrap items-center gap-2.5">
+          <div className="text-[13px] font-semibold">
+            插件包
+            <span className="ml-2 text-xs font-normal text-muted-foreground">
+              dsh.profile.bundles
+            </span>
+          </div>
+          <span className="flex-1" />
+          <Input
+            className="h-7 w-56 font-mono text-xs"
+            placeholder="包名，如 @dshp/mcwiki-search"
+            value={newPkg}
+            onChange={(e) => setNewPkg(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && installNew()}
+          />
+          <Button size="sm" variant="outline" disabled={busy || !newPkg.trim()} onClick={installNew}>
+            <Plus /> 安装插件
+          </Button>
         </div>
         <div className="space-y-1.5">
           {(detail?.bundles ?? []).map((b) => (
@@ -242,7 +279,7 @@ export default function PluginsView({ profiles, onToast }: Props) {
                 className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                 disabled={busy}
                 onClick={() => uninstall(b.name)}
-                title="从 bundles 与依赖声明中移除"
+                title="通过官方 dsh plugin 命令卸载（remove）"
               >
                 卸载
               </Button>
@@ -261,16 +298,12 @@ export default function PluginsView({ profiles, onToast }: Props) {
 
       <Card className="p-4">
         <div className="mb-2.5 flex flex-wrap items-center gap-3">
-          <div className="text-[13px] font-semibold">原始配置编辑</div>
-          <Select value={editFile} onValueChange={(v) => switchFile(v as FileKey)}>
-            <SelectTrigger className="h-7 w-44 font-mono text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="cordis.patch.yml">cordis.patch.yml</SelectItem>
-              <SelectItem value="package.json">package.json</SelectItem>
-            </SelectContent>
-          </Select>
+          <div className="text-[13px] font-semibold">
+            cordis.patch.yml
+            <span className="ml-2 text-xs font-normal text-muted-foreground">
+              插件启停的权威配置（disabled: true / 恢复）
+            </span>
+          </div>
           {dirty && <Badge variant="warning">未保存</Badge>}
           <span className="flex-1" />
           <Button size="sm" disabled={busy || !dirty} onClick={saveFile}>
@@ -280,9 +313,9 @@ export default function PluginsView({ profiles, onToast }: Props) {
             <RotateCcw /> 还原
           </Button>
         </div>
-        <Textarea rows={14} spellCheck={false} value={draft} onChange={(e) => { setDraft(e.target.value); setDirty(true); }} />
+        <YamlEditor value={draft} onChange={(v) => { setDraft(v); setDirty(true); }} />
         <div className="mt-1.5 text-[11px] text-muted-foreground">
-          编辑保留全部注释；保存前做语法校验，原文件自动备份为 *.launcher-bak-*
+          专业 YAML 编辑器：语法高亮 + 行内错误校验，编辑保留全部注释；保存前自动备份，live 模式下 dsh 热重载
         </div>
       </Card>
     </div>

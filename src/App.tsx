@@ -369,13 +369,23 @@ export default function App() {
   // Profile 实例阶段：stopped → starting → ready（出现 URL）/ failed
   const instanceRows = useMemo(() => {
     type Phase = "stopped" | "starting" | "ready" | "failed" | "external";
-    type Row = { profile: string; phase: Phase; pid: number | null; source: "embedded" | "external" | null; version: string | null; webUrl: string | null; code: number | null };
+    type Row = { profile: string; phase: Phase; pid: number | null; source: "embedded" | "external" | null; version: string | null; webUrl: string | null; code: number | null; webType: boolean };
     const map = new Map<string, Row>();
     for (const p of profiles) {
-      map.set(p.name, { profile: p.name, phase: "stopped", pid: null, source: null, version: null, webUrl: null, code: null });
+      map.set(p.name, { profile: p.name, phase: "stopped", pid: null, source: null, version: null, webUrl: null, code: null, webType: p.webType });
     }
     for (const i of instances) {
-      map.set(i.profile, { profile: i.profile, phase: "external", pid: i.pid, source: "external", version: i.version, webUrl: null, code: null });
+      const known = map.get(i.profile);
+      map.set(i.profile, {
+        profile: i.profile,
+        phase: "external",
+        pid: i.pid,
+        source: "external",
+        version: i.version,
+        webUrl: null,
+        code: null,
+        webType: known?.webType ?? false,
+      });
     }
     const latest = new Map<string, ProcEntry>();
     for (const p of Object.values(procs)) {
@@ -386,7 +396,7 @@ export default function App() {
       const phase: Phase = p.exited
         ? p.code == null || p.code === 0 ? "stopped" : "failed"
         : p.webUrl ? "ready" : "starting";
-      map.set(p.profile, { profile: p.profile, phase, pid: p.id, source: "embedded", version: p.version, webUrl: p.webUrl, code: p.code });
+      map.set(p.profile, { profile: p.profile, phase, pid: p.id, source: "embedded", version: p.version, webUrl: p.webUrl, code: p.code, webType: map.get(p.profile)?.webType ?? false });
     }
     return [...map.values()].sort((a, b) => a.profile.localeCompare(b.profile));
   }, [profiles, instances, procs]);
@@ -726,8 +736,10 @@ export default function App() {
                 </Button>
               </div>
               <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
-                目前仅验证过 <b className="text-amber-500">web</b> 类 profile 可正常启动；其他 profile
-                可能是复制 web 的配置（实例名不同、内容同为 web，仅端口等不同），也可能启动失败——以实际日志为准。
+                带 <Badge variant="info">web</Badge> 标记的 profile 含
+                <span className="font-mono"> @deepseek-ai/dsh-web-app </span>
+                插件（已验证可正常启动并提供 Web 界面）；其余 profile 可能启动失败——以日志为准。
+                若插件导致启动异常，到「插件管理」页停用可疑插件后重启实例。
               </div>
               <div className="space-y-2">
                 {instanceRows.map((row) => {

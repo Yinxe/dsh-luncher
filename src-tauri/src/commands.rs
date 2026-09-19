@@ -408,8 +408,27 @@ pub fn set_bundle_enabled(profile: String, name: String, enabled: bool) -> Resul
 }
 
 #[tauri::command]
-pub fn uninstall_bundle(profile: String, name: String) -> Result<(), String> {
-    crate::profile_cfg::uninstall_bundle(&profile, &name)
+pub fn uninstall_bundle(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile: String,
+    name: String,
+) -> Result<bool, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    crate::profile_cfg::uninstall_bundle(app, &settings, &profile, &name)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn install_bundle(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile: String,
+    name: String,
+) -> Result<bool, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    crate::profile_cfg::install_bundle(app, &settings, &profile, &name)?;
+    Ok(true)
 }
 
 #[tauri::command]

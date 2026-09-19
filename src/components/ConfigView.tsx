@@ -3,7 +3,7 @@ import { RotateCcw, Save } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
+import YamlEditor from "@/components/YamlEditor";
 import { api } from "../api";
 
 interface Props {
@@ -74,7 +74,7 @@ export default function ConfigView({ onToast }: Props) {
           </div>
         </Card>
       ) : (
-        <Textarea rows={22} spellCheck={false} value={draft} onChange={(e) => { setDraft(e.target.value); setDirty(true); }} />
+        <YamlEditor value={draft} onChange={(v) => { setDraft(v); setDirty(true); }} />
       )}
     </div>
   );
