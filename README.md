@@ -11,7 +11,9 @@
   - 本启动器管理的 `~/.dsh-launcher/versions/`；
   - npm 全局安装（`npm root -g`）；
   - PATH 中的 `dsh` 可执行文件（顺着符号链接解析版本）。
-- **安装 / 卸载 / 重装**：未安装的版本由启动器用 npm 装进自己的数据目录（互不污染全局环境），实时日志 + 可取消；卸载即删除对应目录。
+- **安装 / 卸载 / 重装**：未安装的版本由启动器用 npm 装进自己的数据目录（互不污染全局环境），`--loglevel info` 把每个包的真实 fetch/resolve/extract 过程实时显示在安装卡里，可取消；卸载即删除对应目录。
+- **内嵌启动（默认）**：「启动」把 dsh 作为启动器的**子进程**运行——日志实时显示在底部进程面板（多实例 tab、运行时长、停止按钮），**退出启动器即结束所有 dsh 进程**；也可点「终端」在独立系统终端中启动（交互式 TUI 场景，不受启动器生命周期管理）。
+- **Node 运行时预装**：宿主机没有 Node/npm 时，一键下载 Node LTS 安装到 `~/.dsh-launcher/runtime/`（用户级、无需 root、不污染系统），下载默认走 npmmirror 镜像站（设置中可换 aliyun 等），npm registry 在设置中配置。
 - **选择启动**：任意已安装版本一键在**新的系统终端窗口**中启动对应版本的 `dsh`（用绝对 node + bin.js 启动，不依赖 PATH）；支持 **profile**：顶栏下拉框列出 `$DSH_HOME/profiles`（缺省 `~/.dsh/profiles`，兼容单数 `profile/`）下的所有 profile（自动跳过 `node_modules`），选中即以 `dsh --profile <名字>` 启动并可保存为默认，留空则不带 `--profile` 走 dsh 默认；托盘菜单也提供"启动最新 dsh"。可设置默认附加参数（如 `--preset qqbot`）。
 - **任务栏 / 托盘图标**：常驻托盘，左键切换窗口，右键菜单（显示窗口 / 启动最新 dsh / 退出）；点关闭默认最小化到托盘（可在设置中改为直接退出）。
 - **启动器自更新**：
@@ -23,6 +25,8 @@
 ```
 ~/.dsh-launcher/       # 启动器自身数据
 ├── settings.json      # 启动器设置
+├── runtime/           # 内置 Node 运行时（一键预装）
+│   └── node-v22.14.0/
 └── versions/
     └── 0.1.5-rc.2/    # 每个版本一个 npm prefix
         └── node_modules/@deepseek-ai/dsh/
@@ -54,7 +58,10 @@ sudo dnf install webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel
 
 ```sh
 npm install
-npm run tauri dev      # 开发模式
+npm run app            # 开发模式（vite 热更新）
+npm run build:debug    # 无 root 快速编译（调试版，需配合 dev 服务器看 UI）
+npm run build:release  # 自包含正式版（内嵌前端，--features custom-protocol）
+npm run start          # 启动桌面应用（release 二进制不存在时自动先构建）
 npm run tauri build    # 产出 deb / AppImage / dmg / nsis 安装包（按当前平台）
 ```
 

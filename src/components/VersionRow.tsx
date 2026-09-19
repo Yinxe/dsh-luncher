@@ -1,4 +1,4 @@
-import type { InstalledVersion, RemoteVersion } from "../types";
+import type { InstalledVersion, ProcEntry, RemoteVersion } from "../types";
 
 export function formatSize(n: number | null): string {
   if (n == null) return "";
@@ -90,7 +90,11 @@ interface Props {
   row: MergedRow;
   isLatestTag: boolean;
   busy: boolean;
+  runningProcs: ProcEntry[];
   onLaunch: (version: string) => void;
+  onTerminal: (version: string) => void;
+  onShowProc: (id: number) => void;
+  onStopProc: (id: number) => void;
   onInstall: (version: string, force: boolean) => void;
   onUninstall: (version: string) => void;
   onReveal: (path: string) => void;
@@ -100,7 +104,11 @@ export default function VersionRow({
   row,
   isLatestTag,
   busy,
+  runningProcs,
   onLaunch,
+  onTerminal,
+  onShowProc,
+  onStopProc,
   onInstall,
   onUninstall,
   onReveal,
@@ -151,9 +159,8 @@ export default function VersionRow({
         {inst && inst.version !== "unknown" && (
           <button
             className="primary"
-            disabled={busy}
             onClick={() => onLaunch(row.version)}
-            title={inst.binJs ? "" : "缺少 bin.js，可能安装不完整"}
+            title="内嵌启动：进程随启动器生命周期，日志在下方面板查看"
           >
             启动
           </button>
@@ -166,6 +173,29 @@ export default function VersionRow({
           >
             安装
           </button>
+        )}
+        {runningProcs.length > 0 && (
+          <>
+            {runningProcs.map((p) => (
+              <button
+                key={p.id}
+                className="sm run-chip"
+                onClick={() => onShowProc(p.id)}
+                title={`PID ${p.id} · 查看日志`}
+              >
+                <span className="dot ok" /> {p.id}
+              </button>
+            ))}
+            {runningProcs.length > 0 && (
+              <button
+                className="sm danger"
+                onClick={() => runningProcs.forEach((p) => onStopProc(p.id))}
+                title="停止该版本的所有内嵌进程"
+              >
+                停止
+              </button>
+            )}
+          </>
         )}
         {inst && inst.source === "managed" && (
           <>
@@ -189,6 +219,13 @@ export default function VersionRow({
             </button>
           </>
         )}
+        <button
+          className="sm ghost"
+          onClick={() => onTerminal(row.version)}
+          title="在独立系统终端窗口中启动（不受启动器生命周期管理，可交互）"
+        >
+          终端
+        </button>
       </div>
     </div>
   );

@@ -25,6 +25,9 @@ pub struct EnvironmentInfo {
     pub dsh_native_home: String,
     /// dsh 的 profile 目录
     pub profiles_dir: String,
+    /// 启动器内置 Node 运行时是否已安装
+    pub runtime_installed: bool,
+    pub runtime_dir: String,
 }
 
 #[tauri::command]
@@ -61,6 +64,8 @@ pub async fn get_environment(state: State<'_, AppState>) -> Result<EnvironmentIn
             registry: settings.registry,
             dsh_native_home: crate::profiles::dsh_native_home().to_string_lossy().into_owned(),
             profiles_dir: crate::profiles::profiles_dir().to_string_lossy().into_owned(),
+            runtime_installed: crate::runtime::runtime_installed(),
+            runtime_dir: crate::runtime::runtime_dir().to_string_lossy().into_owned(),
         })
     })
     .await
@@ -184,6 +189,61 @@ pub async fn list_profiles() -> Result<Vec<crate::profiles::ProfileInfo>, String
         .map_err(|e| format!("扫描 profile 失败: {e}"))?
 }
 
+/// 内嵌启动：dsh 作为启动器子进程运行，日志回传界面，启动器退出即全部结束
+#[tauri::command]
+pub async fn start_embedded(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    procs: State<'_, crate::procs::ProcState>,
+    version: Option<String>,
+    profile: Option<String>,
+    args: Option<String>,
+) -> Result<crate::procs::ProcInfo, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let proc_state = procs.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let installed = crate::installed::collect_installed(&settings);
+        let target = match version.as_deref() {
+            Some(v) if v != "unknown" => installed
+                .iter()
+                .find(|i| i.version == v)
+                .cloned()
+                .ok_or_else(|| format!("未找到已安装的 {v}，请先安装"))?,
+            _ => crate::installed::pick_latest(&installed)
+                .ok_or_else(|| "还没有已安装的 dsh 版本，请先在列表中选择安装".to_string())?,
+        };
+        let launch_args = args
+            .or(Some(settings.default_args.clone()))
+            .unwrap_or_default();
+        let profile = profile.unwrap_or_else(|| settings.default_profile.clone());
+        crate::procs::spawn_embedded(
+            app,
+            &proc_state,
+            &settings,
+            &target,
+            &profile,
+            &launch_args,
+        )
+    })
+    .await
+    .map_err(|e| format!("启动失败: {e}"))?
+}
+
+#[tauri::command]
+pub fn stop_process(
+    procs: State<'_, crate::procs::ProcState>,
+    id: u32,
+) -> Result<bool, String> {
+    Ok(crate::procs::stop(&procs, id))
+}
+
+#[tauri::command]
+pub fn list_processes(
+    procs: State<'_, crate::procs::ProcState>,
+) -> Result<Vec<crate::procs::ProcInfo>, String> {
+    Ok(crate::procs::list(&procs))
+}
+
 #[tauri::command]
 pub async fn check_launcher_update(
     app: AppHandle,
@@ -215,6 +275,16 @@ pub fn reveal_folder(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn open_external(url: String) -> Result<(), String> {
     tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| format!("打开链接失败: {e}"))
+}
+
+/// 一键安装内置 Node 运行时（下载默认走镜像站）
+#[tauri::command]
+pub async fn install_runtime(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    crate::runtime::install(app, &settings).await
 }
 
 /// 启动器启动时推送一次自动检查结果给前端

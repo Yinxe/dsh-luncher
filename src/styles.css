@@ -388,3 +388,92 @@ input::placeholder { color: #55607a; }
   background: var(--bg-soft);
 }
 .statusbar .mono { font-family: var(--mono); }
+
+/* ── 运行行内徽标 ─────────────────── */
+.run-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+}
+.run-chip .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ok);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+/* ── 底部进程面板 ─────────────────── */
+.dock {
+  border-top: 1px solid var(--border);
+  background: var(--bg-soft);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+}
+.dock-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+}
+.dock-title { font-size: 12.5px; font-weight: 700; display: inline-flex; gap: 8px; align-items: center; }
+.dock-count {
+  font-weight: 400;
+  color: var(--ok);
+  font-size: 11.5px;
+  background: rgba(52, 211, 153, 0.12);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.dock-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 0 14px 8px;
+  overflow-x: auto;
+}
+.dock-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.dock-tab.active { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.dock-tab.exited { opacity: 0.6; }
+.dock-tab .dot { width: 6px; height: 6px; border-radius: 50%; }
+.dock-tab .dot.ok { background: var(--ok); }
+.dock-tab .dot.off { background: var(--text-dim); }
+.dock-tab .dot.err { background: var(--err); }
+
+.dock-body { padding: 0 14px 12px; }
+.dock-log {
+  height: 180px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+.dock-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 7px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+.dock-foot .mono { font-family: var(--mono); }

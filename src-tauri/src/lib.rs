@@ -3,7 +3,9 @@ mod installed;
 mod installer;
 mod launcher;
 mod profiles;
+mod procs;
 mod registry;
+mod runtime;
 mod semver;
 mod settings;
 mod tray;
@@ -16,7 +18,7 @@ use tauri::{Manager, WindowEvent};
 pub fn run() {
     let settings = settings::load_settings();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
@@ -24,6 +26,7 @@ pub fn run() {
             settings: std::sync::Mutex::new(settings),
         })
         .manage(installer::InstallState::default())
+        .manage(procs::ProcState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_environment,
             commands::get_settings,
@@ -35,10 +38,14 @@ pub fn run() {
             commands::get_install_status,
             commands::uninstall_version,
             commands::launch_version,
+            commands::start_embedded,
+            commands::stop_process,
+            commands::list_processes,
             commands::list_profiles,
             commands::check_launcher_update,
             commands::reveal_folder,
             commands::open_external,
+            commands::install_runtime,
         ])
         .setup(|app| {
             tray::create(app.handle())?;
@@ -61,6 +68,13 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running dsh launcher");
+        .build(tauri::generate_context!())
+        .expect("error while building dsh launcher");
+
+    app.run(|app, event| {
+        // 启动器退出 → 结束所有内嵌 dsh 子进程
+        if let tauri::RunEvent::Exit = event {
+            procs::stop_all(&app.state::<procs::ProcState>());
+        }
+    });
 }

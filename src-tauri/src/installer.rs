@@ -133,16 +133,16 @@ fn run_install(
         .arg(format!("@deepseek-ai/dsh@{version}"))
         .arg("--no-fund")
         .arg("--no-audit")
+        // info 级别能看到每个包的 fetch / resolve / extract 过程
         .arg("--loglevel")
-        .arg("notice");
+        .arg("info")
+        .arg("--foreground-scripts");
     let registry = settings.registry.trim();
     if !registry.is_empty() {
         cmd.arg("--registry").arg(registry);
     }
-    cmd.env("NO_COLOR", "1")
-        .env("CI", "1")
-        .env("npm_config_progress", "false")
-        .env("npm_config_update_notifier", "false");
+    // 不加 CI/NO_COLOR 等静默环境变量，保留 npm 真实的过程输出
+    cmd.env("npm_config_update_notifier", "false");
     let node = util::find_node(&settings.node_path);
     util::with_node_on_path(&mut cmd, node.as_deref());
 

@@ -1,0 +1,270 @@
+use serde::Serialize;
+use std::collections::HashMap;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter};
+
+use crate::installed::InstalledVersion;
+use crate::settings::Settings;
+use crate::util;
+
+/// 所有内嵌运行的 dsh 子进程；启动器退出时全部结束
+#[derive(Default, Clone)]
+pub struct ProcState {
+    pub procs: Arc<Mutex<HashMap<u32, ProcHandle>>>,
+    /// 全局停止标记（保留给未来优雅退出用）
+    #[allow(dead_code)]
+    pub shutting_down: Arc<AtomicBool>,
+}
+
+pub struct ProcHandle {
+    pub version: String,
+    pub profile: String,
+    pub started_at: SystemTime,
+    pub child: Arc<Mutex<Option<Child>>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcInfo {
+    pub id: u32,
+    pub version: String,
+    pub profile: String,
+    pub started_at: u64,
+    pub running: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcLogEvent {
+    pub id: u32,
+    pub version: String,
+    pub profile: String,
+    pub line: String,
+    pub stream: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcExitEvent {
+    pub id: u32,
+    pub version: String,
+    pub profile: String,
+    /// None = 被启动器停止或被信号杀死
+    pub code: Option<i32>,
+    /// true = 由停止按钮触发
+    pub stopped: bool,
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn emit_log(app: &AppHandle, ev: &ProcLogEvent) {
+    let _ = app.emit("proc-log", ev);
+}
+
+/// 以启动器子进程方式运行 dsh（stdin 关闭、stdout/stderr 管道回传日志）
+pub fn spawn_embedded(
+    app: AppHandle,
+    state: &ProcState,
+    settings: &Settings,
+    target: &InstalledVersion,
+    profile: &str,
+    args: &str,
+) -> Result<ProcInfo, String> {
+    if target.version == "unknown" {
+        return Err("该 PATH 记录缺少版本信息，无法内嵌启动".into());
+    }
+    let bin_js = target
+        .bin_js
+        .clone()
+        .ok_or_else(|| "该版本缺少 bin.js，安装可能不完整，请重装".to_string())?;
+    let node = util::find_node(&settings.node_path)
+        .ok_or_else(|| "未找到 Node.js，无法启动 dsh".to_string())?;
+
+    let mut cmd = Command::new(&node);
+    cmd.arg(&bin_js);
+    let prof = profile.trim();
+    if !prof.is_empty() {
+        cmd.arg("--profile").arg(prof);
+    }
+    for a in args.trim().split_whitespace() {
+        cmd.arg(a);
+    }
+    // 非 shell 启动：node 目录放进 PATH 供 dsh 的子进程使用
+    util::with_node_on_path(&mut cmd, Some(&node));
+    cmd.env("DSH_LAUNCHER_MANAGED", "1");
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = cmd.spawn().map_err(|e| format!("启动 dsh 失败: {e}"))?;
+    let id = child.id();
+    let handle = ProcHandle {
+        version: target.version.clone(),
+        profile: prof.to_string(),
+        started_at: SystemTime::now(),
+        child: Arc::new(Mutex::new(Some(child))),
+    };
+
+    if let Some(out) = handle.child.lock().unwrap().as_mut().unwrap().stdout.take() {
+        spawn_reader(
+            app.clone(),
+            ProcLogEvent {
+                id,
+                version: handle.version.clone(),
+                profile: handle.profile.clone(),
+                line: String::new(),
+                stream: "stdout".into(),
+            },
+            out,
+        );
+    }
+    if let Some(err) = handle.child.lock().unwrap().as_mut().unwrap().stderr.take() {
+        spawn_reader(
+            app.clone(),
+            ProcLogEvent {
+                id,
+                version: handle.version.clone(),
+                profile: handle.profile.clone(),
+                line: String::new(),
+                stream: "stderr".into(),
+            },
+            err,
+        );
+    }
+
+    state.procs.lock().unwrap().insert(id, handle);
+
+    let st = state.clone();
+    let app2 = app.clone();
+    std::thread::spawn(move || wait_exit(app2, st, id));
+
+    Ok(ProcInfo {
+        id,
+        version: target.version.clone(),
+        profile: prof.to_string(),
+        started_at: now_millis(),
+        running: true,
+    })
+}
+
+fn spawn_reader<R: std::io::Read + Send + 'static>(
+    app: AppHandle,
+    mut template: ProcLogEvent,
+    pipe: R,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(pipe);
+        for line in reader.lines() {
+            match line {
+                Ok(l) => {
+                    let l = l.trim_end();
+                    if l.is_empty() {
+                        continue;
+                    }
+                    template.line = l.to_string();
+                    emit_log(&app, &template);
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+/// 等待进程退出并广播事件；被 stop() 拿走 child 时按“已停止”上报
+fn wait_exit(app: AppHandle, state: ProcState, id: u32) {
+    let (version, profile, outcome) = loop {
+        let mut guard = state.procs.lock().unwrap();
+        let Some(handle) = guard.get_mut(&id) else {
+            return; // 已被 stop() 移除并上报
+        };
+        let mut child_guard = handle.child.lock().unwrap();
+        match child_guard.as_mut() {
+            Some(c) => match c.try_wait() {
+                Ok(Some(status)) => {
+                    let version = handle.version.clone();
+                    let profile = handle.profile.clone();
+                    drop(child_guard);
+                    guard.remove(&id);
+                    break (version, profile, Ok(status.code()));
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    let version = handle.version.clone();
+                    let profile = handle.profile.clone();
+                    drop(child_guard);
+                    guard.remove(&id);
+                    break (version, profile, Err(()));
+                }
+            },
+            None => return, // stop() 已处理
+        }
+        drop(child_guard);
+        drop(guard);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    let _ = app.emit(
+        "proc-exit",
+        ProcExitEvent {
+            id,
+            version,
+            profile,
+            code: outcome.ok().flatten(),
+            stopped: false,
+        },
+    );
+}
+
+/// 停止指定进程（SIGKILL）；返回是否存在
+pub fn stop(state: &ProcState, id: u32) -> bool {
+    let mut guard = state.procs.lock().unwrap();
+    let Some(handle) = guard.remove(&id) else {
+        return false;
+    };
+    if let Some(mut c) = handle.child.lock().unwrap().take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    true
+}
+
+/// 停止所有内嵌进程（启动器退出时调用）
+pub fn stop_all(state: &ProcState) {
+    let mut guard = state.procs.lock().unwrap();
+    for (_, handle) in guard.iter_mut() {
+        if let Some(mut c) = handle.child.lock().unwrap().take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+    guard.clear();
+}
+
+/// 列出仍在运行的进程
+pub fn list(state: &ProcState) -> Vec<ProcInfo> {
+    let guard = state.procs.lock().unwrap();
+    let mut out: Vec<ProcInfo> = guard
+        .iter()
+        .map(|(id, h)| ProcInfo {
+            id: *id,
+            version: h.version.clone(),
+            profile: h.profile.clone(),
+            started_at: h
+                .started_at
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            running: true,
+        })
+        .collect();
+    out.sort_by_key(|p| p.id);
+    out
+}

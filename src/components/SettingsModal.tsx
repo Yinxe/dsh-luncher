@@ -53,6 +53,20 @@ export default function SettingsModal({ initial, env, onSave, onClose, onReveal 
         </div>
 
         <div className="field">
+          <label>Node 运行时镜像站（「一键安装 Node」下载用）</label>
+          <input
+            type="text"
+            value={draft.nodeMirror}
+            placeholder="https://npmmirror.com/mirrors/node"
+            onChange={(e) => set("nodeMirror", e.target.value)}
+          />
+          <div className="hint">
+            国内推荐 https://npmmirror.com/mirrors/node 或
+            https://mirrors.aliyun.com/nodejs-release
+          </div>
+        </div>
+
+        <div className="field">
           <label>终端模拟器（留空自动选择；Linux 下生效）</label>
           <input
             type="text"

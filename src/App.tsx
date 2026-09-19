@@ -6,12 +6,16 @@ import type {
   EnvironmentInfo,
   InstalledVersion,
   LauncherUpdateStatus,
+  ProcEntry,
+  ProcExitEvent,
+  ProcLogEvent,
   ProfileInfo,
   RegistryInfo,
   Settings,
   Toast,
 } from "./types";
 import InstallCard from "./components/InstallCard";
+import ProcessDock from "./components/ProcessDock";
 import SettingsModal from "./components/SettingsModal";
 import UpdateBanner from "./components/UpdateBanner";
 import VersionRow, { mergeRows } from "./components/VersionRow";
@@ -35,10 +39,21 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
   const [selectedProfile, setSelectedProfile] = useState("");
+  const [procs, setProcs] = useState<Record<number, ProcEntry>>({});
+  const [activeProc, setActiveProc] = useState<number | null>(null);
+  const [dockOpen, setDockOpen] = useState(true);
+  const [runtimeJob, setRuntimeJob] = useState<{
+    received: number;
+    total: number;
+    log: string[];
+  } | null>(null);
+  const runtimeBusy = useRef(false);
 
   const pendingLaunch = useRef<string | null>(null);
   const profileRef = useRef<string>("");
   profileRef.current = selectedProfile;
+  const procsRef = useRef<Record<number, ProcEntry>>({});
+  procsRef.current = procs;
   const builtinUpdate = useRef<Update | null>(null);
   const installedRef = useRef<InstalledVersion[]>([]);
   installedRef.current = installed;
@@ -115,9 +130,10 @@ export default function App() {
   // ── 事件订阅 ────────────────────────────────
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
-    const track = (p: Promise<() => void>) => p.then((u) => unlisteners.push(u)).catch(() => undefined);
+    const track = (p?: Promise<() => void>) =>
+      p?.then((u) => unlisteners.push(u)).catch(() => undefined);
     track(
-      events.onInstallLog((e) => {
+      events.onInstallLog?.((e) => {
         setInstallJob((job) =>
           job && job.version === e.version
             ? { ...job, logs: [...job.logs.slice(-400), e.line] }
@@ -126,27 +142,75 @@ export default function App() {
       })
     );
     track(
-      events.onInstallFinished(async (e) => {
+      events.onInstallFinished?.(async (e) => {
         setInstallJob((job) => (job && job.version === e.version ? null : job));
         if (e.success) {
           addToast("ok", `dsh ${e.version} 安装完成`);
           await refreshInstalled();
           if (pendingLaunch.current === e.version) {
             pendingLaunch.current = null;
-            try {
-              const r = await api.launch(e.version, null, profileRef.current);
-              addToast(r.ok ? "ok" : "err", r.message);
-            } catch (err) {
-              addToast("err", `启动失败: ${err}`);
-            }
+            doLaunch(e.version);
           }
         } else {
           addToast("err", `dsh ${e.version} 安装失败：${e.message.split("\n")[0]}`);
         }
       })
     );
-    track(events.onLauncherUpdate((s) => setUpdate(s)));
-    track(events.onToast((text) => addToast("err", text)));
+    track(events.onLauncherUpdate?.((s) => setUpdate(s)));
+    track(
+      events.onProcLog?.((e: ProcLogEvent) => {
+        setProcs((m) => {
+          const old =
+            m[e.id] ??
+            ({
+              id: e.id,
+              version: e.version,
+              profile: e.profile,
+              startedAt: Date.now(),
+              lines: [],
+              exited: false,
+              code: null,
+            } as ProcEntry);
+          return {
+            ...m,
+            [e.id]: { ...old, lines: [...old.lines.slice(-500), e.line] },
+          };
+        });
+        setActiveProc((a) => a ?? e.id);
+      })
+    );
+    track(
+      events.onProcExit?.((e: ProcExitEvent) => {
+        setProcs((m) => {
+          const old = m[e.id];
+          if (!old) return m;
+          return { ...m, [e.id]: { ...old, exited: true, code: e.code } };
+        });
+        const tag = e.profile ? ` (${e.profile})` : "";
+        if (e.code == null) {
+          addToast("info", `dsh ${e.version}${tag} 已停止`);
+        } else if (e.code === 0) {
+          addToast("ok", `dsh ${e.version}${tag} 正常退出`);
+        } else {
+          addToast("err", `dsh ${e.version}${tag} 已退出，退出码 ${e.code}`);
+        }
+      })
+    );
+    track(events.onRuntimeLog?.((line) =>
+      setRuntimeJob((j) => (j ? { ...j, log: [...j.log.slice(-20), line] } : j))
+    ));
+    track(
+      events.onRuntimeProgress?.((e) =>
+        setRuntimeJob((j) => (j ? { ...j, received: e.received, total: e.total } : j))
+      )
+    );
+    track(
+      events.onRuntimeFinished?.((e) => {
+        addToast(e.ok ? "ok" : "err", e.message);
+        if (!e.ok) setRuntimeJob(null);
+      })
+    );
+    track(events.onToast?.((text) => addToast("err", text)));
     return () => {
       for (const u of unlisteners) u();
     };
@@ -171,6 +235,32 @@ export default function App() {
   const doLaunch = useCallback(
     async (version: string) => {
       try {
+        const info = await api.startEmbedded(version, profileRef.current);
+        setProcs((m) => ({
+          ...m,
+          [info.id]: {
+            id: info.id,
+            version: info.version,
+            profile: info.profile,
+            startedAt: info.startedAt,
+            lines: [],
+            exited: false,
+            code: null,
+          },
+        }));
+        setActiveProc(info.id);
+        setDockOpen(true);
+        addToast("ok", `dsh ${info.version} 已内嵌启动（PID ${info.id}）`);
+      } catch (e) {
+        addToast("err", `启动失败: ${e}`);
+      }
+    },
+    [addToast]
+  );
+
+  const doTerminal = useCallback(
+    async (version: string) => {
+      try {
         const r = await api.launch(version, null, profileRef.current);
         addToast(r.ok ? "ok" : "err", r.message);
       } catch (e) {
@@ -179,6 +269,34 @@ export default function App() {
     },
     [addToast]
   );
+
+  const doStopProc = useCallback(
+    async (id: number) => {
+      try {
+        await api.stopProcess(id);
+        addToast("info", `已请求停止进程 ${id}`);
+      } catch (e) {
+        addToast("err", `停止失败: ${e}`);
+      }
+    },
+    [addToast]
+  );
+
+  const doInstallRuntime = useCallback(async () => {
+    if (runtimeBusy.current) return;
+    runtimeBusy.current = true;
+    setRuntimeJob({ received: 0, total: 0, log: [] });
+    try {
+      const msg = await api.installRuntime();
+      addToast("ok", msg);
+      setEnv(await api.getEnvironment());
+    } catch (e) {
+      addToast("err", String(e));
+    } finally {
+      runtimeBusy.current = false;
+      setRuntimeJob(null);
+    }
+  }, [addToast]);
 
   const changeProfile = useCallback(
     async (name: string) => {
@@ -373,6 +491,37 @@ export default function App() {
         />
       )}
 
+      {env && !env.node && (
+        <div className="banner err">
+          {runtimeJob ? (
+            <>
+              <span>
+                正在安装内置 Node…
+                {runtimeJob.total > 0 &&
+                  ` ${Math.round((runtimeJob.received / runtimeJob.total) * 100)}% (${(
+                    runtimeJob.received / 1048576
+                  ).toFixed(1)}/${(runtimeJob.total / 1048576).toFixed(1)} MB)`}
+              </span>
+              <span className="grow" />
+              <span className="mono" style={{ fontSize: 11 }}>
+                {runtimeJob.log[runtimeJob.log.length - 1] ?? "连接镜像站…"}
+              </span>
+            </>
+          ) : (
+            <>
+              <span>
+                ⚠ 未检测到 Node.js（dsh 依赖 Node 运行）。可一键安装启动器内置 Node
+                LTS（用户级安装，无需 root；下载默认走 npmmirror 镜像）
+              </span>
+              <span className="grow" />
+              <button className="primary sm" onClick={doInstallRuntime}>
+                一键安装 Node
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {/* 主区 */}
       <div className="main">
         <div className="filters">
@@ -448,7 +597,16 @@ export default function App() {
               row={r}
               isLatestTag={latestVersion === r.version}
               busy={installJob !== null}
+              runningProcs={Object.values(procs).filter(
+                (p) => p.version === r.version && !p.exited
+              )}
               onLaunch={doLaunch}
+              onTerminal={doTerminal}
+              onShowProc={(id) => {
+                setActiveProc(id);
+                setDockOpen(true);
+              }}
+              onStopProc={doStopProc}
               onInstall={(v) => {
                 pendingLaunch.current = null;
                 doInstall(v, false);
@@ -460,10 +618,30 @@ export default function App() {
         </div>
       </div>
 
+      <ProcessDock
+        procs={Object.values(procs).sort((a, b) => a.id - b.id)}
+        activeId={activeProc}
+        open={dockOpen}
+        onToggle={() => setDockOpen((v) => !v)}
+        onSelect={setActiveProc}
+        onStop={doStopProc}
+        onClearExited={() => {
+          const next = Object.fromEntries(
+            Object.entries(procsRef.current).filter(([, p]) => !p.exited)
+          ) as Record<number, ProcEntry>;
+          setProcs(next);
+          setActiveProc((a) =>
+            a != null && next[a] ? a : (Object.values(next)[0]?.id ?? null)
+          );
+        }}
+      />
+
       <div className="statusbar">
         <span>官方源 npm:{env.registry}</span>
         <span className="mono">dsh 数据目录 {env.dshHome}</span>
-        <span style={{ marginLeft: "auto" }}>关闭窗口会最小化到托盘，托盘菜单可退出</span>
+        <span style={{ marginLeft: "auto" }}>
+          「启动」为内嵌运行：退出启动器会结束所有 dsh 进程；关闭窗口最小化到托盘
+        </span>
       </div>
 
       {showSettings && (

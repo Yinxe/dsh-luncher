@@ -62,7 +62,7 @@ pub fn spawn_command(program: &Path, args: &[String]) -> Command {
     c
 }
 
-/// 探测 node 可执行文件：设置覆盖 → PATH → 常见位置 → nvm 目录（按版本取最新）
+/// 探测 node 可执行文件：设置覆盖 → 启动器内置运行时 → PATH → 常见位置 → nvm
 pub fn find_node(override_path: &str) -> Option<PathBuf> {
     let o = override_path.trim();
     if !o.is_empty() {
@@ -70,6 +70,9 @@ pub fn find_node(override_path: &str) -> Option<PathBuf> {
         if p.is_file() {
             return Some(p);
         }
+    }
+    if let Some(p) = crate::runtime::runtime_node() {
+        return Some(p);
     }
     if let Some(p) = which("node") {
         return Some(p);

@@ -41,6 +41,8 @@ export interface EnvironmentInfo {
   registry: string;
   dshNativeHome: string;
   profilesDir: string;
+  runtimeInstalled: boolean;
+  runtimeDir: string;
 }
 
 export interface Settings {
@@ -53,6 +55,8 @@ export interface Settings {
   autoCheckUpdate: boolean;
   autoCheckVersions: boolean;
   nodePath: string;
+  /** 内置 Node 运行时下载镜像站 */
+  nodeMirror: string;
   closeToTray: boolean;
 }
 
@@ -79,6 +83,51 @@ export interface LauncherUpdateStatus {
 }
 
 export interface LaunchResult {
+  ok: boolean;
+  message: string;
+}
+
+export interface ProcInfo {
+  id: number;
+  version: string;
+  profile: string;
+  startedAt: number;
+  running: boolean;
+}
+
+export interface ProcLogEvent {
+  id: number;
+  version: string;
+  profile: string;
+  line: string;
+  stream: string;
+}
+
+export interface ProcExitEvent {
+  id: number;
+  version: string;
+  profile: string;
+  code: number | null;
+  stopped: boolean;
+}
+
+/** 前端维护的单个内嵌 dsh 进程视图状态 */
+export interface ProcEntry {
+  id: number;
+  version: string;
+  profile: string;
+  startedAt: number;
+  lines: string[];
+  exited: boolean;
+  code: number | null;
+}
+
+export interface RuntimeProgressEvent {
+  received: number;
+  total: number;
+}
+
+export interface RuntimeFinishedEvent {
   ok: boolean;
   message: string;
 }
