@@ -27,7 +27,10 @@ export default function PluginsView({ profiles, onToast }: Props) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!profile && profiles.length > 0) setProfile(profiles[0]);
+    // 默认选中 web（与启动器整体默认一致）；不存在才取第一个
+    if (!profile && profiles.length > 0) {
+      setProfile(profiles.includes("web") ? "web" : profiles[0]);
+    }
   }, [profiles, profile]);
 
   const reload = useCallback(async () => {
