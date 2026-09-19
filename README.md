@@ -62,7 +62,7 @@ npm run app            # 开发模式（tauri dev，vite 热更新）
 npm run build:debug    # 调试版二进制（内嵌前端，不产安装包）
 npm run build:release  # 正式版二进制（内嵌前端，不产安装包）
 npm run start          # 启动桌面应用（release 二进制不存在时自动先构建）
-npm run release        # 正式打包：deb / AppImage / dmg / nsis + updater 签名产物（按当前平台）
+npm run release        # 正式打包：deb / AppImage / dmg / nsis 安装包（按当前平台）
 ```
 
 前端单独构建检查：`npm run build`（tsc + vite）。
@@ -72,8 +72,9 @@ npm run release        # 正式打包：deb / AppImage / dmg / nsis + updater �
 ## 发布新版本（启动器自身）
 
 1. 改 `src-tauri/tauri.conf.json` 的 `version` 与 `src-tauri/Cargo.toml` 的 `version`；
-2. `npm run release` —— 产出安装包，`createUpdaterArtifacts` 会同时生成 updater 签名产物；
-3. 把安装包和 `latest.json`（Tauri updater 格式）发布到你的下载源，并同步更新自建清单 JSON 或 `plugins.updater.endpoints`。
+2. 在 `src-tauri/tauri.conf.json` 的 `plugins.updater` 里配好 `pubkey` / `endpoints`，并把 `bundle.createUpdaterArtifacts` 改回 `true`，然后设置 `TAURI_SIGNING_PRIVATE_KEY` 环境变量；
+3. `npm run release` —— 产出安装包，`createUpdaterArtifacts` 会同时生成 updater 签名产物；
+4. 把安装包和 `latest.json`（Tauri updater 格式）发布到你的下载源，并同步更新自建清单 JSON 或 `plugins.updater.endpoints`。
 
 ## 已知边界
 
