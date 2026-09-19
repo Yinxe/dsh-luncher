@@ -258,25 +258,35 @@ pub async fn start_embedded(
 ) -> Result<crate::procs::ProcInfo, String> {
     let settings = state.settings.lock().unwrap().clone();
     let proc_state = procs.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let installed = crate::installed::collect_installed(&settings);
-        let target = resolve_target(&installed, version.as_deref(), &settings.active_version)?;
-        let launch_args = args
-            .or_else(|| Some(settings.default_args.clone()))
-            .unwrap_or_default();
-        let profile = profile.unwrap_or_else(|| settings.default_profile.clone());
-        // 全局唯一性守卫：同一 profile（无论内嵌还是外部启动）只能有一个实例
-        if let Err(msg) = ensure_profile_free(&proc_state, &profile) {
-            return Err(msg);
+
+    // 1) 解析目标版本 + profile 唯一性守卫（线程池执行）
+    let prep = tauri::async_runtime::spawn_blocking({
+        let settings = settings.clone();
+        let proc_state = proc_state.clone();
+        move || {
+            let installed = crate::installed::collect_installed(&settings);
+            let target = resolve_target(&installed, version.as_deref(), &settings.active_version)?;
+            let launch_args = args
+                .or_else(|| Some(settings.default_args.clone()))
+                .unwrap_or_default();
+            let profile = profile.unwrap_or_else(|| settings.default_profile.clone());
+            // 全局唯一性守卫：同一 profile（无论内嵌还是外部启动）只能有一个实例
+            if let Err(msg) = ensure_profile_free(&proc_state, &profile) {
+                return Err(msg);
+            }
+            Ok((target, profile, launch_args))
         }
-        crate::procs::spawn_embedded(
-            app,
-            &proc_state,
-            &settings,
-            &target,
-            &profile,
-            &launch_args,
-        )
+    })
+    .await
+    .map_err(|e| format!("启动失败: {e}"))??;
+
+    // 2) keeper 线程 spawn dsh 并守候退出（线程存活期 == 子进程存活期，
+    //    PDEATHSIG 绑定的是该线程，不能放进约 10s 就回收的 tokio 线程池）
+    let rx = crate::procs::spawn_keeper(app, proc_state, settings, prep.0, prep.1, prep.2);
+
+    // 3) 等待 spawn 结果
+    tauri::async_runtime::spawn_blocking(move || {
+        rx.recv().map_err(|e| format!("dsh keeper 线程异常: {e}"))?
     })
     .await
     .map_err(|e| format!("启动失败: {e}"))?

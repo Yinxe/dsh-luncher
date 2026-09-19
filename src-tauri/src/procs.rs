@@ -69,7 +69,10 @@ fn emit_log(app: &AppHandle, ev: &ProcLogEvent) {
     let _ = app.emit("proc-log", ev);
 }
 
-/// 以启动器子进程方式运行 dsh（stdin 关闭、stdout/stderr 管道回传日志）
+/// 以启动器子进程方式运行 dsh（stdin 关闭、stdout/stderr 管道回传日志）。
+///
+/// 必须在**专属常驻线程**中调用（见 `spawn_keeper`）：PDEATHSIG 绑定的是 fork
+/// 它的线程，tokio spawn_blocking 的工作线程约 10s 就会被回收，会把 dsh 一起杀掉。
 pub fn spawn_embedded(
     app: AppHandle,
     state: &ProcState,
@@ -144,10 +147,6 @@ pub fn spawn_embedded(
 
     state.procs.lock().unwrap().insert(id, handle);
 
-    let st = state.clone();
-    let app2 = app.clone();
-    std::thread::spawn(move || wait_exit(app2, st, id));
-
     Ok(ProcInfo {
         id,
         version: target.version.clone(),
@@ -155,6 +154,37 @@ pub fn spawn_embedded(
         started_at: now_millis(),
         running: true,
     })
+}
+
+/// 在专属 keeper 线程中 spawn dsh 并守候其退出。
+/// 线程存活期 == 子进程存活期，保证 PDEATHSIG 不会提前误杀（tokio 线程约 10s 回收）。
+/// 返回接收结果的 channel；spawn 结果（含错误）通过它回传。
+pub fn spawn_keeper(
+    app: AppHandle,
+    state: ProcState,
+    settings: Settings,
+    target: InstalledVersion,
+    profile: String,
+    args: String,
+) -> std::sync::mpsc::Receiver<Result<ProcInfo, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("dsh-keeper".into())
+        .spawn(move || {
+            let result = spawn_embedded(app.clone(), &state, &settings, &target, &profile, &args);
+            match result {
+                Ok(info) => {
+                    let _ = tx.send(Ok(info.clone()));
+                    // 阻塞到子进程退出；期间本线程不能结束，否则 PDEATHSIG 会误杀子进程
+                    wait_exit(app, state, info.id);
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                }
+            }
+        })
+        .expect("创建 dsh keeper 线程失败");
+    rx
 }
 
 fn spawn_reader<R: std::io::Read + Send + 'static>(
