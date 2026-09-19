@@ -97,15 +97,26 @@ export default function App() {
     (async () => {
       try {
         const s = await api.getSettings();
-        setSettings(s);
-        setSelectedProfile(s.defaultProfile ?? "");
-        const [e, installedList] = await Promise.all([
+        const [e, installedList, ps] = await Promise.all([
           api.getEnvironment(),
           api.listInstalled(),
+          api.listProfiles().catch(() => [] as ProfileInfo[]),
         ]);
+        setProfiles(ps);
+        // 不提供“默认 profile”空选项：默认选中 web，其次取第一个
+        const def =
+          s.defaultProfile ||
+          (ps.some((p) => p.name === "web") ? "web" : (ps[0]?.name ?? ""));
+        setSelectedProfile(def);
+        if (s.defaultProfile !== def) {
+          const next = { ...s, defaultProfile: def };
+          setSettings(next);
+          api.saveSettings(next).catch(() => undefined);
+        } else {
+          setSettings(s);
+        }
         setEnv(e);
         setInstalled(installedList);
-        refreshProfiles();
         if (s.autoCheckVersions) refreshRemote();
         if (s.autoCheckUpdate) {
           api
@@ -421,6 +432,15 @@ export default function App() {
 
   const latestVersion = remote?.tags?.latest;
 
+  const busyProfiles = useMemo(() => {
+    const s = new Set<string>();
+    for (const p of Object.values(procs)) {
+      if (!p.exited && p.profile) s.add(p.profile);
+    }
+    return s;
+  }, [procs]);
+  const profileBusy = selectedProfile !== "" && busyProfiles.has(selectedProfile);
+
   if (!settings || !env) {
     return (
       <div className="layout">
@@ -458,16 +478,17 @@ export default function App() {
           <select
             className="prof-select"
             value={selectedProfile}
-            title={`Profile 目录：${env.profilesDir}\n点击可重新扫描`}
+            title={`Profile 目录：${env.profilesDir}\n点击可重新扫描；每个 profile 同时只能运行一个实例`}
             onClick={() => refreshProfiles()}
             onChange={(e) => changeProfile(e.target.value)}
           >
-            <option value="">默认 profile</option>
-            {profiles.length === 0 && <option disabled>（未找到 profile）</option>}
+            {profiles.length === 0 && <option value="" disabled>（未找到 profile）</option>}
+            {selectedProfile && !profiles.some((p) => p.name === selectedProfile) && (
+              <option value={selectedProfile}>{selectedProfile}（目录中已不存在）</option>
+            )}
             {profiles.map((p) => (
               <option key={p.path} value={p.name}>
                 {p.name}
-                {p.kind === "file" ? "  ·yaml" : ""}
               </option>
             ))}
           </select>
@@ -600,6 +621,7 @@ export default function App() {
               runningProcs={Object.values(procs).filter(
                 (p) => p.version === r.version && !p.exited
               )}
+              profileBusy={profileBusy}
               onLaunch={doLaunch}
               onTerminal={doTerminal}
               onShowProc={(id) => {

@@ -88,7 +88,8 @@ export default function SettingsModal({ initial, env, onSave, onClose, onReveal 
             onChange={(e) => set("defaultArgs", e.target.value)}
           />
           <div className="hint">
-            profile 在顶栏下拉框选择（扫描 $DSH_HOME/profiles 或 ~/.dsh/profiles），选中即保存为默认
+            profile 在顶栏下拉框选择（扫描 $DSH_HOME/profiles，默认选中 web），选中即保存为默认；
+            每个 profile 同时只能运行一个实例
           </div>
         </div>
 

@@ -91,6 +91,8 @@ interface Props {
   isLatestTag: boolean;
   busy: boolean;
   runningProcs: ProcEntry[];
+  /** 当前选中的 profile 已有实例在运行 */
+  profileBusy: boolean;
   onLaunch: (version: string) => void;
   onTerminal: (version: string) => void;
   onShowProc: (id: number) => void;
@@ -105,6 +107,7 @@ export default function VersionRow({
   isLatestTag,
   busy,
   runningProcs,
+  profileBusy,
   onLaunch,
   onTerminal,
   onShowProc,
@@ -159,8 +162,13 @@ export default function VersionRow({
         {inst && inst.version !== "unknown" && (
           <button
             className="primary"
+            disabled={profileBusy}
             onClick={() => onLaunch(row.version)}
-            title="内嵌启动：进程随启动器生命周期，日志在下方面板查看"
+            title={
+              profileBusy
+                ? "选中的 profile 已有实例在运行，每个 profile 同时只能运行一个"
+                : "内嵌启动：进程随启动器生命周期，日志在下方面板查看"
+            }
           >
             启动
           </button>
@@ -221,8 +229,13 @@ export default function VersionRow({
         )}
         <button
           className="sm ghost"
+          disabled={profileBusy}
           onClick={() => onTerminal(row.version)}
-          title="在独立系统终端窗口中启动（不受启动器生命周期管理，可交互）"
+          title={
+            profileBusy
+              ? "该 profile 已有实例在运行，每个 profile 同时只能运行一个"
+              : "在独立系统终端窗口中启动（不受启动器生命周期管理，可交互）"
+          }
         >
           终端
         </button>

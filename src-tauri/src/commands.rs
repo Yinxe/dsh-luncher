@@ -150,12 +150,14 @@ pub fn uninstall_version(version: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn launch_version(
     state: State<'_, AppState>,
+    procs: State<'_, crate::procs::ProcState>,
     version: Option<String>,
     args: Option<String>,
     // Some("") = 用户显式选择“默认 profile”；None 时回退到设置里的 default_profile
     profile: Option<String>,
 ) -> Result<LaunchResult, String> {
     let settings = state.settings.lock().unwrap().clone();
+    let proc_state = procs.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let installed = crate::installed::collect_installed(&settings);
         let target = match version.as_deref() {
@@ -171,6 +173,18 @@ pub async fn launch_version(
             .or(Some(settings.default_args.clone()))
             .unwrap_or_default();
         let profile = profile.unwrap_or_else(|| settings.default_profile.clone());
+        // 每个 profile 同时只能有一个实例（内嵌与终端启动共用该约束）
+        let prof = profile.trim();
+        if !prof.is_empty() {
+            for p in crate::procs::list(&proc_state) {
+                if p.profile == prof {
+                    return Err(format!(
+                        "profile 「{prof}」已在运行（PID {}），每个 profile 同时只能启动一个实例",
+                        p.id
+                    ));
+                }
+            }
+        }
         Ok(launcher::launch(
             &settings,
             &target,
@@ -216,6 +230,18 @@ pub async fn start_embedded(
             .or(Some(settings.default_args.clone()))
             .unwrap_or_default();
         let profile = profile.unwrap_or_else(|| settings.default_profile.clone());
+        // 每个 profile 同时只能有一个实例
+        let prof = profile.trim();
+        if !prof.is_empty() {
+            for p in crate::procs::list(&proc_state) {
+                if p.profile == prof {
+                    return Err(format!(
+                        "profile 「{prof}」已在运行（PID {}），每个 profile 同时只能启动一个实例",
+                        p.id
+                    ));
+                }
+            }
+        }
         crate::procs::spawn_embedded(
             app,
             &proc_state,
