@@ -13,6 +13,9 @@ import type {
   ProfileInfo,
   ProfileInstance,
   ProfileDetail,
+  PackageSearchItem,
+  PluginUpdateInfo,
+  GitHubRepoInfo,
   PluginJobEvent,
   RegistryInfo,
   RuntimeFinishedEvent,
@@ -20,6 +23,8 @@ import type {
   Settings,
   WebQuickConfig,
   WebQuickConfigInput,
+  CredentialFile,
+  CredentialRef,
 } from "./types";
 
 export const api = {
@@ -36,8 +41,13 @@ export const api = {
   uninstall: (version: string) => invoke<void>("uninstall_version", { version }),
   launch: (version: string | null, args?: string | null, profile?: string | null) =>
     invoke<LaunchResult>("launch_version", { version, args, profile }),
-  startEmbedded: (version: string | null, profile?: string | null, args?: string | null) =>
-    invoke<ProcInfo>("start_embedded", { version, profile, args }),
+  startEmbedded: (
+    version: string | null,
+    profile?: string | null,
+    args?: string | null,
+    detached?: boolean,
+  ) =>
+    invoke<ProcInfo>("start_embedded", { version, profile, args, detached }),
   stopProcess: (id: number) => invoke<boolean>("stop_process", { id }),
   listProcesses: () => invoke<ProcInfo[]>("list_processes"),
   listProfileInstances: () => invoke<ProfileInstance[]>("list_profile_instances"),
@@ -62,8 +72,19 @@ export const api = {
     invoke<WebQuickConfig>("get_web_quick_config", { profile }),
   setWebQuickConfig: (profile: string, config: WebQuickConfigInput) =>
     invoke<void>("set_web_quick_config", { profile, config }),
+  copyProfile: (source: string, newName: string) =>
+    invoke<void>("copy_profile", { source, newName }),
+  searchPackages: (query: string) =>
+    invoke<PackageSearchItem[]>("search_registry_packages", { query }),
+  checkPluginUpdates: (profile: string) =>
+    invoke<PluginUpdateInfo[]>("check_plugin_updates", { profile }),
+  fetchGithubRepo: (repo: string) =>
+    invoke<GitHubRepoInfo>("fetch_github_repo", { repo }),
   readGlobalConfig: () => invoke<string>("read_global_config"),
   writeGlobalConfig: (content: string) => invoke<void>("write_global_config", { content }),
+  getCredentials: () => invoke<CredentialFile>("get_credentials"),
+  writeCredentialRefs: (refs: CredentialRef[]) =>
+    invoke<void>("write_credential_refs", { refs }),
   listProfiles: () => invoke<ProfileInfo[]>("list_profiles"),
   reveal: (path: string) => invoke<void>("reveal_folder", { path }),
   openUrl: (url: string) => invoke<void>("open_external", { url }),

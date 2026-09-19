@@ -299,7 +299,9 @@ fn resolve_target(
     }
 }
 
-/// 内嵌启动：dsh 作为启动器子进程运行，日志回传界面，启动器退出即全部结束
+/// 启动 dsh：detached=false 子进程（日志回传界面，启动器退出即结束）；
+/// detached=true 独立进程（自成进程组、日志写文件，启动器退出后继续运行，重启后由扫描识别）。
+/// 缺省跟随设置里的 launchMode。
 #[tauri::command]
 pub async fn start_embedded(
     app: AppHandle,
@@ -308,9 +310,11 @@ pub async fn start_embedded(
     version: Option<String>,
     profile: Option<String>,
     args: Option<String>,
+    detached: Option<bool>,
 ) -> Result<crate::procs::ProcInfo, String> {
     let settings = state.settings.lock().unwrap().clone();
     let proc_state = procs.inner().clone();
+    let detached = detached.unwrap_or(settings.launch_mode == "detached");
 
     // 1) 解析目标版本 + profile 唯一性守卫（线程池执行）
     let prep = tauri::async_runtime::spawn_blocking({
@@ -333,11 +337,20 @@ pub async fn start_embedded(
     .await
     .map_err(|e| format!("启动失败: {e}"))??;
 
-    // 2) keeper 线程 spawn dsh 并守候退出（线程存活期 == 子进程存活期，
+    // 2) 独立进程：直接 spawn（无 keeper、无日志管道），实例由 /proc 扫描感知
+    if detached {
+        return tauri::async_runtime::spawn_blocking(move || {
+            crate::procs::spawn_detached(&settings, &prep.0, &prep.1, &prep.2)
+        })
+        .await
+        .map_err(|e| format!("启动失败: {e}"))?;
+    }
+
+    // 3) keeper 线程 spawn dsh 并守候退出（线程存活期 == 子进程存活期，
     //    PDEATHSIG 绑定的是该线程，不能放进约 10s 就回收的 tokio 线程池）
     let rx = crate::procs::spawn_keeper(app, proc_state, settings, prep.0, prep.1, prep.2);
 
-    // 3) 等待 spawn 结果
+    // 4) 等待 spawn 结果
     tauri::async_runtime::spawn_blocking(move || {
         rx.recv().map_err(|e| format!("dsh keeper 线程异常: {e}"))?
     })
@@ -359,6 +372,15 @@ fn ensure_profile_free(
             return Err(format!(
                 "profile 「{prof}」已在运行（PID {}），每个 profile 同时只能启动一个实例",
                 p.id
+            ));
+        }
+    }
+    // 独立进程注册表（macOS/Windows 没有 /proc，唯一性守卫跨平台依赖它）
+    for r in crate::procs::validate_detached_registry() {
+        if r.profile == prof {
+            return Err(format!(
+                "独立进程 profile 「{prof}」正在运行（PID {}），每个 profile 同时只能启动一个实例",
+                r.pid
             ));
         }
     }
@@ -506,6 +528,34 @@ pub fn set_web_quick_config(
 }
 
 #[tauri::command]
+pub fn copy_profile(source: String, new_name: String) -> Result<(), String> {
+    crate::profile_cfg::copy_profile(&source, &new_name)
+}
+
+#[tauri::command]
+pub async fn search_registry_packages(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<Vec<crate::registry::PackageSearchItem>, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    crate::registry::search_packages(&settings.registry, &query).await
+}
+
+#[tauri::command]
+pub async fn fetch_github_repo(repo: String) -> Result<crate::registry::GitHubRepoInfo, String> {
+    crate::registry::fetch_github_repo(&repo).await
+}
+
+#[tauri::command]
+pub async fn check_plugin_updates(
+    state: State<'_, AppState>,
+    profile: String,
+) -> Result<Vec<crate::profile_cfg::PluginUpdateInfo>, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    crate::profile_cfg::check_plugin_updates(&settings.registry, &profile).await
+}
+
+#[tauri::command]
 pub fn read_global_config() -> Result<String, String> {
     crate::profile_cfg::read_global_config()
 }
@@ -513,6 +563,19 @@ pub fn read_global_config() -> Result<String, String> {
 #[tauri::command]
 pub fn write_global_config(content: String) -> Result<(), String> {
     crate::profile_cfg::write_global_config(&content)
+}
+
+#[tauri::command]
+pub fn get_credentials() -> Result<crate::credentials::CredentialFile, String> {
+    crate::credentials::read()
+}
+
+/// 整表保存凭据 refs（records / version 等其余顶层键原样保留，写前自动备份）
+#[tauri::command]
+pub fn write_credential_refs(
+    refs: Vec<crate::credentials::CredentialRefInput>,
+) -> Result<(), String> {
+    crate::credentials::write_refs(&refs)
 }
 
 #[tauri::command]

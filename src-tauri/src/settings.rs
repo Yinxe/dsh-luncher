@@ -31,6 +31,8 @@ pub struct Settings {
     pub node_mirror: String,
     /// 点击关闭按钮时隐藏到托盘而不是退出
     pub close_to_tray: bool,
+    /// Profile 启动方式：child=子进程（随启动器退出）| detached=独立进程（后台常驻）
+    pub launch_mode: String,
 }
 
 impl Default for Settings {
@@ -48,6 +50,7 @@ impl Default for Settings {
             node_source: "auto".into(),
             node_mirror: "https://npmmirror.com/mirrors/node".into(),
             close_to_tray: true,
+            launch_mode: "child".into(),
         }
     }
 }

@@ -67,6 +67,8 @@ export interface Settings {
   /** 内置 Node 运行时下载镜像站 */
   nodeMirror: string;
   closeToTray: boolean;
+  /** Profile 启动方式：child=子进程（随启动器退出）| detached=独立进程（后台常驻） */
+  launchMode: string;
 }
 
 export interface InstallLogEvent {
@@ -147,7 +149,8 @@ export interface ProfileInstance {
   profile: string;
   running: boolean;
   pid: number | null;
-  source: "embedded" | "external" | null;
+  /** embedded=启动器子进程 | external=终端/外部启动 | detached=启动器派生的独立进程 */
+  source: string | null;
   version: string | null;
 }
 
@@ -174,12 +177,64 @@ export interface PatchEntryInfo {
   items: PatchItemInfo[];
 }
 
+/** dependencies 里的一个直接依赖（isBundle=false 即「装了但不是插件」的包，可手动卸载） */
+export interface PackageDepInfo {
+  name: string;
+  version: string | null;
+  source: string;
+  isBundle: boolean;
+}
+
 export interface ProfileDetail {
   profile: string;
   exists: boolean;
   bundles: BundleInfo[];
+  packages: PackageDepInfo[];
   patchRaw: string;
   patchEntries: PatchEntryInfo[];
+}
+
+/** npm registry 搜索结果（安装对话框：先搜索 → 看描述 → 再安装） */
+export interface PackageSearchItem {
+  name: string;
+  version: string;
+  description: string | null;
+  publishedAt: string | null;
+  link: string | null;
+}
+
+/** GitHub 插件来源预览（安装前校验：插件根目录必须含 lib/） */
+export interface GitHubRepoInfo {
+  fullName: string;
+  description: string | null;
+  stars: number;
+  pushedAt: string | null;
+  htmlUrl: string;
+  license: string | null;
+  gitRef: string | null;
+  /** 插件在仓库内的路径（插件根目录） */
+  pluginPath: string | null;
+  /** lib/ 目录校验：true=已确认存在 false=确认缺失 null=未校验（打包产物直装） */
+  libOk: boolean | null;
+  /** 最终交给 dsh plugin add 的安装规格（github:owner/repo#ref&path:xx 或打包产物 URL） */
+  installSpec: string;
+}
+
+/** 插件更新检测结果（npm 比对版本号；GitHub 比对提交哈希；本地源跳过） */
+export interface PluginUpdateInfo {
+  name: string;
+  source: string;
+  spec: string;
+  hasUpdate: boolean;
+  checked: boolean;
+  installedVersion: string | null;
+  latestVersion: string | null;
+  repo: string | null;
+  installedCommit: string | null;
+  remoteCommit: string | null;
+  /** 可直接交给 dsh plugin add 的升级规格（npm=包名@latest；git=去 sha 的 github 规格） */
+  updateSpec: string | null;
+  note: string | null;
 }
 
 /** web 快捷配置当前值（解析自 cordis.patch.yml；条目不存在 = *Present=false，键缺失 = null） */
@@ -195,12 +250,12 @@ export interface WebQuickConfig {
   cookieMaxAgeDays: number | null;
 }
 
-/** web 快捷配置保存载荷：三个 patch 条目由启动器整块生成（键成套写全，trustedHosts 联动 !!js 信任链） */
+/** web 快捷配置保存载荷：三个 patch 条目由启动器整块生成（键成套写全，trustedHosts 联动 !!js 信任链；
+ *  printUrl 不开放——启动器依赖启动日志识别访问地址，恒为 true） */
 export interface WebQuickConfigInput {
   host: string;
   port: number;
   openBrowser: boolean;
-  printUrl: boolean;
   surfaceContext: boolean;
   cookieMaxAgeDays: number;
 }
@@ -210,6 +265,29 @@ export interface PluginJobEvent {
   line: string;
   done: boolean;
   ok: boolean;
+}
+
+/** 凭据文件 ~/.dsh/.credentials.yaml 中 refs 的一条命名凭据 */
+export interface CredentialRef {
+  name: string;
+  value: string;
+}
+
+/** records 里的一条内部凭据记录（dsh 自管理，只读展示；secret 值不回传前端） */
+export interface CredentialRecord {
+  key: string;
+  kind: string | null;
+  secretLength: number | null;
+  payloadKeys: string[];
+}
+
+/** 凭据文件整体读取结果（文件不存在时 exists=false 而非报错） */
+export interface CredentialFile {
+  path: string;
+  exists: boolean;
+  version: number | null;
+  refs: CredentialRef[];
+  records: CredentialRecord[];
 }
 
 export interface Toast {

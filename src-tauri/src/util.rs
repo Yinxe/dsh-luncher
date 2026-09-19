@@ -10,6 +10,11 @@ pub struct NpmInvocation {
     pub args: Vec<String>,
 }
 
+/// DSH_HOME 是进程级环境变量，凡是临时改它的测试都必须串行执行；
+/// 各模块测试统一引用这把锁，避免并行互踩。
+#[cfg(test)]
+pub(crate) static DSH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn home_dir() -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var("USERPROFILE").ok().map(PathBuf::from)
@@ -238,6 +243,26 @@ pub fn bind_to_parent_lifetime(cmd: &mut Command) {
 pub fn bind_to_parent_lifetime(_cmd: &mut Command) {}
 
 /// 校验版本号字符串，防止路径穿越
+/// Windows：把 PowerShell 脚本编码为 -EncodedCommand 参数（base64 of UTF-16LE）。
+/// 编码命令不经 shell 层解释，彻底规避引号转义问题。
+#[cfg(windows)]
+pub fn ps_encoded_command(script: &str) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 pub fn is_safe_version(v: &str) -> bool {
     !v.is_empty()
         && v.len() <= 64

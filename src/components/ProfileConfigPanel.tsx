@@ -20,7 +20,6 @@ interface QuickForm {
   host: string;
   port: string;
   openBrowser: boolean;
-  printUrl: boolean;
   surfaceContext: boolean;
   cookieMaxAgeDays: string;
 }
@@ -31,7 +30,6 @@ function formFromQuick(q: WebQuickConfig | null): QuickForm {
     host: q?.host ?? "127.0.0.1",
     port: String(q?.port ?? 3080),
     openBrowser: q?.openBrowser ?? true,
-    printUrl: q?.printUrl ?? true,
     surfaceContext: q?.surfaceContext ?? true,
     cookieMaxAgeDays: String(q?.cookieMaxAgeDays ?? 30),
   };
@@ -115,7 +113,6 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
       host,
       port,
       openBrowser: form.openBrowser,
-      printUrl: form.printUrl,
       surfaceContext: form.surfaceContext,
       cookieMaxAgeDays: days,
     };
@@ -200,7 +197,6 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
             </div>
             {([
               ["openBrowser", "启动后自动打开浏览器", "关闭后等价于每次都加 --no-open"],
-              ["printUrl", "终端打印访问地址", "启动日志中输出可点击的 URL"],
               ["surfaceContext", "surface 上下文注入", "向会话暴露 web surface 上下文"],
             ] as const).map(([key, label, desc]) => (
               <div key={key} className="flex items-center gap-3">
@@ -213,6 +209,14 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
                 <span className="text-[10.5px] text-muted-foreground">{desc}</span>
               </div>
             ))}
+            {/* printUrl 不开放配置：启动器从启动日志 `dsh web: <url>` 识别访问地址，恒为 true */}
+            <div className="flex items-center gap-3 opacity-80">
+              <Switch id={`${profile}-printUrl`} checked disabled />
+              <Label htmlFor={`${profile}-printUrl`} className="text-xs">终端打印访问地址</Label>
+              <span className="text-[10.5px] text-muted-foreground">
+                固定开启，不可关闭——启动器依赖启动日志识别访问地址
+              </span>
+            </div>
           </div>
 
           {/* connection：会话凭证 */}

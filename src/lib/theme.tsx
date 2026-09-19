@@ -32,6 +32,16 @@ function apply(theme: Theme): "light" | "dark" {
   return resolved;
 }
 
+/** 短暂挂上 .theme-transitioning，让颜色属性获得 250ms 过渡（全平台统一的主题切换效果） */
+function withColorTransition(flush: () => void): void {
+  document.documentElement.classList.add("theme-transitioning");
+  flush();
+  window.setTimeout(
+    () => document.documentElement.classList.remove("theme-transitioning"),
+    300
+  );
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -44,7 +54,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => {
       if ((localStorage.getItem(STORAGE_KEY) ?? "system") === "system") {
-        setResolved(apply("system"));
+        withColorTransition(() => setResolved(apply("system")));
       }
     };
     mq.addEventListener("change", onChange);
@@ -54,7 +64,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const setTheme = useCallback((t: Theme) => {
     localStorage.setItem(STORAGE_KEY, t);
     setThemeState(t);
-    setResolved(apply(t));
+    withColorTransition(() => setResolved(apply(t)));
   }, []);
 
   return <Ctx.Provider value={{ theme, resolved, setTheme }}>{children}</Ctx.Provider>;

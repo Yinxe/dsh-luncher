@@ -4,10 +4,11 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import {
   Package, Rocket, Puzzle, FileCog, RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
-  TriangleAlert, ChevronDown,
+  TriangleAlert, ChevronDown, CopyPlus, KeyRound, Info,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
+import dshLogo from "./assets/dsh-logo.svg";
 import { useTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -18,6 +19,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import ProfileConfigPanel from "./components/ProfileConfigPanel";
+import CopyProfileDialog from "./components/CopyProfileDialog";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
@@ -26,6 +28,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import InstallCard from "./components/InstallCard";
 import ConfigView from "./components/ConfigView";
+import CredentialsView from "./components/CredentialsView";
 import PluginsView from "./components/PluginsView";
 import ProcessSidePanel from "./components/ProcessSidePanel";
 import VersionRow from "./components/VersionRow";
@@ -37,7 +40,7 @@ import type {
   RegistryInfo, Settings as SettingsT,
 } from "./types";
 
-type View = "versions" | "profiles" | "plugins" | "config";
+type View = "versions" | "profiles" | "plugins" | "config" | "credentials";
 
 /**
  * 各 Target 的标签展示与启动支持状态；新增 Target（如 CLI）在此扩展。
@@ -91,6 +94,10 @@ export default function App() {
   const [verType, setVerType] = useState<"all" | "stable" | "pre">("all");
   /** 各 profile 配置折叠面板的展开状态 */
   const [expandedProfiles, setExpandedProfiles] = useState<Record<string, boolean>>({});
+  /** 复制实例对话框的源 profile；null = 关闭 */
+  const [copySource, setCopySource] = useState<string | null>(null);
+  /** 插件管理页的预选 profile（从 Profile 实例卡片跳转时种子化；导航进入时清空走默认） */
+  const [pluginsSeed, setPluginsSeed] = useState<string | null>(null);
 
   const procsRef = useRef<Record<number, ProcEntry>>({});
   procsRef.current = procs;
@@ -321,6 +328,25 @@ export default function App() {
     } catch (e) { addToast("err", `切换失败: ${e}`); }
   }, [addToast]);
 
+  const doSetLaunchMode = useCallback(async (v: "child" | "detached") => {
+    const s = settingsRef.current;
+    if (!s || s.launchMode === v) return;
+    const next = { ...s, launchMode: v };
+    setSettings(next);
+    try {
+      await api.saveSettings(next);
+      addToast(
+        "ok",
+        v === "detached"
+          ? "启动方式已切换为独立进程（后台常驻，日志写入 ~/.dsh-launcher/instance-logs）"
+          : "启动方式已切换为子进程（随启动器退出结束）"
+      );
+    } catch (e) {
+      setSettings(s);
+      addToast("err", `切换失败: ${e}`);
+    }
+  }, [addToast]);
+
   const doSetActiveVersion = useCallback(async (v: string) => {
     const s = settingsRef.current;
     if (!s || s.activeVersion === v) return;
@@ -399,18 +425,27 @@ export default function App() {
   }, [addToast]);
 
   const doStartProfile = useCallback(async (profile: string) => {
+    const detached = settingsRef.current?.launchMode === "detached";
     try {
-      const info = await api.startEmbedded(null, profile);
-      setProcs((m) => ({
-        ...m,
-        [info.id]: {
-          id: info.id, version: info.version, profile: info.profile,
-          startedAt: info.startedAt, lines: [], exited: false, code: null, webUrl: null,
-        },
-      }));
-      setActiveProc(info.id);
-      setDrawerOpen(true);
-      addToast("ok", `profile「${info.profile}」启动中（dsh ${info.version}，PID ${info.id}）`);
+      const info = await api.startEmbedded(null, profile, undefined, detached);
+      if (detached) {
+        // 独立进程无日志管道：不建实例终端条目，由 /proc 扫描轮询感知
+        addToast(
+          "ok",
+          `profile「${info.profile}」已以独立进程启动（PID ${info.id}），日志：~/.dsh-launcher/instance-logs`
+        );
+      } else {
+        setProcs((m) => ({
+          ...m,
+          [info.id]: {
+            id: info.id, version: info.version, profile: info.profile,
+            startedAt: info.startedAt, lines: [], exited: false, code: null, webUrl: null,
+          },
+        }));
+        setActiveProc(info.id);
+        setDrawerOpen(true);
+        addToast("ok", `profile「${info.profile}」启动中（dsh ${info.version}，PID ${info.id}）`);
+      }
       refreshInstances(); // 立即感知新实例，让「切换版本」锁定尽快生效（否则要等 3s 轮询）
     } catch (e) { addToast("err", `启动失败: ${e}`); }
   }, [addToast, refreshInstances]);
@@ -482,7 +517,7 @@ export default function App() {
   // Profile 实例阶段：stopped → starting → ready（出现 URL）/ failed
   const instanceRows = useMemo(() => {
     type Phase = "stopped" | "starting" | "ready" | "failed" | "external";
-    type Row = { profile: string; phase: Phase; pid: number | null; source: "embedded" | "external" | null; version: string | null; webUrl: string | null; code: number | null; target: ProfileTarget };
+    type Row = { profile: string; phase: Phase; pid: number | null; source: string | null; version: string | null; webUrl: string | null; code: number | null; target: ProfileTarget };
     const map = new Map<string, Row>();
     for (const p of profiles) {
       map.set(p.name, { profile: p.name, phase: "stopped", pid: null, source: null, version: null, webUrl: null, code: null, target: p.target });
@@ -493,7 +528,7 @@ export default function App() {
         profile: i.profile,
         phase: "external",
         pid: i.pid,
-        source: "external",
+        source: i.source,
         version: i.version,
         webUrl: null,
         code: null,
@@ -527,6 +562,7 @@ export default function App() {
     ["profiles", "Profile 实例", Rocket, runningInstanceCount > 0 ? runningInstanceCount : null],
     ["plugins", "插件管理", Puzzle, null],
     ["config", "配置文件", FileCog, null],
+    ["credentials", "凭据管理", KeyRound, null],
   ];
 
   return (
@@ -576,7 +612,11 @@ export default function App() {
           title={resolved === "dark" ? "切换浅色" : "切换深色"}
           onClick={() => setTheme(resolved === "dark" ? "light" : "dark")}
         >
-          {resolved === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          {resolved === "dark" ? (
+            <Sun className="h-4 w-4 animate-in fade-in zoom-in-50 duration-150" />
+          ) : (
+            <Moon className="h-4 w-4 animate-in fade-in zoom-in-50 duration-150" />
+          )}
         </Button>
       </header>
 
@@ -593,7 +633,7 @@ export default function App() {
       {env && !env.node && (
         <Alert
           variant="destructive"
-          className={`shrink-0 gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px] ${runtimeJob ? "" : "pr-40"}`}
+          className={`shrink-0 animate-in gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px] fade-in slide-in-from-top-2 duration-300 ${runtimeJob ? "" : "pr-40"}`}
         >
           <XCircle />
           {runtimeJob ? (
@@ -634,9 +674,7 @@ export default function App() {
         {/* 侧栏导航 */}
         <nav className="flex w-56 shrink-0 flex-col gap-0.5 border-r border-border bg-card/70 p-2.5">
           <div className="mb-3 flex items-center gap-2.5 px-1.5 pb-2 pt-0.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-violet-500 text-[9.5px] font-extrabold text-primary-foreground shadow-md">
-              DSH
-            </div>
+            <img src={dshLogo} alt="DSH" className="h-8 w-8" draggable={false} />
             <div className="leading-tight">
               <div className="text-[13px] font-bold tracking-tight">DSH Launcher</div>
               <div className="text-[10px] text-muted-foreground">@deepseek-ai/dsh · v{env.appVersion}</div>
@@ -647,10 +685,13 @@ export default function App() {
               key={key}
               variant="ghost"
               className={`relative h-8 w-full justify-start gap-2.5 ${view === key ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-              onClick={() => setView(key)}
+              onClick={() => {
+                if (key === "plugins") setPluginsSeed(null);
+                setView(key);
+              }}
             >
               {view === key && (
-                <span className="absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-primary" />
+                <span className="absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 animate-in fade-in slide-in-from-left-1 rounded-full bg-primary duration-200" />
               )}
               <Icon className="h-4 w-4 opacity-80" />
               <span>{label}</span>
@@ -682,8 +723,11 @@ export default function App() {
           </div>
         </nav>
 
-        {/* 内容区 */}
-        <main className="min-w-0 flex-1 overflow-y-auto p-5">
+        {/* 内容区（key 随视图变化：切换时重新挂载并播放入场动画） */}
+        <main
+          key={view}
+          className="min-w-0 flex-1 animate-in fade-in slide-in-from-bottom-2 overflow-y-auto p-5 duration-200"
+        >
           {view === "versions" && (
             <div className="space-y-4">
               <div className="grid grid-cols-[320px_1fr] gap-3">
@@ -824,10 +868,17 @@ export default function App() {
                 </Button>
               </div>
 
+              {rows.length > 0 && (
+                <div className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>从高版本降回低版本后，若 DSH 出现任何报错问题，请交给 Agent 定位问题并处理</span>
+                </div>
+              )}
+
               {/* 版本表 */}
               {rows.length > 0 && (
                 <Card className="py-0">
-                  <Table>
+                  <Table className="min-w-[600px]">
                     <TableHeader>
                       <TableRow className="bg-muted/40 hover:bg-muted/40">
                         <TableHead className="h-9 pl-4 text-[10.5px] uppercase tracking-wider">版本</TableHead>
@@ -886,6 +937,23 @@ export default function App() {
                   <RefreshCw /> 重扫目录
                 </Button>
               </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">启动方式</span>
+                <Tabs
+                  value={settings.launchMode === "detached" ? "detached" : "child"}
+                  onValueChange={(v) => doSetLaunchMode(v as "child" | "detached")}
+                >
+                  <TabsList>
+                    <TabsTrigger value="child" className="text-xs">子进程</TabsTrigger>
+                    <TabsTrigger value="detached" className="text-xs">独立进程</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+                <span className="text-[11px] text-muted-foreground">
+                  {settings.launchMode === "detached"
+                    ? "独立进程随系统常驻：关闭启动器后 DSH 继续运行，重启启动器后会自动扫描识别，日志写入 ~/.dsh-launcher/instance-logs"
+                    : "子进程模式：日志回传「实例终端」，启动器退出时结束所有 DSH"}
+                </span>
+              </div>
               <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
                 <span className="text-foreground">Target 标签</span>
                 {" "}按各 profile 的 <span className="font-mono">package.json</span> 中
@@ -906,7 +974,9 @@ export default function App() {
                     row.phase === "starting" ? "启动中…"
                     : row.phase === "ready" ? "启动成功"
                     : row.phase === "failed" ? `启动失败${row.code != null ? `（退出码 ${row.code}）` : ""}`
-                    : row.phase === "external" ? "运行中（外部启动）" : "未运行";
+                    : row.phase === "external"
+                    ? row.source === "detached" ? "运行中（独立进程）" : "运行中（外部启动）"
+                    : "未运行";
                   const canStop = row.phase === "starting" || row.phase === "ready" || row.phase === "external";
                   const canOpen = row.phase === "ready" && !!row.webUrl;
                   const targetMeta = TARGET_META[row.target];
@@ -970,6 +1040,25 @@ export default function App() {
                               <Play /> 启动
                             </Button>
                           )}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="复制实例：把该 profile 的配置目录拷贝为新实例"
+                            onClick={() => setCopySource(row.profile)}
+                          >
+                            <CopyPlus />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="打开「插件管理」并选中该 profile"
+                            onClick={() => {
+                              setPluginsSeed(row.profile);
+                              setView("plugins");
+                            }}
+                          >
+                            <Puzzle />
+                          </Button>
                           <CollapsibleTrigger asChild>
                             <Button
                               variant="ghost"
@@ -1001,8 +1090,15 @@ export default function App() {
             </div>
           )}
 
-          {view === "plugins" && <PluginsView profiles={profiles.map((p) => p.name)} onToast={addToast} />}
+          {view === "plugins" && (
+            <PluginsView
+              profiles={profiles.map((p) => p.name)}
+              initialProfile={pluginsSeed}
+              onToast={addToast}
+            />
+          )}
           {view === "config" && <ConfigView onToast={addToast} />}
+          {view === "credentials" && <CredentialsView onToast={addToast} />}
         </main>
       </div>
 
@@ -1048,6 +1144,15 @@ export default function App() {
 
       {/* Toasts（sonner） */}
       <Toaster position="bottom-right" richColors closeButton />
+
+      {/* 复制 profile 实例 */}
+      <CopyProfileDialog
+        source={copySource}
+        existing={profiles.map((p) => p.name)}
+        onClose={() => setCopySource(null)}
+        onToast={addToast}
+        onCopied={() => refreshProfiles()}
+      />
 
       {/* 卸载确认 */}
       <AlertDialog open={pendingUninstall != null} onOpenChange={(o) => !o && setPendingUninstall(null)}>

@@ -7,41 +7,46 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --radius: 0.5rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.55 0.22 267);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0.005 260);
-  --success: oklch(0.68 0.15 160);
-  --warning: oklch(0.75 0.15 80);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  /* 亮色主题 —— Levels 风格：奶油纸感底 + 绿色信号色 + 绿灰中性色
+     参考 design-systems/levels/tokens.css */
+  --radius: 0.75rem;
+  --background: #fbf7ef;
+  --foreground: #1f2a24;
+  --card: #ffffff;
+  --card-foreground: #1f2a24;
+  --popover: #ffffff;
+  --popover-foreground: #1f2a24;
+  --primary: #2f8f46;
+  --primary-foreground: #ffffff;
+  --secondary: #eef7ed;
+  --secondary-foreground: #1f2a24;
+  --muted: #eef7ed;
+  --muted-foreground: #788276;
+  --accent: #eef7ed;
+  --accent-foreground: #1f2a24;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --success: #16a34a;
+  --warning: #d97706;
+  --border: #dbe3d7;
+  --input: #dbe3d7;
+  --ring: #2f8f46;
+  --chart-1: #2f8f46;
+  --chart-2: #788276;
+  --chart-3: #1f2a24;
+  --chart-4: #dbe3d7;
+  --chart-5: #16a34a;
+  --sidebar: #fbf7ef;
+  --sidebar-foreground: #1f2a24;
+  --sidebar-primary: #2f8f46;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #eef7ed;
+  --sidebar-accent-foreground: #1f2a24;
+  --sidebar-border: #dbe3d7;
+  --sidebar-ring: #2f8f46;
+  /* eyebrow 标签用信号绿（Levels 招牌细节）；页面底微渐变（暗色关闭） */
+  --eyebrow: var(--primary);
+  --page-gradient: linear-gradient(135deg, #fbf7ef 0%, #eef7ed 100%);
 }
 
 .dark {
@@ -79,6 +84,9 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
+  /* 暗色主题保持原中性风格：eyebrow 不用绿、无页面渐变 */
+  --eyebrow: var(--muted-foreground);
+  --page-gradient: none;
 }
 
 @theme inline {
@@ -139,12 +147,14 @@ body {
   font-size: 13.5px;
   overflow: hidden;
   user-select: none;
-  /* 控制台点阵纹理 */
-  background-image: radial-gradient(
-    color-mix(in oklch, var(--foreground) 7%, transparent) 1px,
-    transparent 1px
-  );
-  background-size: 22px 22px;
+  /* 控制台点阵纹理 + Levels 式奶油底微渐变（亮色；暗色 --page-gradient: none） */
+  background-image:
+    radial-gradient(
+      color-mix(in oklch, var(--foreground) 7%, transparent) 1px,
+      transparent 1px
+    ),
+    var(--page-gradient);
+  background-size: 22px 22px, 100% 100%;
 }
 
 @layer base {
@@ -156,6 +166,52 @@ body {
   }
   html {
     @apply font-sans;
+  }
+}
+
+/* ── 主题切换过渡 ─────────────────────────────
+   切换瞬间由 theme.tsx 挂上 .theme-transitioning，
+   给颜色相关属性加 250ms 过渡（全平台统一，不依赖 View Transitions） */
+.theme-transitioning *,
+.theme-transitioning *::before,
+.theme-transitioning *::after {
+  transition:
+    background-color 250ms ease,
+    border-color 250ms ease,
+    color 250ms ease,
+    fill 250ms ease,
+    stroke 250ms ease,
+    box-shadow 250ms ease !important;
+}
+
+/* ── 细滚动条（日志/列表区） ─────────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--foreground) 18%, transparent) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--foreground) 18%, transparent);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--foreground) 30%, transparent);
+}
+
+/* 无障碍：用户偏好减少动效时全部关掉 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 @layer components {
@@ -198,6 +254,27 @@ body {
     font-weight: 600;
     letter-spacing: 0.14em;
     text-transform: uppercase;
-    color: var(--muted-foreground);
+    color: var(--eyebrow, var(--muted-foreground));
   }
+}
+
+/* CodeMirror 编辑器跟随应用主题（覆盖 One Dark 自带的蓝灰底/行号/选中区/光标，
+   与中性色界面协调）：双写类名抬高优先级，压过运行时注入的主题样式 */
+.dsh-code .cm-editor.cm-editor,
+.dsh-code .cm-gutters.cm-gutters {
+  background-color: transparent;
+}
+.dsh-code .cm-gutters.cm-gutters {
+  color: var(--muted-foreground);
+}
+.dsh-code .cm-activeLine,
+.dsh-code .cm-activeLineGutter {
+  background-color: color-mix(in oklab, var(--muted-foreground) 8%, transparent);
+}
+.dsh-code .cm-selectionBackground.cm-selectionBackground,
+.dsh-code .cm-focused .cm-selectionBackground {
+  background-color: color-mix(in oklab, var(--muted-foreground) 35%, transparent);
+}
+.dsh-code .cm-cursor.cm-cursor {
+  border-left-color: var(--foreground);
 }

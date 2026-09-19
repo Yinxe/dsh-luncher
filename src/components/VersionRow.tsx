@@ -63,7 +63,7 @@ export default function VersionTableRow({
       }`}
     >
       <TableCell className="px-4 py-2.5">
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
           <span className={`font-mono text-[13px] font-bold ${isActive ? "text-primary" : ""}`}>{row.version}</span>
           <Badge variant={CHANNEL_V[row.channel] ?? "secondary"} className="uppercase">{row.channel}</Badge>
           {isLatestTag && <Badge variant="info">latest</Badge>}
@@ -83,22 +83,20 @@ export default function VersionTableRow({
       <TableCell className="px-3 py-2.5 font-mono text-[11.5px] text-muted-foreground">{fmtSize(row.remote?.unpackedSize ?? null) || "—"}</TableCell>
       <TableCell className="px-3 py-2.5">
         {isActive ? (
-          <Badge>当前版本</Badge>
+          <Badge title={inst?.location}>当前版本</Badge>
         ) : inst ? (
-          <Badge variant={inst.source === "managed" ? "success" : inst.source === "global" ? "info" : "outline"}>
+          <Badge
+            variant={inst.source === "managed" ? "success" : inst.source === "global" ? "info" : "outline"}
+            title={inst.location}
+          >
             {inst.source === "managed" ? "已装 · 管理" : inst.source === "global" ? "npm 全局" : "PATH"}
           </Badge>
         ) : (
           <span className="text-xs text-muted-foreground">未安装</span>
         )}
-        {inst && (
-          <div className="mt-0.5 max-w-[260px] truncate font-mono text-[10px] text-muted-foreground/70" title={inst.location}>
-            {inst.location}
-          </div>
-        )}
       </TableCell>
-      <TableCell className="whitespace-nowrap px-3 py-2.5 text-right">
-        <div className="flex items-center justify-end gap-1">
+      <TableCell className="px-3 py-2.5 text-right">
+        <div className="flex flex-wrap items-center justify-end gap-1">
           {!inst && (
             <Button size="sm" disabled={busy} onClick={() => onInstall(row.version, false)} title="安装完成后自动设为当前版本">
               安装

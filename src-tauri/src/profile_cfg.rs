@@ -40,12 +40,26 @@ pub struct PatchItemInfo {
     pub disabled: bool,
 }
 
+/// package.json dependencies 里的一个直接依赖（含未声明为 bundle 的「非插件包」，
+/// 供手动卸载误装/残留依赖）
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageDepInfo {
+    pub name: String,
+    pub version: Option<String>,
+    pub source: String,
+    /// 是否被 dsh.profile.bundles 声明为插件 bundle
+    pub is_bundle: bool,
+}
+
 #[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileDetail {
     pub profile: String,
     pub exists: bool,
     pub bundles: Vec<BundleInfo>,
+    /// dependencies 全量直接依赖（bundles 之外的就是「不是插件但装进来了」的包）
+    pub packages: Vec<PackageDepInfo>,
     pub package_raw: String,
     pub patch_raw: String,
     pub patch_entries: Vec<PatchEntryInfo>,
@@ -68,6 +82,7 @@ fn source_of(version_value: Option<&str>) -> &'static str {
         Some(v) if v.starts_with("link:") => "link",
         Some(v) if v.starts_with("workspace:") => "workspace",
         Some(v) if v.starts_with("file:") => "file",
+        Some(v) if v.starts_with("git+") || v.starts_with("github:") => "git",
         _ => "npm",
     }
 }
@@ -84,6 +99,7 @@ pub fn read_detail(settings: &Settings, profile: &str) -> Result<ProfileDetail, 
 
     let patch_disabled = patch_disabled_ids(profile);
     let mut bundles = Vec::new();
+    let mut packages = Vec::new();
     if !package_raw.is_empty() {
         let pkg: serde_json::Value =
             serde_json::from_str(&package_raw).map_err(|e| format!("package.json 解析失败: {e}"))?;
@@ -112,6 +128,20 @@ pub fn read_detail(settings: &Settings, profile: &str) -> Result<ProfileDetail, 
                 enabled,
                 plugin_ids,
             });
+        }
+        // dependencies 全量直接依赖：不在 bundles 里的就是「装了但不是插件」的包
+        if let Some(deps) = deps {
+            for (name, ver) in deps {
+                let v = ver.as_str().map(String::from);
+                let is_bundle = bundles_list.iter().any(|b| b == name);
+                packages.push(PackageDepInfo {
+                    name: name.clone(),
+                    version: v.clone(),
+                    source: source_of(v.as_deref()).to_string(),
+                    is_bundle,
+                });
+            }
+            packages.sort_by(|a, b| a.name.cmp(&b.name));
         }
     }
 
@@ -161,6 +191,7 @@ pub fn read_detail(settings: &Settings, profile: &str) -> Result<ProfileDetail, 
         profile: profile.to_string(),
         exists,
         bundles,
+        packages,
         package_raw,
         patch_raw,
         patch_entries,
@@ -204,7 +235,7 @@ fn collect_disabled_ids(item: &serde_yaml::Value, set: &mut std::collections::BT
 
 /// 覆写前先备份原文件。固定单一备份文件 <名>.launcher-bak，每次覆写覆盖同一份；
 /// 同时清理旧版按时间戳堆积的 <名>.launcher-bak-<ts> 备份。
-fn backup(path: &Path) -> Result<(), String> {
+pub(crate) fn backup(path: &Path) -> Result<(), String> {
     let content = match std::fs::read(path) {
         Ok(c) => c,
         Err(_) => return Ok(()), // 目标不存在则无从备份
@@ -836,13 +867,13 @@ pub struct WebQuickConfig {
 /// 保存载荷：三个条目由启动器整块生成。patch 条目会整体替换该行 config，
 /// 所以每块的键必须成套写全；两条 trustedHosts 固定用 `!!js` 表达式联动
 /// webStartup → webRuntime 信任链（见 @deepseek-ai/dsh-web-app 的 cordis.patch.yml 定义）。
+/// printUrl 不开放配置：启动器依赖启动日志 `dsh web: <url>` 识别访问地址，恒为 true。
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct WebQuickConfigInput {
     pub host: String,
     pub port: u64,
     pub open_browser: bool,
-    pub print_url: bool,
     pub surface_context: bool,
     pub cookie_max_age_days: i64,
 }
@@ -909,8 +940,8 @@ fn web_quick_block(id: &str, input: &WebQuickConfigInput) -> String {
             input.port
         ),
         "web-runtime" => format!(
-            "- id: web-runtime\n  config:\n    openBrowser: {}\n    printUrl: {}\n    surfaceContext: {}\n    trustedHosts: !!js ctx.webStartup.trustedHosts\n",
-            input.open_browser, input.print_url, input.surface_context
+            "- id: web-runtime\n  config:\n    openBrowser: {}\n    printUrl: true\n    surfaceContext: {}\n    trustedHosts: !!js ctx.webStartup.trustedHosts\n",
+            input.open_browser, input.surface_context
         ),
         _ => format!(
             "- id: connection\n  config:\n    trustedHosts: !!js ctx.webRuntime.trustedHosts\n    cookieMaxAgeDays: {}\n",
@@ -1042,12 +1073,272 @@ pub fn set_web_quick_config(profile: &str, input: &WebQuickConfigInput) -> Resul
     Ok(())
 }
 
+// ── 复制 profile 实例 ─────────────────────────
+
+/// 复制 profile：目录型整目录拷贝（跳过 node_modules / cache 等可重建的运行时产物，
+/// 依赖在首次启动时由 dsh/pnpm 重装）；文件型（profiles/ 下的 yaml/json）拷为
+/// 「新名.同扩展名」文件。实例名需手动输入并过合法性校验，目标已存在则拒绝。
+pub fn copy_profile(source: &str, new_name: &str) -> Result<(), String> {
+    let source = source.trim();
+    let name = new_name.trim();
+    if name.is_empty()
+        || name.starts_with('.')
+        || name == "node_modules"
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+    {
+        return Err("非法实例名：不能为空、以 . 开头、为 node_modules 或包含路径字符".into());
+    }
+    let root = profiles::profiles_dir();
+    let dst = root.join(name);
+    if dst.exists() {
+        return Err(format!("实例「{name}」已存在"));
+    }
+    // 与同名文件型 profile 撞名会让扫描出两个同名条目，一并拒绝
+    for ext in ["yaml", "yml", "json"] {
+        if root.join(format!("{name}.{ext}")).is_file() {
+            return Err(format!("已存在同名文件型 profile「{name}.{ext}」"));
+        }
+    }
+    let src_dir = root.join(source);
+    if src_dir.is_dir() {
+        copy_dir_excluding(&src_dir, &dst, &["node_modules", "cache"])
+    } else {
+        let src = ["yaml", "yml", "json"]
+            .iter()
+            .find_map(|ext| {
+                let p = root.join(format!("{source}.{ext}"));
+                p.is_file().then_some(p)
+            })
+            .ok_or_else(|| format!("源 profile「{source}」不存在"))?;
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("yaml");
+        std::fs::copy(&src, root.join(format!("{name}.{ext}")))
+            .map(|_| ())
+            .map_err(|e| format!("复制失败: {e}"))
+    }
+}
+
+/// 递归复制目录，跳过指定名称的子目录（可重建的运行时产物）与符号链接等非普通文件
+fn copy_dir_excluding(src: &Path, dst: &Path, skip: &[&str]) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建目录失败: {e}"))?;
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| format!("读取目录失败: {e}"))?
+        .flatten()
+    {
+        let Ok(ft) = entry.file_type() else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if ft.is_dir() {
+            if skip.contains(&name.as_str()) {
+                continue;
+            }
+            copy_dir_excluding(&entry.path(), &dst.join(&name), skip)?;
+        } else if ft.is_file() {
+            std::fs::copy(entry.path(), dst.join(&name))
+                .map_err(|e| format!("复制文件 {name} 失败: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+// ── 插件更新检测 ─────────────────────────
+
+/// 更新检测结果（一行对应 package.json 里的一个直接依赖）
+#[derive(Clone, Serialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUpdateInfo {
+    pub name: String,
+    pub source: String,
+    /// package.json 里的原始规格（^1.2.3 / link:… / github:…）
+    pub spec: String,
+    pub has_update: bool,
+    /// 是否完成了检测（link/file/workspace 等本地源跳过）
+    pub checked: bool,
+    /// npm：已安装版本 / registry latest
+    pub installed_version: Option<String>,
+    pub latest_version: Option<String>,
+    /// git：仓库（owner/repo）、已装提交、远端最新提交
+    pub repo: Option<String>,
+    pub installed_commit: Option<String>,
+    pub remote_commit: Option<String>,
+    /// 可直接交给 `dsh plugin add` 的升级规格（npm=包名@latest；git=去 sha 的 github 规格）
+    pub update_spec: Option<String>,
+    pub note: Option<String>,
+}
+
+/// package.json dependencies 的原始规格（按名字排序）
+#[derive(Clone, Debug)]
+pub struct DependencySpecInfo {
+    pub name: String,
+    pub spec: String,
+    pub source: String,
+}
+
+pub fn dependency_specs(profile: &str) -> Result<Vec<DependencySpecInfo>, String> {
+    let dir = profile_dir(profile)?;
+    let raw = std::fs::read_to_string(dir.join("package.json"))
+        .map_err(|e| format!("读取 package.json 失败: {e}"))?;
+    let pkg: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("package.json 解析失败: {e}"))?;
+    let mut out = Vec::new();
+    if let Some(deps) = pkg.get("dependencies").and_then(|v| v.as_object()) {
+        for (name, ver) in deps {
+            let spec = ver.as_str().unwrap_or_default().to_string();
+            out.push(DependencySpecInfo {
+                name: name.clone(),
+                source: source_of(Some(&spec)).to_string(),
+                spec,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// 依赖的已安装版本：优先 profile 自带 node_modules，回退 profiles 根共享 node_modules
+pub fn installed_version_of(profile: &str, name: &str) -> Option<String> {
+    let dir = profile_dir(profile).ok()?;
+    for base in [dir, profiles::profiles_dir()] {
+        let raw = std::fs::read_to_string(base.join("node_modules").join(name).join("package.json"))
+            .ok()?;
+        let pkg: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        if let Some(v) = pkg.get("version").and_then(|v| v.as_str()) {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+pub fn read_pnpm_lock(profile: &str) -> Option<String> {
+    std::fs::read_to_string(profile_dir(profile).ok()?.join("pnpm-lock.yaml")).ok()
+}
+
+/// 行内首个 40 位 hex 令牌（git 提交 SHA）
+fn first_40hex(line: &str) -> Option<String> {
+    line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
+        .find(|t| t.len() == 40 && t.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(String::from)
+}
+
+/// 在 pnpm-lock.yaml 文本中定位某 git 依赖已解析的提交哈希。
+/// pnpm 各版本对 git 依赖的锁记录键式不一（packages: 段键内嵌 commit、resolution.commit 等），
+/// 做宽容扫描：命中依赖名（或 owner/repo）的行向前 1 行 / 向后 5 行窗口内找 40-hex。
+pub fn find_git_commit_in_lock(lock_text: &str, dep_name: &str, repo_hint: &str) -> Option<String> {
+    let lines: Vec<&str> = lock_text.lines().collect();
+    for i in 0..lines.len() {
+        let hit = lines[i].contains(dep_name)
+            || (!repo_hint.is_empty() && lines[i].contains(repo_hint));
+        if !hit {
+            continue;
+        }
+        let lo = i.saturating_sub(1);
+        let hi = (i + 6).min(lines.len());
+        for line in &lines[lo..hi] {
+            if let Some(h) = first_40hex(line) {
+                return Some(h);
+            }
+        }
+    }
+    None
+}
+
+/// 检测 profile 全部直接依赖是否有新版本：
+/// - npm 源：已装版本（node_modules）vs registry `latest`，semver 比较；
+/// - GitHub 源：已解析提交（规格内嵌 sha → pnpm-lock.yaml 扫描）vs 远端 HEAD；
+/// - link/file/workspace 本地源跳过。
+pub async fn check_plugin_updates(
+    registry_base: &str,
+    profile: &str,
+) -> Result<Vec<PluginUpdateInfo>, String> {
+    let deps = dependency_specs(profile)?;
+    let lock = read_pnpm_lock(profile);
+    let mut out = Vec::new();
+    for d in deps {
+        let mut info = PluginUpdateInfo {
+            name: d.name.clone(),
+            source: d.source.clone(),
+            spec: d.spec.clone(),
+            ..Default::default()
+        };
+        match d.source.as_str() {
+            "npm" => {
+                info.installed_version = installed_version_of(profile, &d.name);
+                info.update_spec = Some(format!("{}@latest", d.name));
+                match crate::registry::npm_latest_version(registry_base, &d.name).await {
+                    Ok(latest) => {
+                        info.latest_version = latest.clone();
+                        info.checked = true;
+                        if let (Some(inst), Some(lat)) = (&info.installed_version, &latest) {
+                            info.has_update =
+                                crate::semver::compare(lat, inst) == std::cmp::Ordering::Greater;
+                        }
+                        if info.installed_version.is_none() {
+                            info.note = Some("未找到已安装版本（尚未安装成功）".into());
+                        }
+                    }
+                    Err(e) => info.note = Some(e),
+                }
+            }
+            "git" => {
+                if let Some(spec) = crate::registry::parse_github_spec(&d.spec) {
+                    let repo_full = format!("{}/{}", spec.owner, spec.repo);
+                    info.repo = Some(repo_full.clone());
+                    // 已装提交：规格内嵌 sha（pnpm 会把解析出的 sha 写回规格）→ lockfile 扫描
+                    if let Some(r) = &spec.git_ref {
+                        if (7..=40).contains(&r.len())
+                            && r.chars().all(|c| c.is_ascii_hexdigit())
+                        {
+                            info.installed_commit = Some(r.clone());
+                        }
+                    }
+                    if info.installed_commit.is_none() {
+                        info.installed_commit = lock
+                            .as_deref()
+                            .and_then(|lk| find_git_commit_in_lock(lk, &d.name, &repo_full));
+                    }
+                    match crate::registry::github_head_commit(
+                        &spec.owner,
+                        &spec.repo,
+                        spec.git_ref.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(remote) => {
+                            info.remote_commit = remote.clone();
+                            info.checked = true;
+                            match (&info.installed_commit, &remote) {
+                                (Some(a), Some(b)) => {
+                                    info.has_update = !b.to_ascii_lowercase()
+                                        .starts_with(&a.to_ascii_lowercase());
+                                }
+                                (None, Some(_)) => {
+                                    info.note =
+                                        Some("无法从 lockfile 确定已装提交，跳过比对".into());
+                                }
+                                _ => {}
+                            }
+                        }
+                        Err(e) => info.note = Some(e),
+                    }
+                    info.update_spec = crate::registry::github_upgrade_spec(&d.spec);
+                } else {
+                    info.note = Some("非 GitHub 规格（通用 git 链接暂不支持检测）".into());
+                }
+            }
+            _ => {
+                info.note = Some("本地源（link/file/workspace）不检测更新".into());
+            }
+        }
+        out.push(info);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// DSH_HOME 是进程级环境变量，用到它的测试必须串行执行
-    static DSH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::util::DSH_ENV_LOCK;
 
     #[test]
     fn parse_dump_layers_extracts_bundle_ids() {
@@ -1235,7 +1526,6 @@ mod tests {
             host: "127.0.0.1".into(),
             port: 3081,
             open_browser: true,
-            print_url: false,
             surface_context: true,
             cookie_max_age_days: 36500,
         };
@@ -1247,7 +1537,8 @@ mod tests {
         assert!(raw.contains("host: '127.0.0.1'") && raw.contains("port: 3081"));
         assert!(!raw.contains("0.0.0.0"), "旧配置应被整块替换:\n{raw}");
         assert!(raw.contains("openBrowser: true"));
-        assert!(raw.contains("printUrl: false"));
+        // printUrl 不开放配置：启动器靠日志识别 URL，恒为 true
+        assert!(raw.contains("printUrl: true"));
         assert!(raw.contains("surfaceContext: true"));
         assert!(raw.contains("trustedHosts: !!js ctx.webStartup.trustedHosts"));
         assert!(raw.contains("trustedHosts: !!js ctx.webRuntime.trustedHosts"));
@@ -1269,7 +1560,7 @@ mod tests {
         assert_eq!(cfg.host.as_deref(), Some("127.0.0.1"));
         assert_eq!(cfg.port, Some(3081));
         assert_eq!(cfg.open_browser, Some(true));
-        assert_eq!(cfg.print_url, Some(false));
+        assert_eq!(cfg.print_url, Some(true));
         assert_eq!(cfg.surface_context, Some(true));
         assert_eq!(cfg.cookie_max_age_days, Some(36500));
 
@@ -1304,7 +1595,6 @@ mod tests {
             host: "0.0.0.0".into(),
             port: 3080,
             open_browser: false,
-            print_url: true,
             surface_context: true,
             cookie_max_age_days: 30,
         };
@@ -1313,6 +1603,7 @@ mod tests {
         assert!(raw.contains("# header comment"));
         assert!(!raw.contains("[]"), "`[]` 占位应被移除:\n{raw}");
         assert!(raw.contains("host: '0.0.0.0'"));
+        assert!(raw.contains("printUrl: true"));
         serde_yaml::from_str::<serde_yaml::Value>(&raw).unwrap();
 
         let cfg = get_web_quick_config("web").unwrap();
@@ -1358,7 +1649,6 @@ mod tests {
             host: host.into(),
             port,
             open_browser: true,
-            print_url: true,
             surface_context: true,
             cookie_max_age_days: days,
         };
@@ -1399,7 +1689,6 @@ mod tests {
             host: before.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
             port: before.port.unwrap_or(3080),
             open_browser: before.open_browser.unwrap_or(true),
-            print_url: before.print_url.unwrap_or(true),
             surface_context: before.surface_context.unwrap_or(true),
             cookie_max_age_days: before.cookie_max_age_days.unwrap_or(36500),
         };
@@ -1430,6 +1719,79 @@ mod tests {
         assert_eq!(after.host.as_deref(), Some(input.host.as_str()));
         assert_eq!(after.port, Some(input.port));
         assert_eq!(after.cookie_max_age_days, Some(input.cookie_max_age_days));
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    #[test]
+    fn find_git_commit_in_lock_scans_windows() {
+        // v9：packages 段键内嵌 commit（键行命中，同行取 40-hex）
+        let lock = "packages:\n\n  github:owner/repo/1234567890abcdef1234567890abcdef12345678:\n    name: my-plugin\n    version: 1.0.0\n";
+        assert_eq!(
+            find_git_commit_in_lock(lock, "my-plugin", "owner/repo").as_deref(),
+            Some("1234567890abcdef1234567890abcdef12345678")
+        );
+        // resolution.commit 风格：命中名行，commit 在其后 5 行窗口内
+        let lock2 = "gitPackages:\n  my-plugin@github:owner/repo#dev:\n    resolution:\n      type: git\n      repo: github:owner/repo\n      commit: abcdef1234567890abcdef1234567890abcdef12\n";
+        assert_eq!(
+            find_git_commit_in_lock(lock2, "my-plugin", "owner/repo").as_deref(),
+            Some("abcdef1234567890abcdef1234567890abcdef12")
+        );
+        // 无仓库提示也无名字时才不命中（owner/repo 命中属预期：锁键以 repo 定位）
+        assert_eq!(find_git_commit_in_lock(lock, "other-pkg", ""), None);
+        // 空内容
+        assert_eq!(find_git_commit_in_lock("", "my-plugin", "owner/repo"), None);
+    }
+
+    #[test]
+    fn copy_profile_copies_config_skips_runtime() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-copy-test-{}", std::process::id()));
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof = tmp.join("profiles/web");
+        std::fs::create_dir_all(prof.join("node_modules/x")).unwrap();
+        std::fs::create_dir_all(prof.join("cache")).unwrap();
+        std::fs::create_dir_all(prof.join("sub/dir")).unwrap();
+        for f in ["package.json", "cordis.yml", "cordis.patch.yml", "pnpm-workspace.yaml"] {
+            std::fs::write(prof.join(f), "x").unwrap();
+        }
+        std::fs::write(prof.join("node_modules/x/junk.txt"), "junk").unwrap();
+        std::fs::write(prof.join("cache/cat.json"), "{}").unwrap();
+        std::fs::write(prof.join("sub/dir/extra.txt"), "extra").unwrap();
+        // 同名文件型 profile，用于撞名校验
+        std::fs::write(tmp.join("profiles/foo.yaml"), "[]").unwrap();
+
+        // 正常复制：配置与子目录保留，node_modules / cache 跳过
+        copy_profile("web", "web-copy").unwrap();
+        let dst = tmp.join("profiles/web-copy");
+        for f in ["package.json", "cordis.yml", "cordis.patch.yml", "pnpm-workspace.yaml"] {
+            assert!(dst.join(f).is_file(), "{f} 应被复制");
+        }
+        assert!(dst.join("sub/dir/extra.txt").is_file(), "用户子目录应被复制");
+        assert!(!dst.join("node_modules").exists(), "node_modules 不应复制");
+        assert!(!dst.join("cache").exists(), "cache 不应复制");
+        // 源目录不受影响
+        assert!(prof.join("node_modules/x/junk.txt").is_file());
+
+        // 名称修剪空格
+        copy_profile("web", " web2 ").unwrap();
+        assert!(tmp.join("profiles/web2/package.json").is_file());
+
+        // 目标已存在（目录/文件型撞名）均拒绝
+        assert!(copy_profile("web", "web-copy").is_err());
+        assert!(copy_profile("web", "foo").is_err());
+        // 非法名
+        for bad in ["", "..", "a/b", "a\\b", ".hid", "node_modules"] {
+            assert!(copy_profile("web", bad).is_err(), "bad={bad}");
+        }
+        // 源不存在
+        assert!(copy_profile("nope", "x").is_err());
+
+        // 文件型 profile：拷为「新名.同扩展名」
+        copy_profile("foo", "bar").unwrap();
+        assert!(tmp.join("profiles/bar.yaml").is_file());
+        assert!(!tmp.join("profiles/bar.yml").exists());
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");

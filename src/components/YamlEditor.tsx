@@ -41,7 +41,7 @@ export default function YamlEditor({ value, onChange, readOnly }: Props) {
   const extensions = useMemo(() => [yaml(), yamlLinter()], []);
 
   return (
-    <div className="overflow-hidden rounded-md border border-border text-[12px]">
+    <div className="dsh-code overflow-hidden rounded-lg border border-border bg-background/50 text-[12px]">
       <CodeMirror
         value={value}
         height="420px"

@@ -1,4 +1,5 @@
 mod commands;
+mod credentials;
 mod installed;
 mod installer;
 mod launcher;
@@ -59,8 +60,14 @@ pub fn run() {
             commands::write_profile_file,
             commands::get_web_quick_config,
             commands::set_web_quick_config,
+            commands::copy_profile,
+            commands::search_registry_packages,
+            commands::fetch_github_repo,
+            commands::check_plugin_updates,
             commands::read_global_config,
             commands::write_global_config,
+            commands::get_credentials,
+            commands::write_credential_refs,
         ])
         .setup(|app| {
             tray::create(app.handle())?;

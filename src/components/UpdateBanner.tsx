@@ -19,7 +19,7 @@ export default function UpdateBanner({ status, onDismiss, onOpenUrl, onApply, ap
       return (
         <Alert
           variant="destructive"
-          className="shrink-0 gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px]"
+          className="shrink-0 animate-in gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px] fade-in slide-in-from-top-2 duration-300"
         >
           <TriangleAlert />
           <AlertTitle className="font-normal">{status.message}</AlertTitle>
@@ -33,7 +33,7 @@ export default function UpdateBanner({ status, onDismiss, onOpenUrl, onApply, ap
   }
 
   return (
-    <Alert className="shrink-0 gap-1 rounded-none border-x-0 border-t-0 border-primary/30 bg-gradient-to-r from-primary/15 to-violet-500/5 px-4 py-2 pr-56 text-[13px]">
+    <Alert className="shrink-0 animate-in gap-1 rounded-none border-x-0 border-t-0 border-primary/30 bg-gradient-to-r from-primary/15 to-primary/5 px-4 py-2 pr-56 text-[13px] fade-in slide-in-from-top-2 duration-300">
       <Rocket />
       <AlertTitle>
         启动器新版本 <b>v{status.latest}</b> 已发布（当前 v{status.current}）
