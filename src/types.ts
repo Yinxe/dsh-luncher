@@ -290,6 +290,95 @@ export interface CredentialFile {
   records: CredentialRecord[];
 }
 
+/** 模型配置里的一个可用模型（llm-pi-ai.providers.<id>.models[] 条目） */
+export interface ModelEntryInfo {
+  id: string;
+  name: string | null;
+  contextWindow: number | null;
+  maxTokens: number | null;
+  /** 输入模态（如 text / image） */
+  input: string[];
+  /** 推理档位映射：逻辑档位名 → API 参数值（值可为 null），原样透传 */
+  reasoningEfforts: Record<string, string | null> | null;
+  /** 未识别字段原样透传（保存时原位恢复，避免丢数据） */
+  extra: Record<string, unknown> | null;
+}
+
+/** 模型配置里的一个模型服务提供方（llm-pi-ai.providers 的一个键值对） */
+export interface ProviderEntryInfo {
+  id: string;
+  displayName: string | null;
+  /** openai-completions | openai-responses | anthropic-messages（自定义值原样透传） */
+  api: string | null;
+  baseURL: string | null;
+  /** API Key 的环境变量名（值可在环境变量或凭据 refs 中维护） */
+  apiKeyEnv: string | null;
+  headers: Record<string, unknown> | null;
+  compat: Record<string, unknown> | null;
+  models: ModelEntryInfo[];
+  extra: Record<string, unknown> | null;
+}
+
+/** agent-default-model：Agent 默认使用的模型与推理档位 */
+export interface DefaultModelInfo {
+  provider: string;
+  model: string;
+  /** 取所选模型 reasoningEfforts 的键名（如 low / high / xhigh） */
+  reasoningEffort: string | null;
+  extra: Record<string, unknown> | null;
+}
+
+/** 模型配置整体读取结果（解析自 ~/.dsh/settings.yaml 的两个分节） */
+export interface ModelConfigInfo {
+  path: string;
+  exists: boolean;
+  providers: ProviderEntryInfo[];
+  defaultModel: DefaultModelInfo | null;
+  /** 文件存在但解析失败时置位：禁止结构化保存 */
+  parseError: string | null;
+}
+
+/** 模型配置保存载荷（后端只重写 llm-pi-ai / agent-default-model 两节） */
+export interface ModelConfigInput {
+  providers: ProviderEntryInput[];
+  defaultModel: DefaultModelInput | null;
+}
+
+export interface ProviderEntryInput {
+  id: string;
+  displayName: string | null;
+  api: string | null;
+  baseURL: string | null;
+  apiKeyEnv: string | null;
+  headers: Record<string, unknown> | null;
+  compat: Record<string, unknown> | null;
+  models: ModelEntryInput[];
+  extra: Record<string, unknown> | null;
+}
+
+export interface ModelEntryInput {
+  id: string;
+  name: string | null;
+  contextWindow: number | null;
+  maxTokens: number | null;
+  input: string[] | null;
+  reasoningEfforts: Record<string, string | null> | null;
+  extra: Record<string, unknown> | null;
+}
+
+export interface DefaultModelInput {
+  provider: string;
+  model: string;
+  reasoningEffort: string | null;
+  extra: Record<string, unknown> | null;
+}
+
+/** 远端 /models 接口解析出的可用模型条目 */
+export interface RemoteModelInfo {
+  id: string;
+  name: string | null;
+}
+
 export interface Toast {
   id: number;
   kind: "ok" | "err" | "info";

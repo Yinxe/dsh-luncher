@@ -4,7 +4,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import {
   Package, Rocket, Puzzle, FileCog, RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
-  TriangleAlert, ChevronDown, CopyPlus, KeyRound, Info,
+  TriangleAlert, ChevronDown, CopyPlus, KeyRound, Info, RotateCw, Bot,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
@@ -28,11 +28,12 @@ import {
 } from "@/components/ui/alert-dialog";
 import InstallCard from "./components/InstallCard";
 import ConfigView from "./components/ConfigView";
+import ModelConfigView from "./components/ModelConfigView";
 import CredentialsView from "./components/CredentialsView";
 import PluginsView from "./components/PluginsView";
 import ProcessSidePanel from "./components/ProcessSidePanel";
 import VersionRow from "./components/VersionRow";
-import SettingsModal from "./components/SettingsModal";
+import SettingsDrawer from "./components/SettingsDrawer";
 import UpdateBanner from "./components/UpdateBanner";
 import type {
   EnvironmentInfo, InstalledVersion, LauncherUpdateStatus, ProcEntry,
@@ -40,7 +41,7 @@ import type {
   RegistryInfo, Settings as SettingsT,
 } from "./types";
 
-type View = "versions" | "profiles" | "plugins" | "config" | "credentials";
+type View = "versions" | "profiles" | "plugins" | "models" | "config" | "credentials";
 
 /**
  * 各 Target 的标签展示与启动支持状态；新增 Target（如 CLI）在此扩展。
@@ -94,6 +95,8 @@ export default function App() {
   const [verType, setVerType] = useState<"all" | "stable" | "pre">("all");
   /** 各 profile 配置折叠面板的展开状态 */
   const [expandedProfiles, setExpandedProfiles] = useState<Record<string, boolean>>({});
+  /** 正在重启的 profile（停止→等待消失→再拉起） */
+  const [restartingProfile, setRestartingProfile] = useState<string | null>(null);
   /** 复制实例对话框的源 profile；null = 关闭 */
   const [copySource, setCopySource] = useState<string | null>(null);
   /** 插件管理页的预选 profile（从 Profile 实例卡片跳转时种子化；导航进入时清空走默认） */
@@ -450,6 +453,33 @@ export default function App() {
     } catch (e) { addToast("err", `启动失败: ${e}`); }
   }, [addToast, refreshInstances]);
 
+  const doRestartProfile = useCallback(
+    async (profile: string) => {
+      if (restartingProfile) return;
+      setRestartingProfile(profile);
+      try {
+        if (instancesRef.current.some((i) => i.profile === profile)) {
+          addToast("info", `正在停止 profile「${profile}」…`);
+          // 反复停止直到实例列表不再出现（幂等）；进程枚举有 TTL 缓存
+          //（Windows 5s），等待过短会被唯一性守卫拒绝立即重启
+          const deadline = Date.now() + 15_000;
+          while (Date.now() < deadline) {
+            await api.stopProfileInstance(profile).catch(() => false);
+            const list = await api.listProfileInstances();
+            if (!list.some((i) => i.profile === profile)) break;
+            await new Promise((r) => setTimeout(r, 500));
+          }
+        }
+        await doStartProfile(profile);
+      } catch (e) {
+        addToast("err", `重启失败: ${e}`);
+      } finally {
+        setRestartingProfile(null);
+      }
+    },
+    [restartingProfile, addToast, doStartProfile]
+  );
+
   const doStopProfileInstance = useCallback(async (profile: string) => {
     try {
       const hit = await api.stopProfileInstance(profile);
@@ -496,6 +526,12 @@ export default function App() {
               latestVersion != null && cmpVer(latestVersion, r.version) > 0
           ).length,
     [rows, latestVersion, hasLatestInstalled]
+  );
+
+  // 「当前 DSH 版本」卡片展示安装位置用
+  const activeInst = useMemo(
+    () => (settings ? installed.find((i) => i.version === settings.activeVersion) : undefined),
+    [installed, settings]
   );
 
   const runningInstanceCount = useMemo(
@@ -561,6 +597,7 @@ export default function App() {
     ["versions", "版本与安装", Package, upgradableCount > 0 ? upgradableCount : null],
     ["profiles", "Profile 实例", Rocket, runningInstanceCount > 0 ? runningInstanceCount : null],
     ["plugins", "插件管理", Puzzle, null],
+    ["models", "模型配置", Bot, null],
     ["config", "配置文件", FileCog, null],
     ["credentials", "凭据管理", KeyRound, null],
   ];
@@ -730,7 +767,7 @@ export default function App() {
         >
           {view === "versions" && (
             <div className="space-y-4">
-              <div className="grid grid-cols-[320px_1fr] gap-3">
+              <div className="grid grid-cols-2 gap-3">
                 <Card className="p-4">
                   <div className="eyebrow mb-2.5">① Node 环境 —— 系统级 / 隔离级可切换</div>
                   <Tabs
@@ -796,7 +833,7 @@ export default function App() {
                         onValueChange={doSetActiveVersion}
                         disabled={instancesRunning}
                       >
-                        <SelectTrigger className="w-64 font-mono">
+                        <SelectTrigger className="w-full max-w-sm font-mono">
                           <SelectValue placeholder="选择版本" />
                         </SelectTrigger>
                         <SelectContent>
@@ -808,6 +845,11 @@ export default function App() {
                           ))}
                         </SelectContent>
                       </Select>
+                      {activeInst?.location && (
+                        <div className="mt-2 truncate font-mono text-[10.5px] text-muted-foreground">
+                          安装位置：{activeInst.location}
+                        </div>
+                      )}
                       {instancesRunning && (
                         <p className="mt-2 text-[11.5px] text-amber-500">
                           有 Profile 实例正在运行，停止所有实例后才能切换版本
@@ -1020,14 +1062,35 @@ export default function App() {
                             </Button>
                           )}
                           {canStop ? (
-                            <Button size="sm" variant="destructive" onClick={() => doStopProfileInstance(row.profile)}>
-                              <Square /> 停止
-                            </Button>
+                            <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={restartingProfile === row.profile}
+                                onClick={() => doRestartProfile(row.profile)}
+                                title="停止并按当前启动方式重新启动"
+                              >
+                                {restartingProfile === row.profile ? (
+                                  <Loader2 className="animate-spin" />
+                                ) : (
+                                  <RotateCw />
+                                )}{" "}
+                                重启
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="destructive"
+                                disabled={restartingProfile === row.profile}
+                                onClick={() => doStopProfileInstance(row.profile)}
+                              >
+                                <Square /> 停止
+                              </Button>
+                            </>
                           ) : (
                             <Button
                               size="sm"
                               variant="outline"
-                              disabled={installed.length === 0 || !canStart}
+                              disabled={installed.length === 0 || !canStart || restartingProfile === row.profile}
                               title={installed.length === 0
                                 ? "请先在「版本与安装」页安装 dsh"
                                 : !canStart
@@ -1097,6 +1160,7 @@ export default function App() {
               onToast={addToast}
             />
           )}
+          {view === "models" && <ModelConfigView onToast={addToast} />}
           {view === "config" && <ConfigView onToast={addToast} />}
           {view === "credentials" && <CredentialsView onToast={addToast} />}
         </main>
@@ -1132,15 +1196,14 @@ export default function App() {
         <span className="ml-auto">退出启动器会结束所有内嵌 dsh 进程；关闭窗口最小化到托盘</span>
       </footer>
 
-      {showSettings && (
-        <SettingsModal
-          initial={settings}
-          env={env}
-          onSave={doSaveSettings}
-          onClose={() => setShowSettings(false)}
-          onReveal={(p) => api.reveal(p).catch((e) => addToast("err", String(e)))}
-        />
-      )}
+      <SettingsDrawer
+        open={showSettings}
+        initial={settings}
+        env={env}
+        onSave={doSaveSettings}
+        onClose={() => setShowSettings(false)}
+        onReveal={(p) => api.reveal(p).catch((e) => addToast("err", String(e)))}
+      />
 
       {/* Toasts（sonner） */}
       <Toaster position="bottom-right" richColors closeButton />

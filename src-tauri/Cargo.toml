@@ -22,7 +22,9 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order：模型配置的 headers / compat / reasoningEfforts 等映射字段
+# 读写往返时保持原有键序（IndexMap）
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 

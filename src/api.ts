@@ -25,6 +25,9 @@ import type {
   WebQuickConfigInput,
   CredentialFile,
   CredentialRef,
+  ModelConfigInfo,
+  ModelConfigInput,
+  RemoteModelInfo,
 } from "./types";
 
 export const api = {
@@ -82,6 +85,16 @@ export const api = {
     invoke<GitHubRepoInfo>("fetch_github_repo", { repo }),
   readGlobalConfig: () => invoke<string>("read_global_config"),
   writeGlobalConfig: (content: string) => invoke<void>("write_global_config", { content }),
+  getModelConfig: () => invoke<ModelConfigInfo>("get_model_config"),
+  setModelConfig: (config: ModelConfigInput) =>
+    invoke<void>("set_model_config", { config }),
+  fetchProviderModels: (baseUrl: string, api: string, apiKeyEnv: string, apiKey?: string) =>
+    invoke<RemoteModelInfo[]>("fetch_provider_models", {
+      baseUrl,
+      api,
+      apiKeyEnv,
+      apiKey: apiKey ?? null,
+    }),
   getCredentials: () => invoke<CredentialFile>("get_credentials"),
   writeCredentialRefs: (refs: CredentialRef[]) =>
     invoke<void>("write_credential_refs", { refs }),

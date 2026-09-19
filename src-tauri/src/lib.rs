@@ -3,6 +3,7 @@ mod credentials;
 mod installed;
 mod installer;
 mod launcher;
+mod modelcfg;
 mod profiles;
 mod procs;
 mod profile_cfg;
@@ -66,6 +67,9 @@ pub fn run() {
             commands::check_plugin_updates,
             commands::read_global_config,
             commands::write_global_config,
+            commands::get_model_config,
+            commands::set_model_config,
+            commands::fetch_provider_models,
             commands::get_credentials,
             commands::write_credential_refs,
         ])

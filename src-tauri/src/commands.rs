@@ -565,6 +565,29 @@ pub fn write_global_config(content: String) -> Result<(), String> {
     crate::profile_cfg::write_global_config(&content)
 }
 
+/// 读取模型配置（settings.yaml 的 llm-pi-ai.providers 与 agent-default-model）
+#[tauri::command]
+pub fn get_model_config() -> Result<crate::modelcfg::ModelConfig, String> {
+    crate::modelcfg::read()
+}
+
+/// 保存模型配置：仅重写上述两节（其余内容与节外注释逐字节保留，写前自动备份）
+#[tauri::command]
+pub fn set_model_config(config: crate::modelcfg::ModelConfigInput) -> Result<(), String> {
+    crate::modelcfg::write(&config)
+}
+
+/// 拉取服务方可用模型（GET {baseURL}/models；密钥：手动值 > 凭据 refs > 环境变量）
+#[tauri::command]
+pub async fn fetch_provider_models(
+    base_url: String,
+    api: String,
+    api_key_env: String,
+    api_key: Option<String>,
+) -> Result<Vec<crate::modelcfg::RemoteModel>, String> {
+    crate::modelcfg::fetch_provider_models(&base_url, &api, &api_key_env, api_key).await
+}
+
 #[tauri::command]
 pub fn get_credentials() -> Result<crate::credentials::CredentialFile, String> {
     crate::credentials::read()
