@@ -59,6 +59,8 @@ export interface Settings {
   autoCheckUpdate: boolean;
   autoCheckVersions: boolean;
   nodePath: string;
+  /** Node 来源：auto（系统优先，缺失回退内置）| system | runtime */
+  nodeSource: string;
   /** 内置 Node 运行时下载镜像站 */
   nodeMirror: string;
   closeToTray: boolean;

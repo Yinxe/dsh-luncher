@@ -240,6 +240,18 @@ export default function App() {
     }
   }, [addToast]);
 
+  const doSetNodeSource = useCallback(async (v: "auto" | "system" | "runtime") => {
+    const s = settingsRef.current;
+    if (!s || s.nodeSource === v) return;
+    const next = { ...s, nodeSource: v };
+    setSettings(next);
+    try {
+      await api.saveSettings(next);
+      setEnv(await api.getEnvironment());
+      addToast("ok", `Node 来源已切换为 ${v === "auto" ? "自动" : v === "system" ? "系统级" : "隔离（内置）"}`);
+    } catch (e) { addToast("err", `切换失败: ${e}`); }
+  }, [addToast]);
+
   const doSetActiveVersion = useCallback(async (v: string) => {
     const s = settingsRef.current;
     if (!s || s.activeVersion === v) return;
@@ -562,29 +574,49 @@ export default function App() {
             <div className="space-y-4">
               <div className="grid grid-cols-[320px_1fr] gap-3">
                 <Card className="p-4">
-                  <div className="eyebrow mb-2.5">① Node 环境</div>
+                  <div className="eyebrow mb-2.5">① Node 环境 —— 系统级 / 隔离级可切换</div>
+                  <div className="mb-3 flex rounded-lg border border-border p-0.5">
+                    {([["auto", "自动"], ["system", "系统级"], ["runtime", "隔离（内置）"]] as const).map(([k, l]) => (
+                      <button
+                        key={k}
+                        className={`flex-1 rounded-md px-2.5 py-1 text-xs transition-colors ${
+                          settings.nodeSource === k ? "bg-primary/15 font-medium text-primary" : "text-muted-foreground hover:text-foreground"
+                        }`}
+                        onClick={() => doSetNodeSource(k)}
+                      >
+                        {l}
+                      </button>
+                    ))}
+                  </div>
                   {env.node ? (
                     <div className="flex items-center gap-2 text-sm">
                       <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                       <span className="font-mono">Node v{env.node}</span>
                       <span className="text-xs text-muted-foreground">
-                        {env.nodePath?.includes(".dsh-launcher") ? "（内置运行时 · 仅供本软件）" : "（系统）"}
+                        {env.nodePath?.includes(".dsh-launcher") ? "（隔离 · 仅本软件使用）" : "（系统级）"}
                       </span>
                     </div>
                   ) : (
+                    <div className="flex items-center gap-2 text-sm text-amber-500">
+                      <XCircle className="h-4 w-4" />
+                      {settings.nodeSource === "system" ? "系统级未检测到 Node" : "尚无可用 Node"}
+                    </div>
+                  )}
+                  {settings.nodeSource !== "system" && !env.runtimeInstalled && (
                     <>
-                      <div className="flex items-center gap-2 text-sm text-amber-500">
-                        <XCircle className="h-4 w-4" />
-                        未检测到 Node
-                      </div>
-                      <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
-                        dsh 依赖 Node 运行。可一键安装<b className="text-foreground">内置运行时</b>：仅写入启动器数据目录，
-                        <b className="text-foreground">仅供本软件使用，不影响宿主机系统环境</b>。
+                      <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                        安装<b className="text-foreground">隔离的内置 Node</b>（约 25MB）：仅写入启动器数据目录、仅供本软件使用，
+                        与系统 Node 互不干扰；即使系统已有 Node 也可安装，装好后随时在上方切换。
                       </p>
-                      <Button size="sm" className="mt-2.5" onClick={doInstallRuntime}>
-                        安装内置 Node（局部安装）
+                      <Button size="sm" className="mt-2" onClick={doInstallRuntime}>
+                        安装隔离 Node
                       </Button>
                     </>
+                  )}
+                  {env.runtimeInstalled && (
+                    <div className="mt-2 truncate font-mono text-[10.5px] text-muted-foreground">
+                      内置运行时已就绪：{env.runtimeDir}
+                    </div>
                   )}
                   {runtimeJob && (
                     <div className="mt-2.5 flex items-center gap-2 text-xs text-muted-foreground">
