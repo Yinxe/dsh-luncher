@@ -173,14 +173,14 @@ body {
     pointer-events: none;
   }
   .brackets::before {
-    top: -1px;
-    left: -1px;
+    top: 0;
+    left: 0;
     border-top: 1.5px solid;
     border-left: 1.5px solid;
   }
   .brackets::after {
-    bottom: -1px;
-    right: -1px;
+    bottom: 0;
+    right: 0;
     border-bottom: 1.5px solid;
     border-right: 1.5px solid;
   }

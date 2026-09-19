@@ -3,7 +3,7 @@ import { check as updaterCheck, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
   Package, Rocket, Puzzle, FileCog, RefreshCw, Settings as SettingsIcon,
-  ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon,
+  ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
 } from "lucide-react";
 import { api, events } from "./api";
 import { useTheme } from "@/lib/theme";
@@ -14,7 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import InstallCard from "./components/InstallCard";
 import ConfigView from "./components/ConfigView";
 import PluginsView from "./components/PluginsView";
-import ProcessDock from "./components/ProcessDock";
+import ProcessSidePanel from "./components/ProcessSidePanel";
 import VersionRow from "./components/VersionRow";
 import SettingsModal from "./components/SettingsModal";
 import UpdateBanner from "./components/UpdateBanner";
@@ -42,7 +42,7 @@ export default function App() {
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
   const [procs, setProcs] = useState<Record<number, ProcEntry>>({});
   const [activeProc, setActiveProc] = useState<number | null>(null);
-  const [dockOpen, setDockOpen] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [runtimeJob, setRuntimeJob] = useState<{ received: number; total: number; log: string[] } | null>(null);
   const runtimeBusy = useRef(false);
   const [instances, setInstances] = useState<ProfileInstance[]>([]);
@@ -312,7 +312,7 @@ export default function App() {
         },
       }));
       setActiveProc(info.id);
-      setDockOpen(true);
+      setDrawerOpen(true);
       addToast("ok", `profile「${info.profile}」启动中（dsh ${info.version}，PID ${info.id}）`);
     } catch (e) { addToast("err", `启动失败: ${e}`); }
   }, [addToast]);
@@ -421,6 +421,17 @@ export default function App() {
           <RefreshCw className={remoteLoading ? "animate-spin" : ""} /> 刷新版本
         </Button>
         <Button variant="outline" size="sm" onClick={doCheckUpdate}>检查更新</Button>
+        <Button
+          variant={drawerOpen ? "secondary" : "outline"}
+          size="sm"
+          onClick={() => setDrawerOpen((v) => !v)}
+          title="打开/收起实例终端"
+        >
+          <Terminal /> 实例终端
+          {runningInstanceCount > 0 && (
+            <Badge variant="success" className="ml-0.5">{runningInstanceCount}</Badge>
+          )}
+        </Button>
         <Button variant="ghost" size="icon" title="设置" onClick={() => setShowSettings(true)}>
           <SettingsIcon className="h-4 w-4" />
         </Button>
@@ -701,11 +712,11 @@ export default function App() {
         </main>
       </div>
 
-      <ProcessDock
+      <ProcessSidePanel
         procs={Object.values(procs).sort((a, b) => a.id - b.id)}
         activeId={activeProc}
-        open={dockOpen}
-        onToggle={() => setDockOpen((v) => !v)}
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
         onSelect={setActiveProc}
         onStop={doStopProc}
         onOpenWeb={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}

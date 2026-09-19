@@ -45,11 +45,13 @@ export default function VersionRow({
   return (
     <Card
       className={`brackets relative flex-row items-stretch gap-0 overflow-hidden p-0 transition-colors ${
-        isActive ? "border-primary/45 shadow-[0_0_0_1px_rgba(99,102,241,0.15)]" : "hover:border-primary/25"
+        isActive
+          ? "border-primary/60 bg-gradient-to-r from-primary/[0.09] via-primary/[0.03] to-transparent shadow-[0_0_24px_-8px_var(--primary)]"
+          : "hover:border-primary/25"
       }`}
     >
       {/* 通道色轨 */}
-      <span className={`w-[3px] shrink-0 ${RAIL[row.channel] ?? "bg-border"} ${isActive ? "bg-primary" : ""}`} />
+      <span className={`w-[3px] shrink-0 ${isActive ? "bg-primary shadow-[0_0_10px_var(--primary)]" : RAIL[row.channel] ?? "bg-border"}`} />
 
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-2.5">
         {/* 版本标识区 */}
@@ -60,6 +62,7 @@ export default function VersionRow({
               {row.channel}
             </Badge>
             {isLatestTag && <Badge variant="info">latest</Badge>}
+            {isActive && <Badge>● 当前运行版本</Badge>}
           </div>
           <div className="mt-0.5 font-mono text-[10.5px] text-muted-foreground">
             {[
@@ -77,7 +80,7 @@ export default function VersionRow({
           {inst ? (
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <span className={`led ${isActive ? "bg-primary led-glow text-primary" : "bg-emerald-500 text-emerald-500"}`} />
+                <span className={`led led-glow ${isActive ? "bg-primary text-primary ring-2 ring-primary/25" : "bg-emerald-500 text-emerald-500"}`} />
                 <span className="text-[11.5px]">
                   {inst.source === "managed" ? "启动器管理" : inst.source === "global" ? "npm 全局" : "PATH"}
                 </span>
