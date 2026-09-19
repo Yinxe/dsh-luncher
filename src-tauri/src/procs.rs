@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -352,6 +353,31 @@ pub fn external_running_profile_pids(exclude: &[u32]) -> Vec<(u32, String)> {
             }
         }
         out.push((pid, profile));
+    }
+    out
+}
+
+/// 扫描外部 dsh 进程中，bin.js 位于指定版本目录下的 PID。
+/// 用于卸载/重装前确认该版本目录没有正在运行的外部实例在使用。
+pub fn external_pids_under_dir(dir: &Path) -> Vec<u32> {
+    let prefix = format!("{}/", dir.display());
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        if !cmdline.contains("@deepseek-ai/dsh") || !cmdline.contains("bin.js") {
+            continue;
+        }
+        if cmdline.contains(&prefix) {
+            out.push(pid);
+        }
     }
     out
 }

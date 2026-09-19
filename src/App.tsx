@@ -4,13 +4,24 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import {
   Package, Rocket, Puzzle, FileCog, RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
+  TriangleAlert,
 } from "lucide-react";
+import { toast } from "sonner";
 import { api, events } from "./api";
 import { useTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Toaster } from "@/components/ui/sonner";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Progress } from "@/components/ui/progress";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import InstallCard from "./components/InstallCard";
 import ConfigView from "./components/ConfigView";
 import PluginsView from "./components/PluginsView";
@@ -20,12 +31,39 @@ import SettingsModal from "./components/SettingsModal";
 import UpdateBanner from "./components/UpdateBanner";
 import type {
   EnvironmentInfo, InstalledVersion, LauncherUpdateStatus, ProcEntry,
-  ProcExitEvent, ProcLogEvent, ProfileInfo, ProfileInstance, RegistryInfo,
-  Settings as SettingsT, Toast,
+  ProcExitEvent, ProcLogEvent, ProfileInfo, ProfileInstance, ProfileTarget,
+  RegistryInfo, Settings as SettingsT,
 } from "./types";
 
-let toastId = 0;
 type View = "versions" | "profiles" | "plugins" | "config";
+
+/**
+ * 各 Target 的标签展示与启动支持状态；新增 Target（如 CLI）在此扩展。
+ * Target 由后端按 profile 的 package.json dsh.profile.bundles 识别。
+ */
+const TARGET_META: Record<
+  ProfileTarget,
+  { label: string; variant: "info" | "secondary" | "outline"; desc: string; launchable: boolean }
+> = {
+  web: {
+    label: "Web",
+    variant: "info",
+    desc: "Web 应用：启动后从日志识别地址并打开浏览器",
+    launchable: true,
+  },
+  desktop: {
+    label: "Desktop",
+    variant: "secondary",
+    desc: "桌面应用：启动方式将在后续版本支持",
+    launchable: false,
+  },
+  unknown: {
+    label: "未识别",
+    variant: "outline",
+    desc: "未识别 Target（bundles 中无已知 Target 插件）",
+    launchable: false,
+  },
+};
 
 export default function App() {
   const [env, setEnv] = useState<EnvironmentInfo | null>(null);
@@ -37,7 +75,7 @@ export default function App() {
   const [installJob, setInstallJob] = useState<{ version: string; logs: string[] } | null>(null);
   const [update, setUpdate] = useState<LauncherUpdateStatus | null>(null);
   const [updateApplying, setUpdateApplying] = useState(false);
-  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [pendingUninstall, setPendingUninstall] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
   const [procs, setProcs] = useState<Record<number, ProcEntry>>({});
@@ -54,14 +92,16 @@ export default function App() {
   procsRef.current = procs;
   const settingsRef = useRef<SettingsT | null>(null);
   settingsRef.current = settings;
+  const instancesRef = useRef<ProfileInstance[]>([]);
+  instancesRef.current = instances;
   const builtinUpdate = useRef<Update | null>(null);
 
   const { resolved, setTheme } = useTheme();
 
-  const addToast = useCallback((kind: Toast["kind"], text: string) => {
-    const id = ++toastId;
-    setToasts((t) => [...t, { id, kind, text }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "err" ? 7000 : 4000);
+  const addToast = useCallback((kind: "ok" | "err" | "info", text: string) => {
+    if (kind === "ok") toast.success(text);
+    else if (kind === "err") toast.error(text, { duration: 7000 });
+    else toast.info(text);
   }, []);
 
   const refreshInstalled = useCallback(async () => {
@@ -98,7 +138,8 @@ export default function App() {
         setProfiles(ps);
         let next = s;
         if (!s.defaultProfile && ps.length > 0) {
-          next = { ...s, defaultProfile: ps.some((p) => p.name === "web") ? "web" : ps[0].name };
+          // 默认 profile 优先选 Web 类型（当前唯一支持的启动方式）
+          next = { ...s, defaultProfile: ps.find((p) => p.target === "web")?.name ?? ps[0].name };
         }
         if (!next.activeVersion && installedList.length > 0) {
           const best = [...installedList]
@@ -155,12 +196,26 @@ export default function App() {
     track(events.onInstallFinished?.(async (e) => {
       setInstallJob((job) => (job && job.version === e.version ? null : job));
       if (e.success) {
-        addToast("ok", `dsh ${e.version} 安装完成，已设为当前版本`);
         await refreshInstalled();
-        if (settingsRef.current && settingsRef.current.activeVersion !== e.version) {
-          const next = { ...settingsRef.current, activeVersion: e.version };
+        const s = settingsRef.current;
+        if (!s || s.activeVersion === e.version) {
+          addToast("ok", `dsh ${e.version} 安装完成，已设为当前版本`);
+        } else if (instancesRef.current.some((i) => i.running)) {
+          // 与手动切换同样的限制：有实例运行时不切换，只安装
+          addToast(
+            "err",
+            `dsh ${e.version} 安装完成，但有 Profile 实例正在运行，未自动切换为当前版本。请先停止所有实例，再手动切换`
+          );
+        } else {
+          const next = { ...s, activeVersion: e.version };
           setSettings(next);
-          api.saveSettings(next).catch(() => undefined);
+          try {
+            await api.saveSettings(next);
+            addToast("ok", `dsh ${e.version} 安装完成，已设为当前版本`);
+          } catch (err) {
+            setSettings(s);
+            addToast("err", `dsh ${e.version} 已安装，但自动设为当前版本失败: ${err}`);
+          }
         }
       } else {
         addToast("err", `dsh ${e.version} 安装失败：${e.message.split("\n")[0]}`);
@@ -181,14 +236,24 @@ export default function App() {
       setActiveProc((a) => a ?? e.id);
     }));
     track(events.onProcExit?.((e: ProcExitEvent) => {
+      const old = procsRef.current[e.id];
       setProcs((m) => {
-        const old = m[e.id];
-        if (!old) return m;
-        return { ...m, [e.id]: { ...old, exited: true, code: e.code } };
+        const cur = m[e.id];
+        if (!cur) return m;
+        return { ...m, [e.id]: { ...cur, exited: true, code: e.code } };
       });
       const tag = e.profile ? ` (${e.profile})` : "";
       if (e.code == null) addToast("info", `dsh ${e.version}${tag} 已停止`);
-      else if (e.code === 0) addToast("ok", `dsh ${e.version}${tag} 正常退出`);
+      else if (
+        e.code === 0 && old && old.lines.length === 0 && Date.now() - old.startedAt < 3000
+      ) {
+        // 秒退且零输出：进程什么都没做就退出，最典型的是 Node 版本过旧
+        // （dsh 入口依赖 import.meta.main）导致 runCli 从未执行
+        addToast(
+          "err",
+          `dsh ${e.version}${tag} 启动后立即退出且无任何输出。常见原因：Node 版本过低（需 ≥ v24.2），请在「版本与安装」页安装/升级内置 Node 后重试`
+        );
+      } else if (e.code === 0) addToast("ok", `dsh ${e.version}${tag} 正常退出`);
       else addToast("err", `dsh ${e.version}${tag} 已退出，退出码 ${e.code}`);
     }));
     track(events.onRuntimeLog?.((line) =>
@@ -255,22 +320,36 @@ export default function App() {
   const doSetActiveVersion = useCallback(async (v: string) => {
     const s = settingsRef.current;
     if (!s || s.activeVersion === v) return;
+    // 有实例运行时禁止切换：所有实例都基于当前版本，需先手动全部停止
+    if (instancesRef.current.some((i) => i.running)) {
+      addToast("err", "有 Profile 实例正在运行，不能切换 DSH 版本。请先停止所有实例后再切换");
+      return;
+    }
     const next = { ...s, activeVersion: v };
     setSettings(next);
     try {
       await api.saveSettings(next);
       addToast("ok", `当前版本已切换为 ${v}，Profile 实例将基于它启动`);
-    } catch (e) { addToast("err", `切换版本失败: ${e}`); }
+    } catch (e) {
+      setSettings(s); // 后端兜底拒绝（如拦截窗口内新起了实例）时回滚乐观更新
+      addToast("err", `切换版本失败: ${e}`);
+    }
   }, [addToast]);
 
-  const doUninstall = useCallback(async (version: string) => {
-    if (!window.confirm(`确定卸载 dsh ${version}？将删除其安装目录。`)) return;
+  const doUninstall = useCallback((version: string) => {
+    setPendingUninstall(version);
+  }, []);
+
+  const confirmUninstall = useCallback(async () => {
+    if (!pendingUninstall) return;
+    const version = pendingUninstall;
+    setPendingUninstall(null);
     try {
       await api.uninstall(version);
       addToast("ok", `dsh ${version} 已卸载`);
       await refreshInstalled();
     } catch (e) { addToast("err", `卸载失败: ${e}`); }
-  }, [addToast, refreshInstalled]);
+  }, [pendingUninstall, addToast, refreshInstalled]);
 
   const doCancelInstall = useCallback(async () => {
     try { await api.cancelInstall(); addToast("info", "已请求取消安装"); }
@@ -328,8 +407,9 @@ export default function App() {
       setActiveProc(info.id);
       setDrawerOpen(true);
       addToast("ok", `profile「${info.profile}」启动中（dsh ${info.version}，PID ${info.id}）`);
+      refreshInstances(); // 立即感知新实例，让「切换版本」锁定尽快生效（否则要等 3s 轮询）
     } catch (e) { addToast("err", `启动失败: ${e}`); }
-  }, [addToast]);
+  }, [addToast, refreshInstances]);
 
   const doStopProfileInstance = useCallback(async (profile: string) => {
     try {
@@ -347,6 +427,14 @@ export default function App() {
 
   const latestVersion = remote?.tags?.latest;
 
+  // 是否已安装 ≥ latest 标签的版本——装过最新版后，旧版本行不再提示「可升级」
+  const hasLatestInstalled = useMemo(
+    () =>
+      latestVersion != null &&
+      installed.some((i) => i.version !== "unknown" && cmpVer(i.version, latestVersion) >= 0),
+    [installed, latestVersion]
+  );
+
   const filteredVerRows = useMemo(
     () =>
       rows.filter((r) => {
@@ -361,16 +449,25 @@ export default function App() {
   );
 
   const upgradableCount = useMemo(
-    () => rows.filter(
-      (r) => r.installed && r.installed.version !== "unknown" &&
-        latestVersion != null && cmpVer(latestVersion, r.version) > 0
-    ).length,
-    [rows, latestVersion]
+    () =>
+      hasLatestInstalled
+        ? 0
+        : rows.filter(
+            (r) => r.installed && r.installed.version !== "unknown" &&
+              latestVersion != null && cmpVer(latestVersion, r.version) > 0
+          ).length,
+    [rows, latestVersion, hasLatestInstalled]
   );
 
   const runningInstanceCount = useMemo(
     () => Object.values(procs).filter((p) => !p.exited).length,
     [procs]
+  );
+
+  // 有无任何运行中的 Profile 实例（含外部终端启动的）——运行期间禁止切换 DSH 版本
+  const instancesRunning = useMemo(
+    () => instances.some((i) => i.running),
+    [instances]
   );
 
   const liveWebProcs = useMemo(
@@ -381,10 +478,10 @@ export default function App() {
   // Profile 实例阶段：stopped → starting → ready（出现 URL）/ failed
   const instanceRows = useMemo(() => {
     type Phase = "stopped" | "starting" | "ready" | "failed" | "external";
-    type Row = { profile: string; phase: Phase; pid: number | null; source: "embedded" | "external" | null; version: string | null; webUrl: string | null; code: number | null; webType: boolean };
+    type Row = { profile: string; phase: Phase; pid: number | null; source: "embedded" | "external" | null; version: string | null; webUrl: string | null; code: number | null; target: ProfileTarget };
     const map = new Map<string, Row>();
     for (const p of profiles) {
-      map.set(p.name, { profile: p.name, phase: "stopped", pid: null, source: null, version: null, webUrl: null, code: null, webType: p.webType });
+      map.set(p.name, { profile: p.name, phase: "stopped", pid: null, source: null, version: null, webUrl: null, code: null, target: p.target });
     }
     for (const i of instances) {
       const known = map.get(i.profile);
@@ -396,7 +493,7 @@ export default function App() {
         version: i.version,
         webUrl: null,
         code: null,
-        webType: known?.webType ?? false,
+        target: known?.target ?? "unknown",
       });
     }
     const latest = new Map<string, ProcEntry>();
@@ -408,7 +505,7 @@ export default function App() {
       const phase: Phase = p.exited
         ? p.code == null || p.code === 0 ? "stopped" : "failed"
         : p.webUrl ? "ready" : "starting";
-      map.set(p.profile, { profile: p.profile, phase, pid: p.id, source: "embedded", version: p.version, webUrl: p.webUrl, code: p.code, webType: map.get(p.profile)?.webType ?? false });
+      map.set(p.profile, { profile: p.profile, phase, pid: p.id, source: "embedded", version: p.version, webUrl: p.webUrl, code: p.code, target: map.get(p.profile)?.target ?? "unknown" });
     }
     return [...map.values()].sort((a, b) => a.profile.localeCompare(b.profile));
   }, [profiles, instances, procs]);
@@ -490,29 +587,42 @@ export default function App() {
         />
       )}
       {env && !env.node && (
-        <div className="flex shrink-0 items-center gap-3 border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px]">
+        <Alert
+          variant="destructive"
+          className={`shrink-0 gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px] ${runtimeJob ? "" : "pr-40"}`}
+        >
+          <XCircle />
           {runtimeJob ? (
             <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span>
+              <AlertTitle className="font-normal">
                 正在安装内置 Node…
                 {runtimeJob.total > 0 &&
                   ` ${Math.round((runtimeJob.received / runtimeJob.total) * 100)}% (${(runtimeJob.received / 1048576).toFixed(1)}/${(runtimeJob.total / 1048576).toFixed(1)} MB)`}
-              </span>
-              <span className="flex-1" />
-              <span className="font-mono text-[11px] text-muted-foreground">
+              </AlertTitle>
+              {runtimeJob.total > 0 && (
+                <AlertDescription>
+                  <Progress
+                    value={(runtimeJob.received / runtimeJob.total) * 100}
+                    className="h-1.5 max-w-md bg-red-500/20"
+                  />
+                </AlertDescription>
+              )}
+              <AlertDescription className="truncate font-mono text-[11px]">
                 {runtimeJob.log[runtimeJob.log.length - 1] ?? "连接镜像站…"}
-              </span>
+              </AlertDescription>
             </>
           ) : (
             <>
-              <XCircle className="h-4 w-4 text-destructive" />
-              <span>未检测到 Node.js（dsh 依赖 Node 运行）。可一键安装启动器内置 Node LTS（用户级、无需 root，默认走 npmmirror 镜像）</span>
-              <span className="flex-1" />
-              <Button size="sm" onClick={doInstallRuntime}>一键安装 Node</Button>
+              <AlertTitle className="font-normal">未检测到 Node.js（dsh 依赖 Node 运行）</AlertTitle>
+              <AlertDescription>
+                可一键安装启动器内置 Node LTS（用户级、无需 root，默认走 npmmirror 镜像）
+              </AlertDescription>
+              <AlertAction>
+                <Button size="sm" onClick={doInstallRuntime}>一键安装 Node</Button>
+              </AlertAction>
             </>
           )}
-        </div>
+        </Alert>
       )}
 
       {/* 主体 */}
@@ -575,19 +685,16 @@ export default function App() {
               <div className="grid grid-cols-[320px_1fr] gap-3">
                 <Card className="p-4">
                   <div className="eyebrow mb-2.5">① Node 环境 —— 系统级 / 隔离级可切换</div>
-                  <div className="mb-3 flex rounded-lg border border-border p-0.5">
-                    {([["auto", "自动"], ["system", "系统级"], ["runtime", "隔离（内置）"]] as const).map(([k, l]) => (
-                      <button
-                        key={k}
-                        className={`flex-1 rounded-md px-2.5 py-1 text-xs transition-colors ${
-                          settings.nodeSource === k ? "bg-primary/15 font-medium text-primary" : "text-muted-foreground hover:text-foreground"
-                        }`}
-                        onClick={() => doSetNodeSource(k)}
-                      >
-                        {l}
-                      </button>
-                    ))}
-                  </div>
+                  <Tabs
+                    value={settings.nodeSource}
+                    onValueChange={(v) => doSetNodeSource(v as "auto" | "system" | "runtime")}
+                  >
+                    <TabsList className="mb-3 w-full">
+                      <TabsTrigger value="auto" className="text-xs">自动</TabsTrigger>
+                      <TabsTrigger value="system" className="text-xs">系统级</TabsTrigger>
+                      <TabsTrigger value="runtime" className="text-xs">隔离（内置）</TabsTrigger>
+                    </TabsList>
+                  </Tabs>
                   {env.node ? (
                     <div className="flex items-center gap-2 text-sm">
                       <CheckCircle2 className="h-4 w-4 text-emerald-500" />
@@ -619,30 +726,46 @@ export default function App() {
                     </div>
                   )}
                   {runtimeJob && (
-                    <div className="mt-2.5 flex items-center gap-2 text-xs text-muted-foreground">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      {runtimeJob.total > 0
-                        ? `${Math.round((runtimeJob.received / runtimeJob.total) * 100)}% (${(runtimeJob.received / 1048576).toFixed(1)}/${(runtimeJob.total / 1048576).toFixed(1)} MB)`
-                        : "连接镜像站…"}
+                    <div className="mt-2.5 space-y-1.5 text-xs text-muted-foreground">
+                      {runtimeJob.total > 0 && (
+                        <Progress value={(runtimeJob.received / runtimeJob.total) * 100} className="h-1.5" />
+                      )}
+                      <div className="flex items-center gap-1.5">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        {runtimeJob.total > 0
+                          ? `${Math.round((runtimeJob.received / runtimeJob.total) * 100)}% (${(runtimeJob.received / 1048576).toFixed(1)}/${(runtimeJob.total / 1048576).toFixed(1)} MB)`
+                          : "连接镜像站…"}
+                      </div>
                     </div>
                   )}
                 </Card>
                 <Card className="p-4">
                   <div className="eyebrow mb-2.5">② 当前 DSH 版本 —— 所有 Profile 实例基于它运行</div>
                   {installed.length > 0 ? (
-                    <Select value={settings.activeVersion} onValueChange={doSetActiveVersion}>
-                      <SelectTrigger className="w-64 font-mono">
-                        <SelectValue placeholder="选择版本" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {installed.map((i, idx) => (
-                          <SelectItem key={`${i.version}-${idx}`} value={i.version}>
-                            {i.version}
-                            {i.source === "managed" ? "" : ` · ${i.source === "global" ? "全局" : "PATH"}`}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <>
+                      <Select
+                        value={settings.activeVersion}
+                        onValueChange={doSetActiveVersion}
+                        disabled={instancesRunning}
+                      >
+                        <SelectTrigger className="w-64 font-mono">
+                          <SelectValue placeholder="选择版本" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {installed.map((i, idx) => (
+                            <SelectItem key={`${i.version}-${idx}`} value={i.version}>
+                              {i.version}
+                              {i.source === "managed" ? "" : ` · ${i.source === "global" ? "全局" : "PATH"}`}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {instancesRunning && (
+                        <p className="mt-2 text-[11.5px] text-amber-500">
+                          有 Profile 实例正在运行，停止所有实例后才能切换版本
+                        </p>
+                      )}
+                    </>
                   ) : (
                     <div className="flex items-center gap-2 text-sm text-muted-foreground">
                       <XCircle className="h-4 w-4 text-amber-500" /> 未安装——在下方列表点「安装」
@@ -656,11 +779,14 @@ export default function App() {
               )}
 
               {remoteErr && !remoteLoading && (
-                <Card className="border-destructive/40 p-6 text-center text-destructive">
-                  <div className="mb-2 text-3xl">⚠</div>
-                  <div className="mb-3">拉取官方版本列表失败：{remoteErr}</div>
-                  <Button variant="outline" size="sm" onClick={refreshRemote}>重试</Button>
-                </Card>
+                <Alert variant="destructive" className="pr-28">
+                  <TriangleAlert />
+                  <AlertTitle>拉取官方版本列表失败</AlertTitle>
+                  <AlertDescription>{remoteErr}</AlertDescription>
+                  <AlertAction>
+                    <Button variant="outline" size="sm" onClick={refreshRemote}>重试</Button>
+                  </AlertAction>
+                </Alert>
               )}
 
               {!remoteErr && rows.length === 0 && !remoteLoading && (
@@ -672,32 +798,19 @@ export default function App() {
 
               {/* 版本筛选工具栏 */}
               <div className="flex flex-wrap items-center gap-2">
-                <div className="flex rounded-lg border border-border p-0.5">
-                  {([["all", "全部版本"], ["installed", "已安装"]] as const).map(([k, l]) => (
-                    <button
-                      key={k}
-                      className={`rounded-md px-3 py-1 text-xs transition-colors ${
-                        verScope === k ? "bg-primary/15 font-medium text-primary" : "text-muted-foreground hover:text-foreground"
-                      }`}
-                      onClick={() => setVerScope(k)}
-                    >
-                      {l}
-                    </button>
-                  ))}
-                </div>
-                <div className="flex rounded-lg border border-border p-0.5">
-                  {([["all", "全部类型"], ["stable", "正式版（含 RC）"], ["pre", "预发布"]] as const).map(([k, l]) => (
-                    <button
-                      key={k}
-                      className={`rounded-md px-3 py-1 text-xs transition-colors ${
-                        verType === k ? "bg-primary/15 font-medium text-primary" : "text-muted-foreground hover:text-foreground"
-                      }`}
-                      onClick={() => setVerType(k)}
-                    >
-                      {l}
-                    </button>
-                  ))}
-                </div>
+                <Tabs value={verScope} onValueChange={(v) => setVerScope(v as "all" | "installed")}>
+                  <TabsList>
+                    <TabsTrigger value="all" className="px-3 text-xs">全部版本</TabsTrigger>
+                    <TabsTrigger value="installed" className="px-3 text-xs">已安装</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+                <Tabs value={verType} onValueChange={(v) => setVerType(v as "all" | "stable" | "pre")}>
+                  <TabsList>
+                    <TabsTrigger value="all" className="px-3 text-xs">全部类型</TabsTrigger>
+                    <TabsTrigger value="stable" className="px-3 text-xs">正式版（含 RC）</TabsTrigger>
+                    <TabsTrigger value="pre" className="px-3 text-xs">预发布</TabsTrigger>
+                  </TabsList>
+                </Tabs>
                 <span className="flex-1" />
                 <span className="text-xs text-muted-foreground">
                   {filteredVerRows.length} / {rows.length} 个版本
@@ -709,18 +822,18 @@ export default function App() {
 
               {/* 版本表 */}
               {rows.length > 0 && (
-                <Card className="overflow-hidden">
-                  <table className="w-full text-[13px]">
-                    <thead>
-                      <tr className="border-b border-border bg-muted/40 text-left text-[10.5px] uppercase tracking-wider text-muted-foreground">
-                        <th className="px-4 py-2.5 font-medium">版本</th>
-                        <th className="px-3 py-2.5 font-medium">发布日期</th>
-                        <th className="px-3 py-2.5 font-medium">大小</th>
-                        <th className="px-3 py-2.5 font-medium">状态</th>
-                        <th className="px-3 py-2.5 text-right font-medium">操作</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border">
+                <Card className="py-0">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/40 hover:bg-muted/40">
+                        <TableHead className="h-9 pl-4 text-[10.5px] uppercase tracking-wider">版本</TableHead>
+                        <TableHead className="h-9 text-[10.5px] uppercase tracking-wider">发布日期</TableHead>
+                        <TableHead className="h-9 text-[10.5px] uppercase tracking-wider">大小</TableHead>
+                        <TableHead className="h-9 text-[10.5px] uppercase tracking-wider">状态</TableHead>
+                        <TableHead className="h-9 pr-4 text-right text-[10.5px] uppercase tracking-wider">操作</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
                       {filteredVerRows.map((r) => (
                         <VersionRow
                           key={`${r.version}-${r.installed?.source ?? "remote"}`}
@@ -728,12 +841,14 @@ export default function App() {
                           isLatestTag={latestVersion === r.version}
                           busy={installJob !== null}
                           upgradeTo={
+                            !hasLatestInstalled &&
                             r.installed && r.installed.version !== "unknown" && latestVersion &&
                             cmpVer(latestVersion, r.version) > 0
                               ? latestVersion : null
                           }
                           onUpgrade={(v) => doInstall(v, false)}
                           isActive={settings.activeVersion === r.version}
+                          switchLocked={instancesRunning}
                           onSetActive={doSetActiveVersion}
                           onInstall={(v, force) => doInstall(v, force)}
                           onUninstall={doUninstall}
@@ -741,14 +856,14 @@ export default function App() {
                         />
                       ))}
                       {filteredVerRows.length === 0 && (
-                        <tr>
-                          <td colSpan={5} className="px-4 py-10 text-center text-muted-foreground">
+                        <TableRow>
+                          <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
                             没有符合筛选条件的版本
-                          </td>
-                        </tr>
+                          </TableCell>
+                        </TableRow>
                       )}
-                    </tbody>
-                  </table>
+                    </TableBody>
+                  </Table>
                 </Card>
               )}
             </div>
@@ -768,9 +883,17 @@ export default function App() {
                 </Button>
               </div>
               <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
-                带 <Badge variant="info">web</Badge> 标记的 profile 含
-                <span className="font-mono"> @deepseek-ai/dsh-web-app </span>
-                插件（已验证可正常启动并提供 Web 界面）；其余 profile 可能启动失败——以日志为准。
+                <span className="text-foreground">Target 标签</span>
+                {" "}按各 profile 的 <span className="font-mono">package.json</span> 中
+                <span className="font-mono"> dsh.profile.bundles </span>
+                识别运行形态：
+                <Badge variant="info">Web</Badge>
+                含 <span className="font-mono"> @deepseek-ai/dsh-web-app </span>
+                插件，启动后从日志识别地址并打开浏览器（当前唯一支持的启动方式）；
+                <Badge variant="secondary">Desktop</Badge>
+                为桌面应用外壳；
+                <Badge variant="outline">未识别</Badge>
+                暂无可用的启动方式。新 Target 的启动方式将在后续版本扩展。
                 若插件导致启动异常，到「插件管理」页停用可疑插件后重启实例。
               </div>
               <div className="space-y-2">
@@ -782,6 +905,8 @@ export default function App() {
                     : row.phase === "external" ? "运行中（外部启动）" : "未运行";
                   const canStop = row.phase === "starting" || row.phase === "ready" || row.phase === "external";
                   const canOpen = row.phase === "ready" && !!row.webUrl;
+                  const targetMeta = TARGET_META[row.target];
+                  const canStart = targetMeta.launchable;
                   return (
                     <Card key={row.profile} className="flex-row items-center gap-3 p-3">
                       {row.phase === "starting" ? (
@@ -794,7 +919,12 @@ export default function App() {
                         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${row.phase === "external" ? "bg-sky-500" : "bg-muted-foreground/30"}`} />
                       )}
                       <div className="min-w-0 flex-1">
-                        <div className="font-mono text-[13px] font-semibold">{row.profile}</div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono text-[13px] font-semibold">{row.profile}</span>
+                          <Badge variant={targetMeta.variant} title={targetMeta.desc}>
+                            {targetMeta.label}
+                          </Badge>
+                        </div>
                         <div className="text-[11px] text-muted-foreground">
                           {phaseText}
                           {row.pid ? ` · PID ${row.pid}` : ""}
@@ -817,9 +947,11 @@ export default function App() {
                         <Button
                           size="sm"
                           variant="outline"
-                          disabled={installed.length === 0}
+                          disabled={installed.length === 0 || !canStart}
                           title={installed.length === 0
                             ? "请先在「版本与安装」页安装 dsh"
+                            : !canStart
+                            ? `${targetMeta.desc}——当前仅支持启动 Web 类型 profile`
                             : row.phase === "failed"
                             ? "重新启动该 profile"
                             : `基于当前版本（${settings.activeVersion}）启动 ${row.profile}`}
@@ -888,19 +1020,24 @@ export default function App() {
         />
       )}
 
-      {/* Toasts */}
-      <div className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2">
-        {toasts.map((t) => (
-          <div
-            key={t.id}
-            className={`max-w-md rounded-lg border bg-card px-3.5 py-2.5 text-[13px] shadow-lg ${
-              t.kind === "ok" ? "border-emerald-500/40" : t.kind === "err" ? "border-red-500/40" : "border-border"
-            }`}
-          >
-            {t.text}
-          </div>
-        ))}
-      </div>
+      {/* Toasts（sonner） */}
+      <Toaster position="bottom-right" richColors closeButton />
+
+      {/* 卸载确认 */}
+      <AlertDialog open={pendingUninstall != null} onOpenChange={(o) => !o && setPendingUninstall(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>卸载 dsh {pendingUninstall}？</AlertDialogTitle>
+            <AlertDialogDescription>将删除该版本的安装目录，此操作不可撤销。</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={confirmUninstall}>
+              卸载
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

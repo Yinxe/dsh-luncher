@@ -3,12 +3,16 @@ import { Plus, RotateCcw, Save } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import YamlEditor from "@/components/YamlEditor";
 import { api, events } from "../api";
-import type { ProfileDetail, PluginEntryInfo } from "../types";
+import type { ProfileDetail } from "../types";
 
 interface Props {
   profiles: string[];
@@ -21,7 +25,6 @@ export default function PluginsView({ profiles, onToast }: Props) {
     profiles.includes("web") ? "web" : (profiles[0] ?? "")
   );
   const [detail, setDetail] = useState<ProfileDetail | null>(null);
-  const [plugins, setPlugins] = useState<PluginEntryInfo[]>([]);
   const [reloadMode, setReloadMode] = useState<string>("live");
   const [editFile] = useState<string>("cordis.patch.yml");
   const [draft, setDraft] = useState("");
@@ -29,6 +32,7 @@ export default function PluginsView({ profiles, onToast }: Props) {
   const [busy, setBusy] = useState(false);
   const [jobLine, setJobLine] = useState<string | null>(null);
   const [newPkg, setNewPkg] = useState("");
+  const [pendingUninstall, setPendingUninstall] = useState<string | null>(null);
 
   useEffect(() => {
     // profiles 晚于挂载加载时，同样默认选中 web
@@ -40,13 +44,11 @@ export default function PluginsView({ profiles, onToast }: Props) {
   const reload = useCallback(async () => {
     if (!profile) return;
     try {
-      const [d, p, mode] = await Promise.all([
+      const [d, mode] = await Promise.all([
         api.getProfileDetail(profile),
-        api.listProfilePlugins(profile),
         api.getPatchReload(profile),
       ]);
       setDetail(d);
-      setPlugins(p);
       setReloadMode(mode);
       setDraft(d.patchRaw);
       setDirty(false);
@@ -79,14 +81,14 @@ export default function PluginsView({ profiles, onToast }: Props) {
     return () => un?.();
   }, [profile, reload, onToast]);
 
-  const togglePlugin = useCallback(
-    async (p: PluginEntryInfo) => {
+  const toggleBundle = useCallback(
+    async (name: string, enabled: boolean) => {
       setBusy(true);
       try {
-        await api.setProfilePlugin(profile, p.id, !p.disabled);
+        await api.setBundleEnabled(profile, name, enabled);
         onToast(
           "ok",
-          `插件 ${p.id} 已${p.disabled ? "启用" : "停用"}${
+          `插件包 ${name} 已${enabled ? "启用" : "停用"}${
             reloadMode === "live" ? "（live 模式已即时生效）" : "（startup 模式需重启实例）"
           }`
         );
@@ -100,30 +102,8 @@ export default function PluginsView({ profiles, onToast }: Props) {
     [profile, reloadMode, reload, onToast]
   );
 
-  const toggleBundle = useCallback(
-    async (name: string, enabled: boolean) => {
-      setBusy(true);
-      try {
-        await api.setBundleEnabled(profile, name, enabled);
-        onToast("ok", `插件包 ${name} 已${enabled ? "启用" : "停用"}，重启实例后生效`);
-        await reload();
-      } catch (e) {
-        onToast("err", String(e));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [profile, reload, onToast]
-  );
-
   const uninstall = useCallback(
     async (name: string) => {
-      if (
-        !window.confirm(
-          `从 profile「${profile}」卸载插件 ${name}？\n将同时移除 bundles 与依赖声明（本地 link 插件目录不会被删除）。`
-        )
-      )
-        return;
       setBusy(true);
       try {
         await api.uninstallBundle(profile, name);
@@ -203,47 +183,11 @@ export default function PluginsView({ profiles, onToast }: Props) {
       </div>
 
       <Card className="p-4">
-        <div className="mb-2.5 text-[13px] font-semibold">
-          插件服务
-          <span className="ml-2 text-xs font-normal text-muted-foreground">
-            来自 cordis.patch 层，可动态启停
-          </span>
-        </div>
-        <div className="space-y-1.5">
-          {plugins.map((p) => (
-            <div
-              key={p.id}
-              className={`flex items-center gap-3 rounded-lg border border-border bg-background/50 px-3 py-1.5 ${
-                p.disabled ? "opacity-60" : ""
-              }`}
-            >
-              <span className={`h-2 w-2 shrink-0 rounded-full ${p.disabled ? "bg-muted-foreground/40" : "bg-emerald-500"}`} />
-              <div className="min-w-0 flex-1">
-                <div className="font-mono text-[12.5px] font-medium">{p.id}</div>
-                <div className="text-[10.5px] text-muted-foreground">
-                  {p.bundle ? `来自 ${p.bundle}` : "来自用户 patch 层"}
-                  {p.disabled && !p.managed ? " · 手动禁用" : ""}
-                </div>
-              </div>
-              <Switch
-                checked={!p.disabled}
-                disabled={busy}
-                onCheckedChange={(v) => togglePlugin({ ...p, disabled: !v })}
-              />
-            </div>
-          ))}
-          {plugins.length === 0 && (
-            <div className="py-3 text-center text-xs text-muted-foreground">未读取到插件清单</div>
-          )}
-        </div>
-      </Card>
-
-      <Card className="p-4">
         <div className="mb-2.5 flex flex-wrap items-center gap-2.5">
           <div className="text-[13px] font-semibold">
             插件包
             <span className="ml-2 text-xs font-normal text-muted-foreground">
-              dsh.profile.bundles
+              dsh.profile.bundles · 启停按包内真实插件 ID 写入 cordis.patch 层
             </span>
           </div>
           <span className="flex-1" />
@@ -269,8 +213,9 @@ export default function PluginsView({ profiles, onToast }: Props) {
               <span className={`h-2 w-2 shrink-0 rounded-full ${b.enabled ? "bg-emerald-500" : "bg-muted-foreground/40"}`} />
               <div className="min-w-0 flex-1">
                 <div className="truncate font-mono text-[12.5px] font-medium">{b.name}</div>
-                <div className="text-[10.5px] text-muted-foreground">
+                <div className="truncate text-[10.5px] text-muted-foreground">
                   {b.version ?? "—"} · {b.source}
+                  {b.pluginIds.length > 0 && ` · 插件 ID: ${b.pluginIds.join(", ")}`}
                 </div>
               </div>
               <Button
@@ -278,7 +223,7 @@ export default function PluginsView({ profiles, onToast }: Props) {
                 variant="ghost"
                 className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                 disabled={busy}
-                onClick={() => uninstall(b.name)}
+                onClick={() => setPendingUninstall(b.name)}
                 title="通过官方 dsh plugin 命令卸载（remove）"
               >
                 卸载
@@ -318,6 +263,31 @@ export default function PluginsView({ profiles, onToast }: Props) {
           专业 YAML 编辑器：语法高亮 + 行内错误校验，编辑保留全部注释；保存前自动备份，live 模式下 dsh 热重载
         </div>
       </Card>
+
+      {/* 卸载插件确认 */}
+      <AlertDialog open={pendingUninstall != null} onOpenChange={(o) => !o && setPendingUninstall(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>卸载插件 {pendingUninstall}？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将从 profile「{profile}」同时移除 bundles 与依赖声明（本地 link 插件目录不会被删除）。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                const name = pendingUninstall;
+                setPendingUninstall(null);
+                if (name) uninstall(name);
+              }}
+            >
+              卸载
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

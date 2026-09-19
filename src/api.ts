@@ -12,7 +12,6 @@ import type {
   ProcLogEvent,
   ProfileInfo,
   ProfileInstance,
-  PluginEntryInfo,
   ProfileDetail,
   PluginJobEvent,
   RegistryInfo,
@@ -46,10 +45,6 @@ export const api = {
     invoke<string>("export_proc_log", { profile, pid, content }),
   getProfileDetail: (profile: string) =>
     invoke<ProfileDetail>("get_profile_detail", { profile }),
-  listProfilePlugins: (profile: string) =>
-    invoke<PluginEntryInfo[]>("list_profile_plugins", { profile }),
-  setProfilePlugin: (profile: string, id: string, disabled: boolean) =>
-    invoke<void>("set_profile_plugin", { profile, id, disabled }),
   getPatchReload: (profile: string) => invoke<string>("get_patch_reload", { profile }),
   setBundleEnabled: (profile: string, name: string, enabled: boolean) =>
     invoke<void>("set_bundle_enabled", { profile, name, enabled }),

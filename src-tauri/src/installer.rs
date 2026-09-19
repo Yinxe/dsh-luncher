@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -57,8 +57,10 @@ pub fn start_install(
     state: &InstallState,
     settings: &Settings,
     version: &str,
-    force: bool,
 ) -> Result<(), String> {
+    if !util::is_safe_version(version) {
+        return Err("非法版本号".into());
+    }
     {
         let mut jv = state.job_version.lock().unwrap();
         if jv.is_some() {
@@ -72,7 +74,7 @@ pub fn start_install(
     let settings2 = settings.clone();
     let version2 = version.to_string();
     std::thread::spawn(move || {
-        let result = run_install(&app, &settings2, &version2, force, &state2);
+        let result = run_install(&app, &settings2, &version2, &state2);
         let (success, message) = match result {
             Ok(m) => (true, m),
             Err(e) => (false, e),
@@ -91,22 +93,34 @@ pub fn start_install(
     Ok(())
 }
 
+/// 删除启动器管理目录内的版本目录。
+/// 删除前拒绝符号链接：防止 versions 下被放入指向启动器目录之外
+/// （如全局 node_modules）的链接时，remove_dir_all 误删链接目标。
+fn remove_version_dir(dir: &Path) -> Result<(), String> {
+    if dir.is_symlink() {
+        return Err(format!(
+            "{} 是符号链接，拒绝删除；请手动检查 ~/.dsh-launcher/versions",
+            dir.display()
+        ));
+    }
+    std::fs::remove_dir_all(dir).map_err(|e| format!("删除目录失败: {e}"))
+}
+
 fn run_install(
     app: &AppHandle,
     settings: &Settings,
     version: &str,
-    force: bool,
     state: &InstallState,
 ) -> Result<String, String> {
     let versions_dir = settings::versions_dir();
     let target = versions_dir.join(version);
 
+    // 残留目录（上次安装失败/中途退出留下的半成品）不拦截安装：
+    // 此时前端往往把该版本显示为"未安装"，没有重装按钮可点，
+    // 报"目录已存在"会让安装入口永久卡死，所以一律清理后重装
     if target.exists() {
-        if force {
-            std::fs::remove_dir_all(&target).map_err(|e| format!("清理旧目录失败: {e}"))?;
-        } else {
-            return Err("该版本目录已存在（如需重装请使用重装按钮）".into());
-        }
+        remove_version_dir(&target)?;
+        emit_log(app, version, "检测到残留的版本目录，已自动清理", "info");
     }
     std::fs::create_dir_all(&target).map_err(|e| format!("创建目录失败: {e}"))?;
     emit_log(
@@ -212,12 +226,12 @@ fn run_install(
             emit_log(app, version, "安装完成 ✔", "info");
             return Ok(format!("已安装到 {}", target.display()));
         }
-        let _ = std::fs::remove_dir_all(&target);
+        let _ = remove_version_dir(&target);
         return Err("npm 结束但未找到 @deepseek-ai/dsh 包文件，可能 registry 上没有该版本".into());
     }
 
     // 失败或取消：清理半成品目录
-    let _ = std::fs::remove_dir_all(&target);
+    let _ = remove_version_dir(&target);
     if cancelled {
         return Err("安装已取消".into());
     }
@@ -244,30 +258,30 @@ fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
     std::thread::spawn(move || {
         let reader = std::io::BufReader::new(pipe);
         for line in reader.lines() {
-            match line {
-                Ok(l) => {
-                    let l = l.trim_end();
-                    if l.is_empty() {
-                        continue;
-                    }
-                    if let Some(t) = &tail {
-                        let mut g = t.lock().unwrap();
-                        g.push(l.to_string());
-                        let len = g.len();
-                        if len > 40 {
-                            g.drain(0..len - 40);
-                        }
-                    }
-                    let _ = app.emit(
-                        "install-log",
-                        InstallLogEvent {
-                            version: version.clone(),
-                            line: l.to_string(),
-                            stream: stream.to_string(),
-                        },
-                    );
+            let Ok(l) = line else { break };
+            // 下载/构建脚本的进度条用 \r 原地重绘，不换行；
+            // 按 \r 拆成独立日志行，否则前端会糊成一大段
+            for seg in l.split('\r') {
+                let seg = seg.trim_end();
+                if seg.is_empty() {
+                    continue;
                 }
-                Err(_) => break,
+                if let Some(t) = &tail {
+                    let mut g = t.lock().unwrap();
+                    g.push(seg.to_string());
+                    let len = g.len();
+                    if len > 40 {
+                        g.drain(0..len - 40);
+                    }
+                }
+                let _ = app.emit(
+                    "install-log",
+                    InstallLogEvent {
+                        version: version.clone(),
+                        line: seg.to_string(),
+                        stream: stream.to_string(),
+                    },
+                );
             }
         }
     })
@@ -291,6 +305,6 @@ pub fn uninstall_managed(version: &str) -> Result<(), String> {
     if !dir.is_dir() {
         return Err("未找到该版本的安装目录（全局/PATH 安装请在终端里自行卸载）".into());
     }
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("删除目录失败: {e}"))?;
+    remove_version_dir(&dir)?;
     Ok(())
 }

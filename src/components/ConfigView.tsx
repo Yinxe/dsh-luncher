@@ -62,7 +62,7 @@ export default function ConfigView({ onToast }: Props) {
       <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
         dsh 的全局配置（$DSH_HOME/settings.yaml）：按插件 id
         分节的自由配置，如 LLM providers、UI 偏好等。编辑保留注释，保存前做 YAML
-        语法校验，原文件自动备份为 *.launcher-bak-*。
+        语法校验，原文件自动备份为 *.launcher-bak（仅保留一份，每次保存覆盖）。
       </div>
       {missing ? (
         <Card className="p-10 text-center text-muted-foreground">

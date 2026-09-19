@@ -54,37 +54,25 @@ sudo pacman -S webkit2gtk-4.1 base-devel libxdo libayatana-appindicator librsvg
 sudo dnf install webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel
 ```
 
-运行 / 打包：
+运行 / 打包（统一走 Tauri CLI）：
 
 ```sh
 npm install
-npm run app            # 开发模式（vite 热更新）
-npm run build:debug    # 无 root 快速编译（调试版，需配合 dev 服务器看 UI）
-npm run build:release  # 自包含正式版（内嵌前端，--features custom-protocol）
+npm run app            # 开发模式（tauri dev，vite 热更新）
+npm run build:debug    # 调试版二进制（内嵌前端，不产安装包）
+npm run build:release  # 正式版二进制（内嵌前端，不产安装包）
 npm run start          # 启动桌面应用（release 二进制不存在时自动先构建）
-npm run tauri build    # 产出 deb / AppImage / dmg / nsis 安装包（按当前平台）
+npm run release        # 正式打包：deb / AppImage / dmg / nsis + updater 签名产物（按当前平台）
 ```
 
 前端单独构建检查：`npm run build`（tsc + vite）。
 
-### 没有 sudo？本仓库自带两套无 root 方案（Debian 13 验证通过）
-
-1. **cargo 国内镜像**：`src-tauri/.cargo/config.toml` 已配置 rsproxy 镜像（只影响本项目，删掉该文件即恢复官方源）。
-2. **WebKit/GTK 开发库 sysroot**：`.sysroot/` 内已用 `apt-get download` + `dpkg -x` 解压好 webkit2gtk-4.1 相关库（无需 root）。没有系统依赖时这样编译：
-
-```sh
-cd src-tauri
-export PKG_CONFIG_PATH="$PWD/.sysroot/usr/lib/x86_64-linux-gnu/pkgconfig:$PWD/.sysroot/usr/share/pkgconfig"
-RUSTFLAGS="-L native=$PWD/.sysroot/usr/lib/x86_64-linux-gnu" cargo build
-LD_LIBRARY_PATH="$PWD/.sysroot/usr/lib/x86_64-linux-gnu" ./target/debug/dsh-launcher
-```
-
-（正式打包 deb/AppImage 时仍建议 `sudo apt install` 安装系统依赖后用 `npm run tauri build`。）
+> Linux 编译与运行都依赖上面安装的 WebKit/GTK 系统库；cargo 依赖下载已配置国内镜像（`src-tauri/.cargo/config.toml`，只影响本项目）。
 
 ## 发布新版本（启动器自身）
 
 1. 改 `src-tauri/tauri.conf.json` 的 `version` 与 `src-tauri/Cargo.toml` 的 `version`；
-2. `npm run tauri build` —— `createUpdaterArtifacts` 会同时生成 updater 签名产物；
+2. `npm run release` —— 产出安装包，`createUpdaterArtifacts` 会同时生成 updater 签名产物；
 3. 把安装包和 `latest.json`（Tauri updater 格式）发布到你的下载源，并同步更新自建清单 JSON 或 `plugins.updater.endpoints`。
 
 ## 已知边界

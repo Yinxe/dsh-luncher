@@ -78,9 +78,53 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 }
 
 #[tauri::command]
-pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<(), String> {
+pub fn save_settings(
+    state: State<'_, AppState>,
+    procs: State<'_, crate::procs::ProcState>,
+    settings: Settings,
+) -> Result<(), String> {
+    // 有实例运行时禁止切换当前版本：所有 profile 实例都基于 active 版本启动
+    {
+        let current = state.settings.lock().unwrap();
+        if !current.active_version.is_empty() && current.active_version != settings.active_version {
+            ensure_no_running_instance(&procs)?;
+        }
+    }
     settings::save_settings(&settings)?;
     *state.settings.lock().unwrap() = settings;
+    Ok(())
+}
+
+/// 存在任何 dsh 实例（内嵌或终端/外部启动）时拒绝切换版本
+fn ensure_no_running_instance(procs: &crate::procs::ProcState) -> Result<(), String> {
+    let embedded = crate::procs::list(procs);
+    if !embedded.is_empty() {
+        let detail = embedded
+            .iter()
+            .map(|p| format!("「{}」(PID {})", p.profile, p.id))
+            .collect::<Vec<_>>()
+            .join("、");
+        return Err(format!(
+            "有 Profile 实例正在运行：{detail}。请先手动停止所有实例，再切换 DSH 版本"
+        ));
+    }
+    let external = crate::procs::external_running_profile_pids(&[]);
+    if !external.is_empty() {
+        let detail = external
+            .iter()
+            .map(|(pid, prof)| {
+                if prof.is_empty() {
+                    format!("PID {pid}")
+                } else {
+                    format!("「{prof}」(PID {pid})")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        return Err(format!(
+            "系统中有外部启动的 dsh 进程：{detail}。请先手动停止所有实例，再切换 DSH 版本"
+        ));
+    }
     Ok(())
 }
 
@@ -112,25 +156,23 @@ pub fn install_version(
     if !util::is_safe_version(&version) {
         return Err("非法版本号".into());
     }
-    // 该版本正在内嵌运行时不允许重装/覆盖安装
-    if force.unwrap_or(false) {
-        for p in crate::procs::list(&procs) {
-            if p.version == version {
-                return Err(format!(
-                    "dsh {version} 正在运行（PID {}），请先停止再重装",
-                    p.id
-                ));
-            }
+    // 安装会清空该版本的目录，正在运行时一律拒绝；force 只是前端区分"重装"的标记
+    for p in crate::procs::list(&procs) {
+        if p.version == version {
+            return Err(format!(
+                "dsh {version} 正在运行（PID {}），请先停止实例后再安装/重装",
+                p.id
+            ));
         }
     }
+    if let Some(pid) = external_pid_on_version(&version) {
+        return Err(format!(
+            "dsh {version} 正在被外部实例使用（PID {pid}），请先停止后再安装/重装"
+        ));
+    }
+    let _ = force;
     let settings = state.settings.lock().unwrap().clone();
-    installer_start(
-        &app,
-        &install_state,
-        &settings,
-        &version,
-        force.unwrap_or(false),
-    )?;
+    installer_start(&app, &install_state, &settings, &version)?;
     Ok(true)
 }
 
@@ -139,9 +181,8 @@ fn installer_start(
     install_state: &InstallState,
     settings: &Settings,
     version: &str,
-    force: bool,
 ) -> Result<(), String> {
-    crate::installer::start_install(app.clone(), install_state, settings, version, force)
+    crate::installer::start_install(app.clone(), install_state, settings, version)
 }
 
 #[tauri::command]
@@ -169,6 +210,12 @@ pub fn uninstall_version(
             ));
         }
     }
+    // 终端/外部启动的实例跑在该版本目录上时同样禁止卸载
+    if let Some(pid) = external_pid_on_version(&version) {
+        return Err(format!(
+            "dsh {version} 正在被外部实例使用（PID {pid}），请先停止后再卸载"
+        ));
+    }
     // 当前使用中的版本不允许卸载，避免所有 profile 失去运行基础
     if state.settings.lock().unwrap().active_version == version {
         return Err(format!(
@@ -176,6 +223,12 @@ pub fn uninstall_version(
         ));
     }
     crate::installer::uninstall_managed(&version)
+}
+
+/// 外部（终端）启动的 dsh 实例正运行在该版本目录上时，返回其 PID
+fn external_pid_on_version(version: &str) -> Option<u32> {
+    let dir = crate::settings::versions_dir().join(version);
+    crate::procs::external_pids_under_dir(&dir).first().copied()
 }
 
 #[tauri::command]
@@ -376,25 +429,11 @@ pub fn export_proc_log(
 
 #[tauri::command]
 pub fn get_profile_detail(
+    state: State<'_, AppState>,
     profile: String,
 ) -> Result<crate::profile_cfg::ProfileDetail, String> {
-    crate::profile_cfg::read_detail(&profile)
-}
-
-#[tauri::command]
-pub fn list_profile_plugins(
-    profile: String,
-) -> Result<Vec<crate::profile_cfg::PluginEntryInfo>, String> {
-    crate::profile_cfg::plugin_inventory(&profile)
-}
-
-#[tauri::command]
-pub fn set_profile_plugin(
-    profile: String,
-    id: String,
-    disabled: bool,
-) -> Result<(), String> {
-    crate::profile_cfg::set_plugin_disabled(&profile, &id, disabled)
+    let settings = state.settings.lock().unwrap().clone();
+    crate::profile_cfg::read_detail(&settings, &profile)
 }
 
 #[tauri::command]
@@ -403,8 +442,14 @@ pub fn get_patch_reload(profile: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn set_bundle_enabled(profile: String, name: String, enabled: bool) -> Result<(), String> {
-    crate::profile_cfg::set_bundle_enabled(&profile, &name, enabled)
+pub fn set_bundle_enabled(
+    state: State<'_, AppState>,
+    profile: String,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let settings = state.settings.lock().unwrap().clone();
+    crate::profile_cfg::set_bundle_enabled(&settings, &profile, &name, enabled)
 }
 
 #[tauri::command]

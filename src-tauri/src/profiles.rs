@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// dsh 自身的数据目录：$DSH_HOME，缺省 ~/.dsh
@@ -24,6 +24,45 @@ pub fn profiles_dir() -> PathBuf {
     home.join("profile")
 }
 
+/// profile 的运行 Target：不同 Target 有各自的启动方式，按此扩展。
+/// 目前仅实现 Web（启动后从日志识别地址并打开浏览器），其余为预留。
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum ProfileTarget {
+    /// Web 应用：bundles 含 @deepseek-ai/dsh-web-app，启动方式 = 打开浏览器
+    Web,
+    /// 桌面应用外壳：bundles 含 desktop 插件，启动方式预留
+    Desktop,
+    /// 未识别（无 package.json 或 bundles 中无已知 Target 插件）
+    Unknown,
+}
+
+/// Web 应用 bundle 的完整包名：bundles 数组中完整出现它才算 Web Target
+const WEB_APP_BUNDLE: &str = "@deepseek-ai/dsh-web-app";
+
+/// 桌面外壳 bundle 的完整包名（预留：官方定名后在此增补）
+const DESKTOP_APP_BUNDLES: &[&str] = &["@deepseek-ai/dsh-desktop-app"];
+
+/// package.json 中 dsh.profile.bundles 的类型化结构，
+/// 交给 serde_json 严格反序列化，不做任何文本层面的模糊匹配
+#[derive(Deserialize, Default)]
+struct ProfilePackageJson {
+    #[serde(default)]
+    dsh: DshSection,
+}
+
+#[derive(Deserialize, Default)]
+struct DshSection {
+    #[serde(default)]
+    profile: ProfileSection,
+}
+
+#[derive(Deserialize, Default)]
+struct ProfileSection {
+    #[serde(default)]
+    bundles: Vec<String>,
+}
+
 #[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileInfo {
@@ -32,36 +71,44 @@ pub struct ProfileInfo {
     /// dir = profiles/ 下的子目录；file = yaml/json 配置文件（名字去掉扩展名）
     pub kind: String,
     pub path: String,
-    /// bundles 中包含 @deepseek-ai/dsh-web-app 即为 web 类型
-    pub web_type: bool,
+    /// 由 package.json 的 dsh.profile.bundles 识别出的运行 Target
+    pub target: ProfileTarget,
 }
 
-/// bundles 含 @deepseek-ai/dsh-web-app ⇒ web 类型 profile
-fn is_web_type(dir: &Path) -> bool {
+/// 读 profile 的 dsh.profile.bundles 列表（缺文件/解析失败返回空）
+fn read_bundles(dir: &Path) -> Vec<String> {
     let Ok(txt) = std::fs::read_to_string(dir.join("package.json")) else {
-        return false;
+        return Vec::new();
     };
-    let Ok(j) = serde_json::from_str::<serde_json::Value>(&txt) else {
-        return false;
-    };
-    let Some(bundles) = j
-        .get("dsh")
-        .and_then(|d| d.get("profile"))
-        .and_then(|p| p.get("bundles"))
-        .and_then(|b| b.as_array())
-    else {
-        return false;
-    };
-    bundles
+    serde_json::from_str::<ProfilePackageJson>(&txt)
+        .map(|pkg| pkg.dsh.profile.bundles)
+        .unwrap_or_default()
+}
+
+/// 按 bundles 识别 Target：完整包名精确匹配（@deepseek-ai/dsh-web-app ⇒ Web）
+fn detect_target(dir: &Path) -> ProfileTarget {
+    let bundles = read_bundles(dir);
+    if bundles.iter().any(|b| b == WEB_APP_BUNDLE) {
+        return ProfileTarget::Web;
+    }
+    if bundles
         .iter()
-        .any(|v| v.as_str() == Some("@deepseek-ai/dsh-web-app"))
+        .any(|b| DESKTOP_APP_BUNDLES.contains(&b.as_str()))
+    {
+        return ProfileTarget::Desktop;
+    }
+    ProfileTarget::Unknown
 }
 
 /// 枚举可启动的 profile：profiles/ 下的子目录 + yaml/yml/json 文件（按名字排序）
 pub fn scan_profiles() -> Vec<ProfileInfo> {
+    scan_profiles_in(&profiles_dir())
+}
+
+/// 同 scan_profiles，但目录由调用方给定（便于测试与真实数据验证）
+pub fn scan_profiles_in(dir: &Path) -> Vec<ProfileInfo> {
     let mut out = Vec::new();
-    let dir = profiles_dir();
-    let Ok(rd) = std::fs::read_dir(&dir) else {
+    let Ok(rd) = std::fs::read_dir(dir) else {
         return out;
     };
     for entry in rd.flatten() {
@@ -80,7 +127,7 @@ pub fn scan_profiles() -> Vec<ProfileInfo> {
                 name: name.into_owned(),
                 kind: "dir".into(),
                 path: path.to_string_lossy().into_owned(),
-                web_type: is_web_type(&path),
+                target: detect_target(&path),
             });
         } else if ft.is_file() {
             let ext = path
@@ -97,11 +144,97 @@ pub fn scan_profiles() -> Vec<ProfileInfo> {
                     name: stem,
                     kind: "file".into(),
                     path: path.to_string_lossy().into_owned(),
-                    web_type: false,
+                    target: ProfileTarget::Unknown,
                 });
             }
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_target_by_bundles() {
+        let tmp = std::env::temp_dir().join(format!("dsh-target-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 无 package.json ⇒ Unknown
+        assert_eq!(detect_target(&tmp), ProfileTarget::Unknown);
+
+        let pkg = |bundles: &str| {
+            format!(r#"{{"dsh":{{"profile":{{"bundles":[{bundles}]}}}}}}"#)
+        };
+        // 含 web-app 完整包名 ⇒ Web
+        std::fs::write(
+            tmp.join("package.json"),
+            pkg(r#""@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app""#),
+        )
+        .unwrap();
+        assert_eq!(detect_target(&tmp), ProfileTarget::Web);
+
+        // 近似名不算 Web：多后缀 / 缺 scope 都不是完整包名
+        for near in [
+            r#""@deepseek-ai/dsh-web-app-x""#,
+            r#""dsh-web-app""#,
+            r#""@deepseek-ai/dsh-web""#,
+        ] {
+            std::fs::write(tmp.join("package.json"), pkg(near)).unwrap();
+            assert_eq!(detect_target(&tmp), ProfileTarget::Unknown, "near={near}");
+        }
+
+        // 只出现在 dependencies、bundles 中没有 ⇒ 不算
+        std::fs::write(
+            tmp.join("package.json"),
+            r#"{"dependencies":{"@deepseek-ai/dsh-web-app":"1.0.0"}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_target(&tmp), ProfileTarget::Unknown);
+
+        // 含桌面外壳完整包名 ⇒ Desktop
+        std::fs::write(
+            tmp.join("package.json"),
+            pkg(r#""@deepseek-ai/dsh-base","@deepseek-ai/dsh-desktop-app""#),
+        )
+        .unwrap();
+        assert_eq!(detect_target(&tmp), ProfileTarget::Desktop);
+
+        // 其他含 desktop 字样的包名不算（无模糊匹配）
+        std::fs::write(tmp.join("package.json"), pkg(r#""@vendor/my-desktop-tool""#)).unwrap();
+        assert_eq!(detect_target(&tmp), ProfileTarget::Unknown);
+
+        // 无已知 Target 插件（如 headless）⇒ Unknown
+        std::fs::write(
+            tmp.join("package.json"),
+            pkg(r#""@deepseek-ai/dsh-base","@deepseek-ai/dsh-headless""#),
+        )
+        .unwrap();
+        assert_eq!(detect_target(&tmp), ProfileTarget::Unknown);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 真实数据冒烟验证：逐个扫描 ~/.dsh/profiles，打印识别结果；
+    /// 若存在 profiles/web，则必须识别为 Web。
+    #[test]
+    fn real_home_profiles_targets() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let dir = PathBuf::from(home).join(".dsh/profiles");
+        if !dir.is_dir() {
+            return;
+        }
+        let profiles = scan_profiles_in(&dir);
+        for p in &profiles {
+            println!("{:>14} -> {:?}", p.name, p.target);
+        }
+        let web = profiles.iter().find(|p| p.name == "web");
+        if let Some(web) = web {
+            assert_eq!(web.target, ProfileTarget::Web);
+        }
+    }
 }

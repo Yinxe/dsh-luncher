@@ -22,12 +22,15 @@ export interface InstalledVersion {
   nodePath: string | null;
 }
 
+/** profile 的运行 Target：不同 Target 有各自的启动方式，目前仅实现 Web（打开浏览器） */
+export type ProfileTarget = "web" | "desktop" | "unknown";
+
 export interface ProfileInfo {
   name: string;
   kind: "dir" | "file";
   path: string;
-  /** bundles 含 @deepseek-ai/dsh-web-app */
-  webType: boolean;
+  /** 由 package.json 的 dsh.profile.bundles 识别：含 @deepseek-ai/dsh-web-app ⇒ web */
+  target: ProfileTarget;
 }
 
 export interface EnvironmentInfo {
@@ -153,6 +156,8 @@ export interface BundleInfo {
   version: string | null;
   source: string;
   enabled: boolean;
+  /** 该包通过 patch 层声明的真实插件 id（包名 ≠ 插件 id） */
+  pluginIds: string[];
 }
 
 export interface PatchItemInfo {
@@ -175,14 +180,6 @@ export interface ProfileDetail {
   bundles: BundleInfo[];
   patchRaw: string;
   patchEntries: PatchEntryInfo[];
-}
-
-export interface PluginEntryInfo {
-  id: string;
-  bundle: string | null;
-  disabled: boolean;
-  managed: boolean;
-  isBundle: boolean;
 }
 
 export interface PluginJobEvent {

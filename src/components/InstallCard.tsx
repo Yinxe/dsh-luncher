@@ -20,7 +20,7 @@ export default function InstallCard({ version, logs, onCancel }: Props) {
           <X /> 取消
         </Button>
       </div>
-      <div className="mt-2.5 max-h-44 overflow-y-auto rounded-md bg-background p-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
+      <div className="mt-2.5 max-h-44 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-background p-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground select-text">
         {logs.length === 0 ? "正在启动 npm…" : logs.join("\n")}
       </div>
     </Card>

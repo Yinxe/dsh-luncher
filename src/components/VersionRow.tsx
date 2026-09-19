@@ -1,6 +1,7 @@
 import { FolderOpen, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { TableCell, TableRow } from "@/components/ui/table";
 import type { InstalledVersion } from "../types";
 
 interface MergedRow {
@@ -15,6 +16,8 @@ interface Props {
   isLatestTag: boolean;
   busy: boolean;
   isActive: boolean;
+  /** 有 Profile 实例运行中：锁定「设为当前」（实例都基于当前版本运行） */
+  switchLocked: boolean;
   upgradeTo: string | null;
   onUpgrade: (target: string) => void;
   onSetActive: (version: string) => void;
@@ -43,7 +46,7 @@ const CHANNEL_V: Record<string, "default" | "success" | "warning" | "info" | "se
 };
 
 export default function VersionTableRow({
-  row, isLatestTag, busy, isActive, upgradeTo, onUpgrade, onSetActive, onInstall, onUninstall, onReveal,
+  row, isLatestTag, busy, isActive, switchLocked, upgradeTo, onUpgrade, onSetActive, onInstall, onUninstall, onReveal,
 }: Props) {
   const inst = row.installed;
   const fmtDate = (iso: string | null) =>
@@ -52,14 +55,14 @@ export default function VersionTableRow({
     n == null ? "" : n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 
   return (
-    <tr
-      className={`border-l-2 transition-colors hover:bg-muted/40 ${
+    <TableRow
+      className={`border-l-2 hover:bg-muted/40 ${
         isActive
           ? `border-l-primary bg-primary/[0.05]`
           : RAIL[row.channel] ?? "border-l-transparent"
       }`}
     >
-      <td className="px-4 py-2.5">
+      <TableCell className="px-4 py-2.5">
         <div className="flex items-center gap-1.5">
           <span className={`font-mono text-[13px] font-bold ${isActive ? "text-primary" : ""}`}>{row.version}</span>
           <Badge variant={CHANNEL_V[row.channel] ?? "secondary"} className="uppercase">{row.channel}</Badge>
@@ -75,10 +78,10 @@ export default function VersionTableRow({
             可升级 → {upgradeTo}
           </button>
         )}
-      </td>
-      <td className="px-3 py-2.5 font-mono text-[11.5px] text-muted-foreground">{fmtDate(row.remote?.publishedAt ?? null) || "—"}</td>
-      <td className="px-3 py-2.5 font-mono text-[11.5px] text-muted-foreground">{fmtSize(row.remote?.unpackedSize ?? null) || "—"}</td>
-      <td className="px-3 py-2.5">
+      </TableCell>
+      <TableCell className="px-3 py-2.5 font-mono text-[11.5px] text-muted-foreground">{fmtDate(row.remote?.publishedAt ?? null) || "—"}</TableCell>
+      <TableCell className="px-3 py-2.5 font-mono text-[11.5px] text-muted-foreground">{fmtSize(row.remote?.unpackedSize ?? null) || "—"}</TableCell>
+      <TableCell className="px-3 py-2.5">
         {isActive ? (
           <Badge>当前版本</Badge>
         ) : inst ? (
@@ -93,8 +96,8 @@ export default function VersionTableRow({
             {inst.location}
           </div>
         )}
-      </td>
-      <td className="whitespace-nowrap px-3 py-2.5 text-right">
+      </TableCell>
+      <TableCell className="whitespace-nowrap px-3 py-2.5 text-right">
         <div className="flex items-center justify-end gap-1">
           {!inst && (
             <Button size="sm" disabled={busy} onClick={() => onInstall(row.version, false)} title="安装完成后自动设为当前版本">
@@ -102,7 +105,13 @@ export default function VersionTableRow({
             </Button>
           )}
           {inst && inst.version !== "unknown" && !isActive && (
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => onSetActive(row.version)}>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || switchLocked}
+              title={switchLocked ? "有 Profile 实例正在运行，停止所有实例后才能切换版本" : "设为当前版本"}
+              onClick={() => onSetActive(row.version)}
+            >
               设为当前
             </Button>
           )}
@@ -133,7 +142,7 @@ export default function VersionTableRow({
             </>
           )}
         </div>
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }

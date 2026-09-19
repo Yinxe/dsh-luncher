@@ -51,8 +51,6 @@ pub fn run() {
             commands::open_external,
             commands::install_runtime,
             commands::get_profile_detail,
-            commands::list_profile_plugins,
-            commands::set_profile_plugin,
             commands::get_patch_reload,
             commands::set_bundle_enabled,
             commands::uninstall_bundle,

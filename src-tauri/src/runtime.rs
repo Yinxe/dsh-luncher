@@ -6,8 +6,10 @@ use tauri::Emitter;
 
 use crate::settings::{self, Settings};
 
-/// 内置 Node 运行时版本（LTS）
-pub const NODE_VERSION: &str = "22.14.0";
+/// 内置 Node 运行时版本（LTS）。
+/// 不得低于 v24.2.0：dsh 的 bin.js 入口判断 `if (import.meta.main)` 依赖该 API，
+/// 更老的 Node 下 dsh 会静默退出（exit 0、无输出、无子进程）。
+pub const NODE_VERSION: &str = "24.15.0";
 
 pub fn runtime_root() -> PathBuf {
     settings::launcher_home().join("runtime")
@@ -167,6 +169,21 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
         );
         return Err("解压完成但未找到 node 可执行文件".into());
     }
+
+    // 版本升级后清理遗留的旧版运行时目录（如 node-v22.14.0），避免长期占用磁盘
+    if let Ok(rd) = std::fs::read_dir(runtime_root()) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir()
+                && p != runtime_dir()
+                && e.file_name().to_string_lossy().starts_with("node-v")
+            {
+                let _ = std::fs::remove_dir_all(&p);
+                emit(&app, &format!("$ 已清理旧版运行时: {}", e.file_name().to_string_lossy()));
+            }
+        }
+    }
+
     let msg = format!("内置 Node v{NODE_VERSION} 安装完成：{}", runtime_dir().display());
     emit(&app, &msg);
     let _ = app.emit(
