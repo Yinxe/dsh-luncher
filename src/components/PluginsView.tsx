@@ -17,7 +17,10 @@ interface Props {
 type FileKey = "cordis.patch.yml" | "package.json";
 
 export default function PluginsView({ profiles, onToast }: Props) {
-  const [profile, setProfile] = useState<string>(profiles[0] ?? "");
+  // 默认选中 web（与启动器整体默认一致）；不存在才取第一个
+  const [profile, setProfile] = useState<string>(() =>
+    profiles.includes("web") ? "web" : (profiles[0] ?? "")
+  );
   const [detail, setDetail] = useState<ProfileDetail | null>(null);
   const [plugins, setPlugins] = useState<PluginEntryInfo[]>([]);
   const [reloadMode, setReloadMode] = useState<string>("live");
@@ -27,8 +30,8 @@ export default function PluginsView({ profiles, onToast }: Props) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    // 默认选中 web（与启动器整体默认一致）；不存在才取第一个
-    if (!profile && profiles.length > 0) {
+    // profiles 晚于挂载加载时，同样默认选中 web
+    if (profiles.length > 0 && !profiles.includes(profile)) {
       setProfile(profiles.includes("web") ? "web" : profiles[0]);
     }
   }, [profiles, profile]);
