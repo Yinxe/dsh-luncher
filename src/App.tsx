@@ -19,6 +19,7 @@ import InstallCard from "./components/InstallCard";
 import ConfigView from "./components/ConfigView";
 import PluginsView from "./components/PluginsView";
 import ProcessDock from "./components/ProcessDock";
+import { ThemeToggle } from "./components/ThemeToggle";
 import SettingsModal from "./components/SettingsModal";
 import UpdateBanner from "./components/UpdateBanner";
 import VersionRow, { compareVersions, mergeRows } from "./components/VersionRow";
@@ -597,6 +598,7 @@ export default function App() {
           </button>
         )}
         <button onClick={doCheckUpdate}>检查更新</button>
+        <ThemeToggle />
         <button className="ghost" onClick={() => setShowSettings(true)} title="设置">
           ⚙
         </button>

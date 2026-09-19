@@ -1,4 +1,20 @@
 :root {
+  --bg: #f6f7f9;
+  --bg-soft: #eef0f4;
+  --panel: #ffffff;
+  --panel-2: #f1f3f7;
+  --border: #dfe3ea;
+  --text: #1b2130;
+  --text-dim: #626b7a;
+  --accent: #4d6bfe;
+  --accent-soft: rgba(77, 107, 254, 0.1);
+  --ok: #059669;
+  --warn: #d97706;
+  --err: #dc2626;
+  --mono: "SFMono-Regular", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+}
+
+.dark {
   --bg: #0b0e14;
   --bg-soft: #10141d;
   --panel: #141926;
@@ -11,7 +27,6 @@
   --ok: #34d399;
   --warn: #fbbf24;
   --err: #f87171;
-  --mono: "SFMono-Regular", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
 }
 
 * { box-sizing: border-box; }
