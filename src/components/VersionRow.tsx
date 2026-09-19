@@ -1,124 +1,21 @@
-import type { InstalledVersion, RemoteVersion } from "../types";
+import { FolderOpen, PlayCircle, RefreshCw } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import type { InstalledVersion } from "../types";
 
-export function formatSize(n: number | null): string {
-  if (n == null) return "";
-  if (n > 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${Math.max(1, Math.round(n / 1024))} KB`;
-}
-
-export function formatDate(iso: string | null): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "";
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
-}
-
-export function deriveChannel(version: string): string {
-  const pre = version.includes("-") ? version.split("-").slice(1).join("-") : "";
-  if (pre.startsWith("alpha")) return "alpha";
-  if (pre.startsWith("beta")) return "beta";
-  if (pre.startsWith("rc")) return "rc";
-  return "stable";
-}
-
-/**
- * 标准语义比较：a > b 返回正数，a < b 返回负数，相等返回 0。
- * 覆盖 0.1.5-rc.2 / 0.1.6-alpha.1 等格式，预发布段按 semver 规则
- * （无预发布 > 有预发布；数字段 < 字母段；数字段按数值比较）。
- */
-export function compareVersions(a: string, b: string): number {
-  const parse = (v: string) => {
-    const clean = v.trim().replace(/^v/, "");
-    const idx = clean.indexOf("-");
-    const core = (idx === -1 ? clean : clean.slice(0, idx))
-      .split(".")
-      .map((x) => parseInt(x, 10) || 0);
-    const pre = idx === -1 ? [] : clean.slice(idx + 1).split(".");
-    return { core, pre };
-  };
-  const pa = parse(a);
-  const pb = parse(b);
-
-  const n = Math.max(pa.core.length, pb.core.length);
-  for (let i = 0; i < n; i++) {
-    const x = pa.core[i] ?? 0;
-    const y = pb.core[i] ?? 0;
-    if (x !== y) return x - y;
-  }
-
-  if (pa.pre.length === 0 && pb.pre.length === 0) return 0;
-  if (pa.pre.length === 0) return 1;
-  if (pb.pre.length === 0) return -1;
-
-  const m = Math.max(pa.pre.length, pb.pre.length);
-  for (let i = 0; i < m; i++) {
-    const xs = pa.pre[i];
-    const ys = pb.pre[i];
-    if (xs === undefined) return -1;
-    if (ys === undefined) return 1;
-    const xn = /^\d+$/.test(xs) ? parseInt(xs, 10) : null;
-    const yn = /^\d+$/.test(ys) ? parseInt(ys, 10) : null;
-    if (xn !== null && yn !== null) {
-      if (xn !== yn) return xn - yn;
-    } else if (xn !== null) {
-      return -1;
-    } else if (yn !== null) {
-      return 1;
-    } else if (xs !== ys) {
-      return xs < ys ? -1 : 1;
-    }
-  }
-  return 0;
-}
-
-export interface MergedRow {
+interface MergedRow {
   version: string;
-  remote: RemoteVersion | null;
+  remote: { publishedAt: string | null; description: string | null; unpackedSize: number | null } | null;
   installed: InstalledVersion | null;
   channel: string;
-  tags: string[];
-}
-
-export function mergeRows(
-  remote: RemoteVersion[],
-  installed: InstalledVersion[]
-): MergedRow[] {
-  const rows = new Map<string, MergedRow>();
-  for (const r of remote) {
-    rows.set(r.version, {
-      version: r.version,
-      remote: r,
-      installed: null,
-      channel: r.channel || deriveChannel(r.version),
-      tags: r.tags,
-    });
-  }
-  for (const i of installed) {
-    const exist = rows.get(i.version);
-    if (exist) {
-      exist.installed = i;
-    } else if (i.version !== "unknown") {
-      rows.set(i.version, {
-        version: i.version,
-        remote: null,
-        installed: i,
-        channel: deriveChannel(i.version),
-        tags: [],
-      });
-    }
-  }
-  return [...rows.values()].sort((a, b) => compareVersions(b.version, a.version));
 }
 
 interface Props {
   row: MergedRow;
   isLatestTag: boolean;
   busy: boolean;
-  /** 该版本是否为全局「当前版本」 */
   isActive: boolean;
-  /** 已安装版本低于官方 latest 时的目标版本 */
   upgradeTo: string | null;
   onUpgrade: (target: string) => void;
   onSetActive: (version: string) => void;
@@ -127,32 +24,41 @@ interface Props {
   onReveal: (path: string) => void;
 }
 
+const CHANNEL_VARIANT: Record<string, "default" | "success" | "warning" | "info" | "secondary"> = {
+  latest: "default",
+  stable: "success",
+  rc: "info",
+  alpha: "warning",
+  beta: "warning",
+  next: "secondary",
+};
+
 export default function VersionRow({
-  row,
-  isLatestTag,
-  busy,
-  isActive,
-  upgradeTo,
-  onUpgrade,
-  onSetActive,
-  onInstall,
-  onUninstall,
-  onReveal,
+  row, isLatestTag, busy, isActive, upgradeTo, onUpgrade, onSetActive, onInstall, onUninstall, onReveal,
 }: Props) {
   const inst = row.installed;
+  const fmtDate = (iso: string | null) =>
+    iso && !isNaN(new Date(iso).getTime()) ? new Date(iso).toISOString().slice(0, 10) : "";
+  const fmtSize = (n: number | null) =>
+    n == null ? "" : n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+
   return (
-    <div className={`vrow${isLatestTag ? " latest-pin" : ""}`}>
-      <div className="vmain">
-        <div className="v">
-          <span>{row.version}</span>
-          <span className={`badge ${row.channel}`}>{row.channel}</span>
-          {isLatestTag && <span className="badge latest">latest</span>}
-          {isActive && <span className="badge installed">当前版本</span>}
+    <Card
+      className={`flex items-center gap-4 p-3.5 transition-colors ${
+        isActive ? "border-primary/50 ring-1 ring-primary/30" : "hover:border-primary/30"
+      }`}
+    >
+      <div className="w-[280px] shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[15px] font-bold">{row.version}</span>
+          <Badge variant={CHANNEL_VARIANT[row.channel] ?? "secondary"}>{row.channel}</Badge>
+          {isLatestTag && <Badge variant="info">latest</Badge>}
+          {isActive && <Badge variant="success">当前版本</Badge>}
         </div>
-        <div className="d">
+        <div className="mt-1 text-[11px] text-muted-foreground">
           {[
-            row.remote ? formatDate(row.remote.publishedAt) : null,
-            row.remote ? formatSize(row.remote.unpackedSize) : null,
+            row.remote ? fmtDate(row.remote.publishedAt) : null,
+            row.remote ? fmtSize(row.remote.unpackedSize) : null,
           ]
             .filter(Boolean)
             .join(" · ")}
@@ -160,7 +66,7 @@ export default function VersionRow({
             <>
               {" · "}
               <button
-                className="badge upgrade"
+                className="font-semibold text-amber-500 underline-offset-2 hover:underline"
                 onClick={() => onUpgrade(upgradeTo)}
                 title={`已安装 ${row.version}，点击安装 ${upgradeTo}`}
               >
@@ -171,78 +77,59 @@ export default function VersionRow({
         </div>
       </div>
 
-      <div className="vdesc">
+      <div className="min-w-0 flex-1">
         {inst ? (
           <>
-            <span
-              className={`badge ${
-                inst.source === "managed" ? "installed" : inst.source
-              }`}
-            >
-              {inst.source === "managed"
-                ? "已装 · 启动器管理"
-                : inst.source === "global"
-                ? "已装 · npm 全局"
-                : "已装 · PATH"}
-            </span>
-            <div className="loc" title={inst.location}>
+            <Badge variant={inst.source === "managed" ? "success" : inst.source === "global" ? "info" : "outline"}>
+              {inst.source === "managed" ? "已装 · 启动器管理" : inst.source === "global" ? "已装 · npm 全局" : "已装 · PATH"}
+            </Badge>
+            <div className="mt-1 truncate font-mono text-[10.5px] text-muted-foreground" title={inst.location}>
               {inst.location}
             </div>
           </>
         ) : (
-          <span>{row.remote?.description ?? "未安装"}</span>
+          <span className="text-xs text-muted-foreground">{row.remote?.description ?? "未安装"}</span>
         )}
       </div>
 
-      <div className="vactions">
+      <div className="flex shrink-0 items-center gap-2">
         {inst && inst.version !== "unknown" && !isActive && (
-          <button
-            className="sm"
-            disabled={busy}
-            onClick={() => onSetActive(row.version)}
-            title="设为当前版本：所有 Profile 实例将基于该版本启动"
-          >
+          <Button size="sm" disabled={busy} onClick={() => onSetActive(row.version)} title="设为当前版本：所有 Profile 实例将基于该版本启动">
             设为当前
-          </button>
+          </Button>
         )}
         {!inst && (
-          <button
-            className="primary"
-            disabled={busy}
-            onClick={() => onInstall(row.version, false)}
-            title="安装完成后自动设为当前版本"
-          >
-            安装
-          </button>
+          <Button size="sm" disabled={busy} onClick={() => onInstall(row.version, false)} title="安装完成后自动设为当前版本">
+            <PlayCircle /> 安装
+          </Button>
         )}
         {inst && inst.source === "managed" && (
           <>
-            <button className="sm" disabled={busy} onClick={() => onReveal(inst.location)}>
-              目录
-            </button>
-            <button
-              className="sm"
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => onReveal(inst.location)}>
+              <FolderOpen /> 目录
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
               disabled={busy || isActive}
               onClick={() => onInstall(row.version, true)}
-              title={
-                isActive
-                  ? "当前版本正在使用，请先切换到其他版本再重装"
-                  : "删除后重新下载安装（会设为当前版本）"
-              }
+              title={isActive ? "当前版本正在使用，请先切换到其他版本再重装" : "删除后重新下载安装（会设为当前版本）"}
             >
-              重装
-            </button>
-            <button
-              className="sm danger"
+              <RefreshCw /> 重装
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
               disabled={busy || isActive}
               onClick={() => onUninstall(row.version)}
               title={isActive ? "当前版本不允许卸载，请先切换到其他版本" : undefined}
             >
               卸载
-            </button>
+            </Button>
           </>
         )}
       </div>
-    </div>
+    </Card>
   );
 }
