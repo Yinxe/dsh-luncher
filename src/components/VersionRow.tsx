@@ -1,7 +1,6 @@
 import { FolderOpen, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import type { InstalledVersion } from "../types";
 
 interface MergedRow {
@@ -24,16 +23,26 @@ interface Props {
   onReveal: (path: string) => void;
 }
 
+/** 通道 → 左侧色轨（完整类名，保证 Tailwind 扫描到） */
 const RAIL: Record<string, string> = {
-  latest: "bg-emerald-500",
-  stable: "bg-emerald-600/70",
-  rc: "bg-sky-500",
-  alpha: "bg-amber-500",
-  beta: "bg-amber-500",
-  next: "bg-violet-500",
+  latest: "border-l-emerald-500",
+  stable: "border-l-emerald-600/70",
+  rc: "border-l-sky-500",
+  alpha: "border-l-amber-500",
+  beta: "border-l-amber-500",
+  next: "border-l-violet-500",
 };
 
-export default function VersionRow({
+const CHANNEL_V: Record<string, "default" | "success" | "warning" | "info" | "secondary" | "outline"> = {
+  latest: "success",
+  stable: "success",
+  rc: "info",
+  alpha: "warning",
+  beta: "warning",
+  next: "secondary",
+};
+
+export default function VersionTableRow({
   row, isLatestTag, busy, isActive, upgradeTo, onUpgrade, onSetActive, onInstall, onUninstall, onReveal,
 }: Props) {
   const inst = row.installed;
@@ -43,78 +52,58 @@ export default function VersionRow({
     n == null ? "" : n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 
   return (
-    <Card
-      className={`brackets relative flex-row items-stretch gap-0 overflow-hidden p-0 transition-colors ${
+    <tr
+      className={`border-l-2 transition-colors hover:bg-muted/40 ${
         isActive
-          ? "border-primary/60 bg-gradient-to-r from-primary/[0.09] via-primary/[0.03] to-transparent shadow-[0_0_24px_-8px_var(--primary)]"
-          : "hover:border-primary/25"
+          ? `border-l-primary bg-primary/[0.05]`
+          : RAIL[row.channel] ?? "border-l-transparent"
       }`}
     >
-      {/* 通道色轨 */}
-      <span className={`w-[3px] shrink-0 ${isActive ? "bg-primary shadow-[0_0_10px_var(--primary)]" : RAIL[row.channel] ?? "bg-border"}`} />
-
-      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-2.5">
-        {/* 版本标识区 */}
-        <div className="w-60 shrink-0">
-          <div className="flex items-center gap-1.5">
-            <span className="font-mono text-[13.5px] font-bold tracking-tight">{row.version}</span>
-            <Badge variant={CHANNEL_V[row.channel] ?? "secondary"} className="uppercase">
-              {row.channel}
-            </Badge>
-            {isLatestTag && <Badge variant="info">latest</Badge>}
-            {isActive && <Badge>● 当前运行版本</Badge>}
-          </div>
-          <div className="mt-0.5 font-mono text-[10.5px] text-muted-foreground">
-            {[
-              row.remote ? fmtDate(row.remote.publishedAt) : null,
-              row.remote ? fmtSize(row.remote.unpackedSize) : null,
-              upgradeTo ? null : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </div>
+      <td className="px-4 py-2.5">
+        <div className="flex items-center gap-1.5">
+          <span className={`font-mono text-[13px] font-bold ${isActive ? "text-primary" : ""}`}>{row.version}</span>
+          <Badge variant={CHANNEL_V[row.channel] ?? "secondary"} className="uppercase">{row.channel}</Badge>
+          {isLatestTag && <Badge variant="info">latest</Badge>}
+          {isActive && <Badge>当前</Badge>}
         </div>
-
-        {/* 状态区 */}
-        <div className="min-w-0 flex-1">
-          {inst ? (
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span className={`led led-glow ${isActive ? "bg-primary text-primary ring-2 ring-primary/25" : "bg-emerald-500 text-emerald-500"}`} />
-                <span className="text-[11.5px]">
-                  {inst.source === "managed" ? "启动器管理" : inst.source === "global" ? "npm 全局" : "PATH"}
-                </span>
-                {upgradeTo && (
-                  <button
-                    className="text-[11px] font-semibold text-amber-500 underline-offset-2 hover:underline"
-                    onClick={() => onUpgrade(upgradeTo)}
-                    title={`已安装 ${row.version}，点击安装 ${upgradeTo}`}
-                  >
-                    可升级 → {upgradeTo}
-                  </button>
-                )}
-              </div>
-              <div className="mt-0.5 truncate font-mono text-[10.5px] text-muted-foreground/80" title={inst.location}>
-                {inst.location}
-              </div>
-            </div>
-          ) : (
-            <div className="truncate text-xs text-muted-foreground/80">
-              {row.remote?.description ?? "未安装"}
-            </div>
-          )}
-        </div>
-
-        {/* 操作区 */}
-        <div className="flex shrink-0 items-center gap-1.5">
-          {inst && inst.version !== "unknown" && !isActive && (
-            <Button size="sm" disabled={busy} onClick={() => onSetActive(row.version)}>
-              设为当前
-            </Button>
-          )}
+        {upgradeTo && (
+          <button
+            className="mt-0.5 text-[11px] font-semibold text-amber-500 underline-offset-2 hover:underline"
+            onClick={() => onUpgrade(upgradeTo)}
+            title={`已安装 ${row.version}，点击安装 ${upgradeTo}`}
+          >
+            可升级 → {upgradeTo}
+          </button>
+        )}
+      </td>
+      <td className="px-3 py-2.5 font-mono text-[11.5px] text-muted-foreground">{fmtDate(row.remote?.publishedAt ?? null) || "—"}</td>
+      <td className="px-3 py-2.5 font-mono text-[11.5px] text-muted-foreground">{fmtSize(row.remote?.unpackedSize ?? null) || "—"}</td>
+      <td className="px-3 py-2.5">
+        {isActive ? (
+          <Badge>当前版本</Badge>
+        ) : inst ? (
+          <Badge variant={inst.source === "managed" ? "success" : inst.source === "global" ? "info" : "outline"}>
+            {inst.source === "managed" ? "已装 · 管理" : inst.source === "global" ? "npm 全局" : "PATH"}
+          </Badge>
+        ) : (
+          <span className="text-xs text-muted-foreground">未安装</span>
+        )}
+        {inst && (
+          <div className="mt-0.5 max-w-[260px] truncate font-mono text-[10px] text-muted-foreground/70" title={inst.location}>
+            {inst.location}
+          </div>
+        )}
+      </td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-right">
+        <div className="flex items-center justify-end gap-1">
           {!inst && (
             <Button size="sm" disabled={busy} onClick={() => onInstall(row.version, false)} title="安装完成后自动设为当前版本">
               安装
+            </Button>
+          )}
+          {inst && inst.version !== "unknown" && !isActive && (
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => onSetActive(row.version)}>
+              设为当前
             </Button>
           )}
           {inst && inst.source === "managed" && (
@@ -144,16 +133,7 @@ export default function VersionRow({
             </>
           )}
         </div>
-      </div>
-    </Card>
+      </td>
+    </tr>
   );
 }
-
-const CHANNEL_V: Record<string, "default" | "success" | "warning" | "info" | "secondary" | "outline"> = {
-  latest: "success",
-  stable: "success",
-  rc: "info",
-  alpha: "warning",
-  beta: "warning",
-  next: "secondary",
-};

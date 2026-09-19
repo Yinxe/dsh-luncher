@@ -47,6 +47,8 @@ export default function App() {
   const runtimeBusy = useRef(false);
   const [instances, setInstances] = useState<ProfileInstance[]>([]);
   const [view, setView] = useState<View>("versions");
+  const [verScope, setVerScope] = useState<"all" | "installed">("all");
+  const [verType, setVerType] = useState<"all" | "stable" | "pre">("all");
 
   const procsRef = useRef<Record<number, ProcEntry>>({});
   procsRef.current = procs;
@@ -333,6 +335,17 @@ export default function App() {
 
   const latestVersion = remote?.tags?.latest;
 
+  const filteredVerRows = useMemo(
+    () =>
+      rows.filter((r) => {
+        if (verScope === "installed" && !r.installed) return false;
+        if (verType === "stable" && r.version.includes("-")) return false;
+        if (verType === "pre" && !r.version.includes("-")) return false;
+        return true;
+      }),
+    [rows, verScope, verType]
+  );
+
   const upgradableCount = useMemo(
     () => rows.filter(
       (r) => r.installed && r.installed.version !== "unknown" &&
@@ -417,9 +430,6 @@ export default function App() {
             <ExternalLink /> 打开 DSH 界面
           </Button>
         )}
-        <Button variant="outline" size="sm" disabled={remoteLoading} onClick={refreshRemote}>
-          <RefreshCw className={remoteLoading ? "animate-spin" : ""} /> 刷新版本
-        </Button>
         <Button variant="outline" size="sm" onClick={doCheckUpdate}>检查更新</Button>
         <Button
           variant={drawerOpen ? "secondary" : "outline"}
@@ -538,7 +548,7 @@ export default function App() {
         <main className="min-w-0 flex-1 overflow-y-auto p-5">
           {view === "versions" && (
             <div className="space-y-4">
-              <div className="grid grid-cols-[300px_1fr] gap-3">
+              <div className="grid grid-cols-[320px_1fr] gap-3">
                 <Card className="p-4">
                   <div className="eyebrow mb-2.5">① Node 环境</div>
                   {env.node ? (
@@ -546,11 +556,31 @@ export default function App() {
                       <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                       <span className="font-mono">Node v{env.node}</span>
                       <span className="text-xs text-muted-foreground">
-                        {env.nodePath?.includes(".dsh-launcher") ? "（内置运行时）" : "（系统）"}
+                        {env.nodePath?.includes(".dsh-launcher") ? "（内置运行时 · 仅供本软件）" : "（系统）"}
                       </span>
                     </div>
                   ) : (
-                    <Button size="sm" onClick={doInstallRuntime}>一键安装内置 Node</Button>
+                    <>
+                      <div className="flex items-center gap-2 text-sm text-amber-500">
+                        <XCircle className="h-4 w-4" />
+                        未检测到 Node
+                      </div>
+                      <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                        dsh 依赖 Node 运行。可一键安装<b className="text-foreground">内置运行时</b>：仅写入启动器数据目录，
+                        <b className="text-foreground">仅供本软件使用，不影响宿主机系统环境</b>。
+                      </p>
+                      <Button size="sm" className="mt-2.5" onClick={doInstallRuntime}>
+                        安装内置 Node（局部安装）
+                      </Button>
+                    </>
+                  )}
+                  {runtimeJob && (
+                    <div className="mt-2.5 flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      {runtimeJob.total > 0
+                        ? `${Math.round((runtimeJob.received / runtimeJob.total) * 100)}% (${(runtimeJob.received / 1048576).toFixed(1)}/${(runtimeJob.total / 1048576).toFixed(1)} MB)`
+                        : "连接镜像站…"}
+                    </div>
                   )}
                 </Card>
                 <Card className="p-4">
@@ -592,31 +622,91 @@ export default function App() {
               {!remoteErr && rows.length === 0 && !remoteLoading && (
                 <Card className="p-10 text-center text-muted-foreground">
                   <div className="mb-2 text-3xl">📦</div>
-                  点击右上角「刷新版本」从 registry 拉取 @deepseek-ai/dsh 的官方发布版本
+                  点击下方「刷新版本」从 registry 拉取 @deepseek-ai/dsh 的官方发布版本
                 </Card>
               )}
 
-              <div className="space-y-2">
-                {rows.map((r) => (
-                  <VersionRow
-                    key={`${r.version}-${r.installed?.source ?? "remote"}`}
-                    row={r}
-                    isLatestTag={latestVersion === r.version}
-                    busy={installJob !== null}
-                    upgradeTo={
-                      r.installed && r.installed.version !== "unknown" && latestVersion &&
-                      cmpVer(latestVersion, r.version) > 0
-                        ? latestVersion : null
-                    }
-                    onUpgrade={(v) => doInstall(v, false)}
-                    isActive={settings.activeVersion === r.version}
-                    onSetActive={doSetActiveVersion}
-                    onInstall={(v, force) => doInstall(v, force)}
-                    onUninstall={doUninstall}
-                    onReveal={(p) => api.reveal(p).catch((e) => addToast("err", String(e)))}
-                  />
-                ))}
+              {/* 版本筛选工具栏 */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex rounded-lg border border-border p-0.5">
+                  {([["all", "全部版本"], ["installed", "已安装"]] as const).map(([k, l]) => (
+                    <button
+                      key={k}
+                      className={`rounded-md px-3 py-1 text-xs transition-colors ${
+                        verScope === k ? "bg-primary/15 font-medium text-primary" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      onClick={() => setVerScope(k)}
+                    >
+                      {l}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex rounded-lg border border-border p-0.5">
+                  {([["all", "全部类型"], ["stable", "正式版"], ["pre", "预发布"]] as const).map(([k, l]) => (
+                    <button
+                      key={k}
+                      className={`rounded-md px-3 py-1 text-xs transition-colors ${
+                        verType === k ? "bg-primary/15 font-medium text-primary" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      onClick={() => setVerType(k)}
+                    >
+                      {l}
+                    </button>
+                  ))}
+                </div>
+                <span className="flex-1" />
+                <span className="text-xs text-muted-foreground">
+                  {filteredVerRows.length} / {rows.length} 个版本
+                </span>
+                <Button variant="outline" size="sm" disabled={remoteLoading} onClick={refreshRemote}>
+                  <RefreshCw className={remoteLoading ? "animate-spin" : ""} /> 刷新版本
+                </Button>
               </div>
+
+              {/* 版本表 */}
+              {rows.length > 0 && (
+                <Card className="overflow-hidden">
+                  <table className="w-full text-[13px]">
+                    <thead>
+                      <tr className="border-b border-border bg-muted/40 text-left text-[10.5px] uppercase tracking-wider text-muted-foreground">
+                        <th className="px-4 py-2.5 font-medium">版本</th>
+                        <th className="px-3 py-2.5 font-medium">发布日期</th>
+                        <th className="px-3 py-2.5 font-medium">大小</th>
+                        <th className="px-3 py-2.5 font-medium">状态</th>
+                        <th className="px-3 py-2.5 text-right font-medium">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {filteredVerRows.map((r) => (
+                        <VersionRow
+                          key={`${r.version}-${r.installed?.source ?? "remote"}`}
+                          row={r}
+                          isLatestTag={latestVersion === r.version}
+                          busy={installJob !== null}
+                          upgradeTo={
+                            r.installed && r.installed.version !== "unknown" && latestVersion &&
+                            cmpVer(latestVersion, r.version) > 0
+                              ? latestVersion : null
+                          }
+                          onUpgrade={(v) => doInstall(v, false)}
+                          isActive={settings.activeVersion === r.version}
+                          onSetActive={doSetActiveVersion}
+                          onInstall={(v, force) => doInstall(v, force)}
+                          onUninstall={doUninstall}
+                          onReveal={(p) => api.reveal(p).catch((e) => addToast("err", String(e)))}
+                        />
+                      ))}
+                      {filteredVerRows.length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-10 text-center text-muted-foreground">
+                            没有符合筛选条件的版本
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </Card>
+              )}
             </div>
           )}
 
