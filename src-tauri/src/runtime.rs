@@ -81,7 +81,9 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
     let ext = if cfg!(windows) { "zip" } else { "tar.xz" };
     let fname = format!("node-v{NODE_VERSION}-{plat}.{ext}");
     let url = format!("{mirror}/v{NODE_VERSION}/{fname}");
-    emit(&app, &format!("下载 {url}"));
+    emit(&app, &format!("$ 镜像站: {mirror}"));
+    emit(&app, &format!("$ 平台: {plat} · 目标: runtime/node-v{NODE_VERSION}"));
+    emit(&app, &format!("$ 下载 {fname}"));
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(600))
@@ -104,6 +106,7 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
 
     let mut received: u64 = 0;
     let mut last_emit: u64 = 0;
+    let mut last_pct: u64 = 0;
     let mut resp = resp;
     while let Some(chunk) = resp
         .chunk()
@@ -115,11 +118,22 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
         if received - last_emit >= 512 * 1024 || received == total {
             let _ = app.emit(
                 "runtime-progress",
-                RuntimeProgressEvent {
-                    received,
-                    total,
-                },
+                RuntimeProgressEvent { received, total },
             );
+            if total > 0 {
+                let pct = received * 100 / total;
+                if pct >= last_pct + 10 || received == total {
+                    emit(
+                        &app,
+                        &format!(
+                            "⬇ 下载中 {pct:>3}% ({:.1} / {:.1} MB)",
+                            received as f64 / 1048576.0,
+                            total as f64 / 1048576.0
+                        ),
+                    );
+                    last_pct = pct;
+                }
+            }
             last_emit = received;
         }
     }
@@ -194,6 +208,6 @@ fn extract(app: &tauri::AppHandle, archive: &Path) -> Result<(), String> {
             ));
         }
     }
-    emit(app, "解压完成");
+    emit(app, "$ 解压完成，校验 node 可执行文件…");
     Ok(())
 }

@@ -34,7 +34,7 @@ pub struct EnvironmentInfo {
 pub async fn get_environment(state: State<'_, AppState>) -> Result<EnvironmentInfo, String> {
     let settings = state.settings.lock().unwrap().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let node = util::find_node(&settings.node_path);
+        let node = util::find_node(&settings);
         let npm = util::find_npm(&settings);
         let node_version = node.as_ref().and_then(|n| {
             util::run_captured(

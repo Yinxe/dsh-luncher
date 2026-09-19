@@ -145,7 +145,7 @@ fn run_install(
     cmd.env("npm_config_update_notifier", "false");
     // 启动器死亡时中断安装，避免留下孤儿 npm 进程
     util::bind_to_parent_lifetime(&mut cmd);
-    let node = util::find_node(&settings.node_path);
+    let node = util::find_node(settings);
     util::with_node_on_path(&mut cmd, node.as_deref());
 
     cmd.stdin(Stdio::null())

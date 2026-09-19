@@ -339,8 +339,10 @@ export default function App() {
     () =>
       rows.filter((r) => {
         if (verScope === "installed" && !r.installed) return false;
-        if (verType === "stable" && r.version.includes("-")) return false;
-        if (verType === "pre" && !r.version.includes("-")) return false;
+        // RC 属于正式版；仅 alpha/beta 视为预发布
+        const isPre = r.channel === "alpha" || r.channel === "beta";
+        if (verType === "stable" && isPre) return false;
+        if (verType === "pre" && !isPre) return false;
         return true;
       }),
     [rows, verScope, verType]
@@ -642,7 +644,7 @@ export default function App() {
                   ))}
                 </div>
                 <div className="flex rounded-lg border border-border p-0.5">
-                  {([["all", "全部类型"], ["stable", "正式版"], ["pre", "预发布"]] as const).map(([k, l]) => (
+                  {([["all", "全部类型"], ["stable", "正式版（含 RC）"], ["pre", "预发布"]] as const).map(([k, l]) => (
                     <button
                       key={k}
                       className={`rounded-md px-3 py-1 text-xs transition-colors ${

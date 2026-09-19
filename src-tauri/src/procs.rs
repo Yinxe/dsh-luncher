@@ -88,7 +88,7 @@ pub fn spawn_embedded(
         .bin_js
         .clone()
         .ok_or_else(|| "该版本缺少 bin.js，安装可能不完整，请重装".to_string())?;
-    let node = util::find_node(&settings.node_path)
+    let node = util::find_node(settings)
         .ok_or_else(|| "未找到 Node.js，无法启动 dsh".to_string())?;
 
     let mut cmd = Command::new(&node);

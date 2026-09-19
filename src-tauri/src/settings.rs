@@ -25,6 +25,8 @@ pub struct Settings {
     pub auto_check_versions: bool,
     /// Node 可执行文件覆盖路径（留空自动探测）
     pub node_path: String,
+    /// Node 来源：auto（系统优先，缺失回退内置）| system | runtime
+    pub node_source: String,
     /// 内置 Node 运行时下载镜像站
     pub node_mirror: String,
     /// 点击关闭按钮时隐藏到托盘而不是退出
@@ -43,6 +45,7 @@ impl Default for Settings {
             auto_check_update: true,
             auto_check_versions: true,
             node_path: String::new(),
+            node_source: "auto".into(),
             node_mirror: "https://npmmirror.com/mirrors/node".into(),
             close_to_tray: true,
         }

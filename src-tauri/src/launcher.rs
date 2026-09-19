@@ -195,7 +195,7 @@ pub fn launch(
     if target.version == "unknown" {
         return fail("该 PATH 记录缺少版本信息，无法启动；请用本启动器安装一个版本");
     }
-    let node = util::find_node(&settings.node_path);
+    let node = util::find_node(settings);
     let inner = build_inner_command(target, node.as_deref(), args, profile);
     match spawn_terminal(settings, &inner) {
         Ok(()) => {

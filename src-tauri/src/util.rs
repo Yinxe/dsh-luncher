@@ -62,18 +62,24 @@ pub fn spawn_command(program: &Path, args: &[String]) -> Command {
     c
 }
 
-/// 探测 node 可执行文件：设置覆盖 → 启动器内置运行时 → PATH → 常见位置 → nvm
-pub fn find_node(override_path: &str) -> Option<PathBuf> {
-    let o = override_path.trim();
+/// 探测 node 可执行文件：覆盖路径 → 按来源解析
+/// auto：系统优先，缺失回退内置运行时；system：仅系统；runtime：仅内置
+pub fn find_node(settings: &Settings) -> Option<PathBuf> {
+    let o = settings.node_path.trim();
     if !o.is_empty() {
         let p = PathBuf::from(o);
         if p.is_file() {
             return Some(p);
         }
     }
-    if let Some(p) = crate::runtime::runtime_node() {
-        return Some(p);
+    match settings.node_source.as_str() {
+        "system" => find_system_node(),
+        "runtime" => crate::runtime::runtime_node(),
+        _ => find_system_node().or_else(|| crate::runtime::runtime_node()),
     }
+}
+
+fn find_system_node() -> Option<PathBuf> {
     if let Some(p) = which("node") {
         return Some(p);
     }
@@ -101,7 +107,9 @@ pub fn find_node(override_path: &str) -> Option<PathBuf> {
                     .map(|e| e.path().join("bin/node"))
                     .filter(|p| p.is_file())
                     .collect();
-                dirs.sort_by(|a, b| crate::semver::compare(&file_version(b), &file_version(a)));
+                dirs.sort_by(|a, b| {
+                    crate::semver::compare(&file_version(b), &file_version(a))
+                });
                 if let Some(latest) = dirs.into_iter().next() {
                     candidates.push(latest);
                 }
@@ -130,7 +138,7 @@ pub fn find_npm(settings: &Settings) -> Option<NpmInvocation> {
             args: vec![],
         });
     }
-    let node = find_node(&settings.node_path)?;
+    let node = find_node(settings)?;
     let bin_dir = node.parent()?;
 
     if cfg!(windows) {

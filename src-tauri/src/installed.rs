@@ -96,7 +96,7 @@ pub fn scan_global_sync(settings: &Settings) -> Option<InstalledVersion> {
         source: "global".into(),
         location: pkg_dir.to_string_lossy().into_owned(),
         bin_js: resolve_bin_js(&pkg_dir).map(|p| p.to_string_lossy().into_owned()),
-        node_path: util::find_node(&settings.node_path).map(|p| p.to_string_lossy().into_owned()),
+        node_path: util::find_node(settings).map(|p| p.to_string_lossy().into_owned()),
     })
 }
 
@@ -149,7 +149,7 @@ pub fn scan_path(node: Option<&Path>) -> Vec<InstalledVersion> {
 
 /// 汇总所有已安装来源（阻塞；managed + global + path，按位置去重）
 pub fn collect_installed(settings: &Settings) -> Vec<InstalledVersion> {
-    let node = util::find_node(&settings.node_path);
+    let node = util::find_node(settings);
     let mut all = scan_managed(node.as_deref());
     if let Some(g) = scan_global_sync(settings) {
         all.push(g);
