@@ -105,11 +105,23 @@ pub fn install_version(
     app: AppHandle,
     state: State<'_, AppState>,
     install_state: State<'_, InstallState>,
+    procs: State<'_, crate::procs::ProcState>,
     version: String,
     force: Option<bool>,
 ) -> Result<bool, String> {
     if !util::is_safe_version(&version) {
         return Err("非法版本号".into());
+    }
+    // 该版本正在内嵌运行时不允许重装/覆盖安装
+    if force.unwrap_or(false) {
+        for p in crate::procs::list(&procs) {
+            if p.version == version {
+                return Err(format!(
+                    "dsh {version} 正在运行（PID {}），请先停止再重装",
+                    p.id
+                ));
+            }
+        }
     }
     let settings = state.settings.lock().unwrap().clone();
     installer_start(
@@ -143,7 +155,19 @@ pub fn get_install_status(install_state: State<'_, InstallState>) -> Option<Stri
 }
 
 #[tauri::command]
-pub fn uninstall_version(version: String) -> Result<(), String> {
+pub fn uninstall_version(
+    procs: State<'_, crate::procs::ProcState>,
+    version: String,
+) -> Result<(), String> {
+    // 该版本正在内嵌运行时不允许删除其安装目录
+    for p in crate::procs::list(&procs) {
+        if p.version == version {
+            return Err(format!(
+                "dsh {version} 正在运行（PID {}），请先停止再卸载",
+                p.id
+            ));
+        }
+    }
     crate::installer::uninstall_managed(&version)
 }
 

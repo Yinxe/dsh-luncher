@@ -212,16 +212,23 @@ export default function VersionRow({
             </button>
             <button
               className="sm"
-              disabled={busy}
+              disabled={busy || runningProcs.length > 0}
               onClick={() => onInstall(row.version, true)}
-              title="删除后重新下载安装"
+              title={
+                runningProcs.length > 0
+                  ? "该版本正在运行，请先停止再重装"
+                  : "删除后重新下载安装"
+              }
             >
               重装
             </button>
             <button
               className="sm danger"
-              disabled={busy}
+              disabled={busy || runningProcs.length > 0}
               onClick={() => onUninstall(row.version)}
+              title={
+                runningProcs.length > 0 ? "该版本正在运行，请先停止再卸载" : undefined
+              }
             >
               卸载
             </button>

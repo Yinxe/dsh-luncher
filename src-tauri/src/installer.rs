@@ -143,6 +143,8 @@ fn run_install(
     }
     // 不加 CI/NO_COLOR 等静默环境变量，保留 npm 真实的过程输出
     cmd.env("npm_config_update_notifier", "false");
+    // 启动器死亡时中断安装，避免留下孤儿 npm 进程
+    util::bind_to_parent_lifetime(&mut cmd);
     let node = util::find_node(&settings.node_path);
     util::with_node_on_path(&mut cmd, node.as_deref());
 

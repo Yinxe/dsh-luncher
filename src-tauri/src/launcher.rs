@@ -51,33 +51,34 @@ pub fn build_inner_command(
         format!(" {arg_str}")
     };
 
-    if let Some(bin_js) = target.bin_js.as_deref() {
-        if let Some(n) = node {
-            #[cfg(windows)]
-            return format!(
-                "{} {}{}",
-                util::shell_quote(n.to_string_lossy().as_ref()),
-                util::shell_quote(bin_js),
-                arg_part
-            );
-            #[cfg(not(windows))]
-            return format!(
-                "exec {} {}{}",
-                util::shell_quote(n.to_string_lossy().as_ref()),
-                util::shell_quote(bin_js),
-                arg_part
-            );
-        }
-    }
-    // PATH 安装的兜底：直接执行 dsh 可执行文件（依赖其 shebang）
-    let bin = target
-        .bin_js
-        .clone()
-        .unwrap_or_else(|| target.location.clone());
+    let run_line = if let (Some(bin_js), Some(n)) = (target.bin_js.as_deref(), node) {
+        format!(
+            "{} {}{}",
+            util::shell_quote(n.to_string_lossy().as_ref()),
+            util::shell_quote(bin_js),
+            arg_part
+        )
+    } else {
+        // 兜底：bin.js 有 shebang 可直接执行，否则退回可执行文件路径
+        let bin = target
+            .bin_js
+            .clone()
+            .unwrap_or_else(|| target.location.clone());
+        format!("{}{}", util::shell_quote(&bin), arg_part)
+    };
+
+    let path_line = node
+        .and_then(|n| n.parent())
+        .map(|dir| format!("export PATH='{}':\"$PATH\"\n", dir.display()))
+        .unwrap_or_default();
+
+    // 不用 exec：退出后显示退出码并等待回车，报错不会被终端闪退吞掉
     #[cfg(windows)]
-    return format!("{}{}", util::shell_quote(&bin), arg_part);
+    return format!("{path_line}{run_line}");
     #[cfg(not(windows))]
-    return format!("exec {}{}", util::shell_quote(&bin), arg_part);
+    return format!(
+        "{path_line}{run_line}\ncode=$?\necho\necho \"—— dsh 已退出（退出码 $code），按回车关闭 ——\"\nread _"
+    );
 }
 
 #[cfg(target_os = "macos")]

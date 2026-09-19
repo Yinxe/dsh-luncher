@@ -120,6 +120,8 @@ export interface ProcEntry {
   lines: string[];
   exited: boolean;
   code: number | null;
+  /** 从日志中识别出的 dsh web UI 地址 */
+  webUrl: string | null;
 }
 
 export interface RuntimeProgressEvent {

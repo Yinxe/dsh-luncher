@@ -207,6 +207,28 @@ pub fn with_node_on_path(cmd: &mut Command, node: Option<&Path>) {
     }
 }
 
+/// Linux：把子进程与启动器生命周期绑定 —— 启动器无论以何种方式死亡（含 SIGKILL），
+/// 内核都会立即 SIGKILL 该子进程，避免孤儿 dsh。
+#[cfg(target_os = "linux")]
+pub fn bind_to_parent_lifetime(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // 竞态兜底：父进程在 prctl 生效前就已退出
+            if libc::getppid() == 1 {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn bind_to_parent_lifetime(_cmd: &mut Command) {}
+
 /// 校验版本号字符串，防止路径穿越
 pub fn is_safe_version(v: &str) -> bool {
     !v.is_empty()

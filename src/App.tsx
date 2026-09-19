@@ -54,6 +54,8 @@ export default function App() {
   profileRef.current = selectedProfile;
   const procsRef = useRef<Record<number, ProcEntry>>({});
   procsRef.current = procs;
+  /** 已自动打开过 Web UI 的进程 */
+  const autoOpenedWeb = useRef<Set<number>>(new Set());
   const builtinUpdate = useRef<Update | null>(null);
   const installedRef = useRef<InstalledVersion[]>([]);
   installedRef.current = installed;
@@ -170,6 +172,8 @@ export default function App() {
     track(events.onLauncherUpdate?.((s) => setUpdate(s)));
     track(
       events.onProcLog?.((e: ProcLogEvent) => {
+        // 识别 dsh web UI 地址：`dsh web: http://...`
+        const hit = /dsh web:\s*(https?:\/\/\S+)/.exec(e.line);
         setProcs((m) => {
           const old =
             m[e.id] ??
@@ -181,12 +185,22 @@ export default function App() {
               lines: [],
               exited: false,
               code: null,
+              webUrl: null,
             } as ProcEntry);
+          const webUrl = hit ? hit[1] : old.webUrl;
           return {
             ...m,
-            [e.id]: { ...old, lines: [...old.lines.slice(-500), e.line] },
+            [e.id]: { ...old, webUrl, lines: [...old.lines.slice(-500), e.line] },
           };
         });
+        // 首次识别到 Web UI 地址时自动在浏览器打开
+        if (hit && !autoOpenedWeb.current.has(e.id)) {
+          autoOpenedWeb.current.add(e.id);
+          api
+            .openUrl(hit[1])
+            .then(() => addToast("ok", "dsh web UI 已在浏览器打开"))
+            .catch((err) => addToast("err", `打开浏览器失败: ${err}`));
+        }
         setActiveProc((a) => a ?? e.id);
       })
     );
@@ -257,6 +271,7 @@ export default function App() {
             lines: [],
             exited: false,
             code: null,
+            webUrl: null,
           },
         }));
         setActiveProc(info.id);
@@ -475,23 +490,36 @@ export default function App() {
           <span className="chip">
             {env.os}/{env.arch}
           </span>
-          <select
-            className="prof-select"
-            value={selectedProfile}
-            title={`Profile 目录：${env.profilesDir}\n点击可重新扫描；每个 profile 同时只能运行一个实例`}
-            onClick={() => refreshProfiles()}
-            onChange={(e) => changeProfile(e.target.value)}
+          <div
+            className={`prof-chip${profileBusy ? " busy" : ""}`}
+            title={`Profile 目录：${env.profilesDir}\n点击可重新扫描；同一 profile 同时只能运行一个实例，不同 profile 可并行`}
           >
-            {profiles.length === 0 && <option value="" disabled>（未找到 profile）</option>}
-            {selectedProfile && !profiles.some((p) => p.name === selectedProfile) && (
-              <option value={selectedProfile}>{selectedProfile}（目录中已不存在）</option>
-            )}
-            {profiles.map((p) => (
-              <option key={p.path} value={p.name}>
-                {p.name}
-              </option>
-            ))}
-          </select>
+            <span className="prof-label">Profile</span>
+            <span className={`prof-dot ${profileBusy ? "busy" : "idle"}`} />
+            <span className="prof-value">{selectedProfile || "未找到"}</span>
+            <span className="prof-caret">▾</span>
+            <select
+              className="prof-native"
+              value={selectedProfile}
+              onClick={() => refreshProfiles()}
+              onChange={(e) => changeProfile(e.target.value)}
+            >
+              {profiles.length === 0 && (
+                <option value="" disabled>
+                  未找到 profile
+                </option>
+              )}
+              {selectedProfile && !profiles.some((p) => p.name === selectedProfile) && (
+                <option value={selectedProfile}>{selectedProfile}（目录中已不存在）</option>
+              )}
+              {profiles.map((p) => (
+                <option key={p.path} value={p.name}>
+                  {p.name}
+                  {busyProfiles.has(p.name) ? "  ● 运行中" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
         <button disabled={remoteLoading} onClick={refreshRemote}>
           {remoteLoading ? "刷新中…" : "刷新版本"}
@@ -629,9 +657,9 @@ export default function App() {
                 setDockOpen(true);
               }}
               onStopProc={doStopProc}
-              onInstall={(v) => {
+              onInstall={(v, force) => {
                 pendingLaunch.current = null;
-                doInstall(v, false);
+                doInstall(v, force);
               }}
               onUninstall={doUninstall}
               onReveal={(p) => api.reveal(p).catch((e) => addToast("err", String(e)))}
@@ -647,6 +675,7 @@ export default function App() {
         onToggle={() => setDockOpen((v) => !v)}
         onSelect={setActiveProc}
         onStop={doStopProc}
+        onOpenWeb={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
         onClearExited={() => {
           const next = Object.fromEntries(
             Object.entries(procsRef.current).filter(([, p]) => !p.exited)

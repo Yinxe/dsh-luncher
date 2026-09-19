@@ -100,6 +100,8 @@ pub fn spawn_embedded(
     // 非 shell 启动：node 目录放进 PATH 供 dsh 的子进程使用
     util::with_node_on_path(&mut cmd, Some(&node));
     cmd.env("DSH_LAUNCHER_MANAGED", "1");
+    // 启动器死亡（含被强杀）时由内核立即结束 dsh
+    util::bind_to_parent_lifetime(&mut cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

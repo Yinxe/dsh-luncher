@@ -6,6 +6,7 @@ interface Props {
   activeId: number | null;
   onSelect: (id: number) => void;
   onStop: (id: number) => void;
+  onOpenWeb: (url: string) => void;
   onClearExited: () => void;
   onToggle: () => void;
   open: boolean;
@@ -26,6 +27,7 @@ export default function ProcessDock({
   activeId,
   onSelect,
   onStop,
+  onOpenWeb,
   onClearExited,
   onToggle,
   open,
@@ -94,6 +96,15 @@ export default function ProcessDock({
                 : `运行中 ${fmtUptime(active.startedAt)}`}
             </span>
             <span style={{ flex: 1 }} />
+            {active.webUrl && !active.exited && (
+              <button
+                className="sm primary"
+                onClick={() => onOpenWeb(active.webUrl!)}
+                title={active.webUrl}
+              >
+                打开 Web UI ↗
+              </button>
+            )}
             {!active.exited && (
               <button className="sm danger" onClick={() => onStop(active.id)}>
                 停止
