@@ -7,6 +7,7 @@ import type {
   InstalledVersion,
   LauncherUpdateStatus,
   LaunchResult,
+  ProfileInfo,
   RegistryInfo,
   Settings,
 } from "./types";
@@ -23,8 +24,9 @@ export const api = {
   cancelInstall: () => invoke<void>("cancel_install"),
   installRunning: () => invoke<string | null>("get_install_status"),
   uninstall: (version: string) => invoke<void>("uninstall_version", { version }),
-  launch: (version: string | null, args?: string | null) =>
-    invoke<LaunchResult>("launch_version", { version, args }),
+  launch: (version: string | null, args?: string | null, profile?: string | null) =>
+    invoke<LaunchResult>("launch_version", { version, args, profile }),
+  listProfiles: () => invoke<ProfileInfo[]>("list_profiles"),
   reveal: (path: string) => invoke<void>("reveal_folder", { path }),
   openUrl: (url: string) => invoke<void>("open_external", { url }),
   checkLauncherUpdate: () => invoke<LauncherUpdateStatus>("check_launcher_update"),

@@ -22,6 +22,12 @@ export interface InstalledVersion {
   nodePath: string | null;
 }
 
+export interface ProfileInfo {
+  name: string;
+  kind: "dir" | "file";
+  path: string;
+}
+
 export interface EnvironmentInfo {
   appVersion: string;
   os: string;
@@ -33,12 +39,16 @@ export interface EnvironmentInfo {
   dshHome: string;
   versionsDir: string;
   registry: string;
+  dshNativeHome: string;
+  profilesDir: string;
 }
 
 export interface Settings {
   registry: string;
   updateManifestUrl: string;
   defaultArgs: string;
+  /** 默认启动的 profile（空 = 不带 --profile，走 dsh 默认） */
+  defaultProfile: string;
   terminal: string;
   autoCheckUpdate: boolean;
   autoCheckVersions: boolean;

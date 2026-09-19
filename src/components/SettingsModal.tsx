@@ -73,6 +73,9 @@ export default function SettingsModal({ initial, env, onSave, onClose, onReveal 
             placeholder="例如 --preset qqbot"
             onChange={(e) => set("defaultArgs", e.target.value)}
           />
+          <div className="hint">
+            profile 在顶栏下拉框选择（扫描 $DSH_HOME/profile 或 ~/.dsh/profile），选中即保存为默认
+          </div>
         </div>
 
         <div className="field">

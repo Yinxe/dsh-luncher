@@ -28,17 +28,27 @@ fn fail(msg: impl Into<String>) -> LaunchResult {
 }
 
 /// 组装在终端里执行的命令。managed/global 安装用绝对 node + bin.js，PATH 安装直接执行其入口。
-pub fn build_inner_command(target: &InstalledVersion, node: Option<&Path>, args: &str) -> String {
-    let arg_str = args.trim();
+pub fn build_inner_command(
+    target: &InstalledVersion,
+    node: Option<&Path>,
+    args: &str,
+    profile: &str,
+) -> String {
+    // --profile 放在最前（值为单个 token，整体转义）；args 逐个 token 转义
+    let mut arg_str = String::new();
+    let prof = profile.trim();
+    if !prof.is_empty() {
+        arg_str.push_str("--profile ");
+        arg_str.push_str(&util::shell_quote(prof));
+    }
+    for a in args.trim().split_whitespace() {
+        arg_str.push(' ');
+        arg_str.push_str(&util::shell_quote(a));
+    }
     let arg_part = if arg_str.is_empty() {
         String::new()
     } else {
-        let mut s = String::new();
-        for a in arg_str.split_whitespace() {
-            s.push(' ');
-            s.push_str(&util::shell_quote(a));
-        }
-        s
+        format!(" {arg_str}")
     };
 
     if let Some(bin_js) = target.bin_js.as_deref() {
@@ -175,14 +185,29 @@ fn spawn_terminal(settings: &Settings, inner: &str) -> Result<(), String> {
 }
 
 /// 在新终端窗口里启动指定版本
-pub fn launch(settings: &Settings, target: &InstalledVersion, args: &str) -> LaunchResult {
+pub fn launch(
+    settings: &Settings,
+    target: &InstalledVersion,
+    args: &str,
+    profile: &str,
+) -> LaunchResult {
     if target.version == "unknown" {
         return fail("该 PATH 记录缺少版本信息，无法启动；请用本启动器安装一个版本");
     }
     let node = util::find_node(&settings.node_path);
-    let inner = build_inner_command(target, node.as_deref(), args);
+    let inner = build_inner_command(target, node.as_deref(), args, profile);
     match spawn_terminal(settings, &inner) {
-        Ok(()) => ok(format!("已在终端窗口启动 dsh {}", target.version)),
+        Ok(()) => {
+            let prof_note = if profile.trim().is_empty() {
+                String::new()
+            } else {
+                format!("（profile: {}）", profile.trim())
+            };
+            ok(format!(
+                "已在终端窗口启动 dsh {}{prof_note}",
+                target.version
+            ))
+        }
         Err(e) => fail(format!("{e}\n手动命令：{inner}")),
     }
 }
@@ -193,7 +218,7 @@ pub fn launch_latest(app: &tauri::AppHandle) -> LaunchResult {
     let settings = state.settings.lock().unwrap().clone();
     let installed = crate::installed::collect_installed(&settings);
     match crate::installed::pick_latest(&installed) {
-        Some(t) => launch(&settings, &t, &settings.default_args),
+        Some(t) => launch(&settings, &t, &settings.default_args, &settings.default_profile),
         None => fail("还没有已安装的 dsh 版本，请先在界面中安装"),
     }
 }

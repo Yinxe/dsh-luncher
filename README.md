@@ -12,7 +12,7 @@
   - npm 全局安装（`npm root -g`）；
   - PATH 中的 `dsh` 可执行文件（顺着符号链接解析版本）。
 - **安装 / 卸载 / 重装**：未安装的版本由启动器用 npm 装进自己的数据目录（互不污染全局环境），实时日志 + 可取消；卸载即删除对应目录。
-- **选择启动**：任意已安装版本一键在**新的系统终端窗口**中启动对应版本的 `dsh`（用绝对 node + bin.js 启动，不依赖 PATH）；托盘菜单也提供"启动最新 dsh"。可设置默认附加参数（如 `--preset qqbot`）。
+- **选择启动**：任意已安装版本一键在**新的系统终端窗口**中启动对应版本的 `dsh`（用绝对 node + bin.js 启动，不依赖 PATH）；支持 **profile**：顶栏下拉框列出 `$DSH_HOME/profile`（缺省 `~/.dsh/profile`）下的所有 profile（子目录 + yaml/yml/json 文件），选中即以 `dsh --profile <名字>` 启动并可保存为默认，留空则不带 `--profile` 走 dsh 默认；托盘菜单也提供"启动最新 dsh"。可设置默认附加参数（如 `--preset qqbot`）。
 - **任务栏 / 托盘图标**：常驻托盘，左键切换窗口，右键菜单（显示窗口 / 启动最新 dsh / 退出）；点关闭默认最小化到托盘（可在设置中改为直接退出）。
 - **启动器自更新**：
   - 支持自建**更新清单**（设置里填一个返回 `{ "version": "x.y.z", "notes": "...", "url": "https://..." }` 的 JSON 地址），启动时自动检查，发现新版本弹横幅跳转下载；
@@ -21,11 +21,16 @@
 ## 数据目录
 
 ```
-~/.dsh-launcher/
+~/.dsh-launcher/       # 启动器自身数据
 ├── settings.json      # 启动器设置
 └── versions/
     └── 0.1.5-rc.2/    # 每个版本一个 npm prefix
         └── node_modules/@deepseek-ai/dsh/
+
+~/.dsh/                # dsh 自身数据（$DSH_HOME，可被环境变量覆盖）
+└── profile/           # dsh 的可启动 profile：子目录或 yaml/yml/json 文件
+    ├── web/
+    └── ci.yaml        # → dsh --profile ci
 ```
 
 ## 本地开发

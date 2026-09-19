@@ -6,6 +6,7 @@ import type {
   EnvironmentInfo,
   InstalledVersion,
   LauncherUpdateStatus,
+  ProfileInfo,
   RegistryInfo,
   Settings,
   Toast,
@@ -32,8 +33,12 @@ export default function App() {
   const [channel, setChannel] = useState<string | null>(null);
   const [onlyInstalled, setOnlyInstalled] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
+  const [selectedProfile, setSelectedProfile] = useState("");
 
   const pendingLaunch = useRef<string | null>(null);
+  const profileRef = useRef<string>("");
+  profileRef.current = selectedProfile;
   const builtinUpdate = useRef<Update | null>(null);
   const installedRef = useRef<InstalledVersion[]>([]);
   installedRef.current = installed;
@@ -64,15 +69,28 @@ export default function App() {
     }
   }, []);
 
+  const refreshProfiles = useCallback(async () => {
+    try {
+      setProfiles(await api.listProfiles());
+    } catch {
+      /* profile 目录不存在等情况，静默处理 */
+    }
+  }, []);
+
   // ── 启动初始化 ──────────────────────────────
   useEffect(() => {
     (async () => {
       try {
         const s = await api.getSettings();
         setSettings(s);
-        const [e, installedList] = await Promise.all([api.getEnvironment(), api.listInstalled()]);
+        setSelectedProfile(s.defaultProfile ?? "");
+        const [e, installedList] = await Promise.all([
+          api.getEnvironment(),
+          api.listInstalled(),
+        ]);
         setEnv(e);
         setInstalled(installedList);
+        refreshProfiles();
         if (s.autoCheckVersions) refreshRemote();
         if (s.autoCheckUpdate) {
           api
@@ -92,7 +110,7 @@ export default function App() {
         /* ignore */
       }
     })();
-  }, [refreshRemote, addToast]);
+  }, [refreshRemote, refreshProfiles, addToast]);
 
   // ── 事件订阅 ────────────────────────────────
   useEffect(() => {
@@ -116,7 +134,7 @@ export default function App() {
           if (pendingLaunch.current === e.version) {
             pendingLaunch.current = null;
             try {
-              const r = await api.launch(e.version, null);
+              const r = await api.launch(e.version, null, profileRef.current);
               addToast(r.ok ? "ok" : "err", r.message);
             } catch (err) {
               addToast("err", `启动失败: ${err}`);
@@ -153,13 +171,28 @@ export default function App() {
   const doLaunch = useCallback(
     async (version: string) => {
       try {
-        const r = await api.launch(version, null);
+        const r = await api.launch(version, null, profileRef.current);
         addToast(r.ok ? "ok" : "err", r.message);
       } catch (e) {
         addToast("err", `启动失败: ${e}`);
       }
     },
     [addToast]
+  );
+
+  const changeProfile = useCallback(
+    async (name: string) => {
+      setSelectedProfile(name);
+      if (!settings) return;
+      const next = { ...settings, defaultProfile: name };
+      setSettings(next);
+      try {
+        await api.saveSettings(next);
+      } catch (e) {
+        addToast("err", `保存默认 profile 失败: ${e}`);
+      }
+    },
+    [settings, addToast]
   );
 
   const doUninstall = useCallback(
@@ -304,6 +337,22 @@ export default function App() {
           <span className="chip">
             {env.os}/{env.arch}
           </span>
+          <select
+            className="prof-select"
+            value={selectedProfile}
+            title={`Profile 目录：${env.profilesDir}\n点击可重新扫描`}
+            onClick={() => refreshProfiles()}
+            onChange={(e) => changeProfile(e.target.value)}
+          >
+            <option value="">默认 profile</option>
+            {profiles.length === 0 && <option disabled>（未找到 profile）</option>}
+            {profiles.map((p) => (
+              <option key={p.path} value={p.name}>
+                {p.name}
+                {p.kind === "file" ? "  ·yaml" : ""}
+              </option>
+            ))}
+          </select>
         </div>
         <button disabled={remoteLoading} onClick={refreshRemote}>
           {remoteLoading ? "刷新中…" : "刷新版本"}
@@ -361,6 +410,9 @@ export default function App() {
           <div className="meta">
             <div>官方版本 {remote?.versions.length ?? "—"} 个</div>
             <div>已安装 {installed.length} 个</div>
+            <div>
+              profile {profiles.length} 个（{env.dshNativeHome}/profile）
+            </div>
             <div>registry：{env.registry}</div>
             <div>数据目录：{env.versionsDir}</div>
           </div>

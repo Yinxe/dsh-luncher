@@ -2,6 +2,7 @@ mod commands;
 mod installed;
 mod installer;
 mod launcher;
+mod profiles;
 mod registry;
 mod semver;
 mod settings;
@@ -34,6 +35,7 @@ pub fn run() {
             commands::get_install_status,
             commands::uninstall_version,
             commands::launch_version,
+            commands::list_profiles,
             commands::check_launcher_update,
             commands::reveal_folder,
             commands::open_external,

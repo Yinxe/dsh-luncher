@@ -21,6 +21,10 @@ pub struct EnvironmentInfo {
     pub dsh_home: String,
     pub versions_dir: String,
     pub registry: String,
+    /// dsh 自身数据目录（$DSH_HOME 或 ~/.dsh）
+    pub dsh_native_home: String,
+    /// dsh 的 profile 目录
+    pub profiles_dir: String,
 }
 
 #[tauri::command]
@@ -52,9 +56,11 @@ pub async fn get_environment(state: State<'_, AppState>) -> Result<EnvironmentIn
             node_path: node.map(|p| p.to_string_lossy().into_owned()),
             npm: npm_version,
             npm_path: npm.map(|i| i.program.to_string_lossy().into_owned()),
-            dsh_home: settings::dsh_home().to_string_lossy().into_owned(),
+            dsh_home: settings::launcher_home().to_string_lossy().into_owned(),
             versions_dir: settings::versions_dir().to_string_lossy().into_owned(),
             registry: settings.registry,
+            dsh_native_home: crate::profiles::dsh_native_home().to_string_lossy().into_owned(),
+            profiles_dir: crate::profiles::profiles_dir().to_string_lossy().into_owned(),
         })
     })
     .await
@@ -141,6 +147,8 @@ pub async fn launch_version(
     state: State<'_, AppState>,
     version: Option<String>,
     args: Option<String>,
+    // Some("") = 用户显式选择“默认 profile”；None 时回退到设置里的 default_profile
+    profile: Option<String>,
 ) -> Result<LaunchResult, String> {
     let settings = state.settings.lock().unwrap().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -157,10 +165,23 @@ pub async fn launch_version(
         let launch_args = args
             .or(Some(settings.default_args.clone()))
             .unwrap_or_default();
-        Ok(launcher::launch(&settings, &target, &launch_args))
+        let profile = profile.unwrap_or_else(|| settings.default_profile.clone());
+        Ok(launcher::launch(
+            &settings,
+            &target,
+            &launch_args,
+            &profile,
+        ))
     })
     .await
     .map_err(|e| format!("启动失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn list_profiles() -> Result<Vec<crate::profiles::ProfileInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| Ok(crate::profiles::scan_profiles()))
+        .await
+        .map_err(|e| format!("扫描 profile 失败: {e}"))?
 }
 
 #[tauri::command]

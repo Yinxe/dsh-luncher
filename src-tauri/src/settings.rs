@@ -13,6 +13,8 @@ pub struct Settings {
     pub update_manifest_url: String,
     /// 启动 dsh 时附加的默认参数
     pub default_args: String,
+    /// 默认启动的 profile（空 = 不带 --profile，走 dsh 默认）
+    pub default_profile: String,
     /// 终端模拟器覆盖（"auto" 或可执行文件路径）
     pub terminal: String,
     /// 启动时自动检查启动器更新
@@ -31,6 +33,7 @@ impl Default for Settings {
             registry: "https://registry.npmjs.org".into(),
             update_manifest_url: String::new(),
             default_args: String::new(),
+            default_profile: String::new(),
             terminal: "auto".into(),
             auto_check_update: true,
             auto_check_versions: true,
@@ -59,8 +62,8 @@ pub fn home_dir() -> Option<PathBuf> {
     }
 }
 
-/// 启动器数据根目录
-pub fn dsh_home() -> PathBuf {
+/// 启动器数据根目录（区别于 dsh 自身的 ~/.dsh）
+pub fn launcher_home() -> PathBuf {
     home_dir()
         .map(|h| h.join(".dsh-launcher"))
         .unwrap_or_else(|| PathBuf::from(".dsh-launcher"))
@@ -68,11 +71,11 @@ pub fn dsh_home() -> PathBuf {
 
 /// 启动器管理的 dsh 版本安装根目录
 pub fn versions_dir() -> PathBuf {
-    dsh_home().join("versions")
+    launcher_home().join("versions")
 }
 
 pub fn settings_path() -> PathBuf {
-    dsh_home().join("settings.json")
+    launcher_home().join("settings.json")
 }
 
 pub fn load_settings() -> Settings {

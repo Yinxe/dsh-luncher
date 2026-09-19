@@ -126,6 +126,21 @@ input::placeholder { color: #55607a; }
 .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--err); }
 .chip .dot.on { background: var(--ok); }
 
+.prof-select {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 10px;
+  outline: none;
+  cursor: pointer;
+  max-width: 180px;
+}
+.prof-select:hover, .prof-select:focus { border-color: var(--accent); }
+.prof-select option { background: var(--panel); color: var(--text); }
+
 /* ── 更新横幅 ─────────────────────── */
 .banner {
   display: flex;
