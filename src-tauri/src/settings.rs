@@ -1,0 +1,93 @@
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// 持久化在 ~/.dsh-launcher/settings.json 的启动器设置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Settings {
+    /// npm registry 地址，可换成镜像（如 https://registry.npmmirror.com）
+    pub registry: String,
+    /// 启动器自身更新清单地址（返回 {version, notes, url} 的 JSON）
+    pub update_manifest_url: String,
+    /// 启动 dsh 时附加的默认参数
+    pub default_args: String,
+    /// 终端模拟器覆盖（"auto" 或可执行文件路径）
+    pub terminal: String,
+    /// 启动时自动检查启动器更新
+    pub auto_check_update: bool,
+    /// 启动时自动刷新版本列表
+    pub auto_check_versions: bool,
+    /// Node 可执行文件覆盖路径（留空自动探测）
+    pub node_path: String,
+    /// 点击关闭按钮时隐藏到托盘而不是退出
+    pub close_to_tray: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            registry: "https://registry.npmjs.org".into(),
+            update_manifest_url: String::new(),
+            default_args: String::new(),
+            terminal: "auto".into(),
+            auto_check_update: true,
+            auto_check_versions: true,
+            node_path: String::new(),
+            close_to_tray: true,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct AppState {
+    pub settings: Mutex<Settings>,
+}
+
+pub fn home_dir() -> Option<PathBuf> {
+    if let Ok(h) = std::env::var("DSH_LAUNCHER_HOME") {
+        let p = PathBuf::from(h);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    if cfg!(windows) {
+        std::env::var("USERPROFILE").ok().map(PathBuf::from)
+    } else {
+        std::env::var("HOME").ok().map(PathBuf::from)
+    }
+}
+
+/// 启动器数据根目录
+pub fn dsh_home() -> PathBuf {
+    home_dir()
+        .map(|h| h.join(".dsh-launcher"))
+        .unwrap_or_else(|| PathBuf::from(".dsh-launcher"))
+}
+
+/// 启动器管理的 dsh 版本安装根目录
+pub fn versions_dir() -> PathBuf {
+    dsh_home().join("versions")
+}
+
+pub fn settings_path() -> PathBuf {
+    dsh_home().join("settings.json")
+}
+
+pub fn load_settings() -> Settings {
+    fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_settings(settings: &Settings) -> Result<(), String> {
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+    let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    fs::write(&path, text).map_err(|e| format!("写入设置失败: {e}"))?;
+    Ok(())
+}

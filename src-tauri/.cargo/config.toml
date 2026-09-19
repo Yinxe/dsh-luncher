@@ -1,0 +1,10 @@
+# 本项目级 cargo 配置：使用国内镜像加速 crates.io 下载
+# 只影响本项目；如不需要镜像，删除此文件即可恢复官方源
+[source.crates-io]
+replace-with = 'rsproxy-sparse'
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+retry = 3
