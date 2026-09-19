@@ -456,6 +456,15 @@ export default function App() {
   }, [procs]);
   const profileBusy = selectedProfile !== "" && busyProfiles.has(selectedProfile);
 
+  // 运行中且已检测到 Web UI 地址的实例（新的在前）
+  const liveWebProcs = useMemo(
+    () =>
+      Object.values(procs)
+        .filter((p) => !p.exited && p.webUrl)
+        .sort((a, b) => b.startedAt - a.startedAt),
+    [procs]
+  );
+
   if (!settings || !env) {
     return (
       <div className="layout">
@@ -524,6 +533,20 @@ export default function App() {
         <button disabled={remoteLoading} onClick={refreshRemote}>
           {remoteLoading ? "刷新中…" : "刷新版本"}
         </button>
+        {liveWebProcs.length > 0 && (
+          <button
+            className="primary"
+            onClick={() => liveWebProcs[0].webUrl && api.openUrl(liveWebProcs[0].webUrl).catch((e) => addToast("err", String(e)))}
+            title={
+              liveWebProcs.length === 1
+                ? `打开 dsh 主界面：${liveWebProcs[0].webUrl}`
+                : `${liveWebProcs.length} 个实例的 Web UI 在运行，点击打开最新一个：\n` +
+                  liveWebProcs.map((p) => `#${p.id} ${p.version} · ${p.profile}: ${p.webUrl}`).join("\n")
+            }
+          >
+            打开 DSH 界面 ↗
+          </button>
+        )}
         <button onClick={doCheckUpdate}>检查更新</button>
         <button className="ghost" onClick={() => setShowSettings(true)} title="设置">
           ⚙
