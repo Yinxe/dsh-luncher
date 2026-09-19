@@ -11,6 +11,7 @@ import type {
   ProcInfo,
   ProcLogEvent,
   ProfileInfo,
+  ProfileInstance,
   RegistryInfo,
   RuntimeFinishedEvent,
   RuntimeProgressEvent,
@@ -35,6 +36,11 @@ export const api = {
     invoke<ProcInfo>("start_embedded", { version, profile, args }),
   stopProcess: (id: number) => invoke<boolean>("stop_process", { id }),
   listProcesses: () => invoke<ProcInfo[]>("list_processes"),
+  listProfileInstances: () => invoke<ProfileInstance[]>("list_profile_instances"),
+  stopProfileInstance: (profile: string) =>
+    invoke<boolean>("stop_profile_instance", { profile }),
+  exportProcLog: (profile: string, pid: number, content: string) =>
+    invoke<string>("export_proc_log", { profile, pid, content }),
   listProfiles: () => invoke<ProfileInfo[]>("list_profiles"),
   reveal: (path: string) => invoke<void>("reveal_folder", { path }),
   openUrl: (url: string) => invoke<void>("open_external", { url }),

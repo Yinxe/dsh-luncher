@@ -134,6 +134,14 @@ export interface RuntimeFinishedEvent {
   message: string;
 }
 
+export interface ProfileInstance {
+  profile: string;
+  running: boolean;
+  pid: number | null;
+  source: "embedded" | "external" | null;
+  version: string | null;
+}
+
 export interface Toast {
   id: number;
   kind: "ok" | "err" | "info";

@@ -270,3 +270,129 @@ pub fn list(state: &ProcState) -> Vec<ProcInfo> {
     out.sort_by_key(|p| p.id);
     out
 }
+
+/// 扫描系统中所有 dsh 进程（含终端/外部启动的），返回 (pid, profile)。
+/// 用于保证「同一 profile 全系统同时只能有一个实例」。
+pub fn external_running_profile_pids(exclude: &[u32]) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if exclude.contains(&pid) {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        if !cmdline.contains("@deepseek-ai/dsh") || !cmdline.contains("bin.js") {
+            continue;
+        }
+        let parts: Vec<&str> = cmdline.split('\0').filter(|s| !s.is_empty()).collect();
+        let mut profile = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            // 形式一：--profile <name>；形式二：bin.js <name>（位置参数）
+            if *part == "--profile" {
+                if let Some(v) = parts.get(i + 1) {
+                    profile = (*v).to_string();
+                }
+                break;
+            }
+            if part.ends_with("bin.js") {
+                if let Some(v) = parts.get(i + 1) {
+                    if !v.starts_with('-') {
+                        profile = (*v).to_string();
+                    }
+                }
+            }
+        }
+        out.push((pid, profile));
+    }
+    out
+}
+
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileInstance {
+    pub profile: String,
+    pub running: bool,
+    pub pid: Option<u32>,
+    /// embedded = 启动器子进程；external = 终端/外部启动
+    pub source: Option<String>,
+    /// 内嵌实例对应的 dsh 版本（外部实例未知）
+    pub version: Option<String>,
+}
+
+/// 汇总各 profile 的实例状态（内嵌 + 系统中的外部进程）
+pub fn profile_instances(state: &ProcState) -> Vec<ProfileInstance> {
+    let mut out: Vec<ProfileInstance> = Vec::new();
+    let mut embedded_pids: Vec<u32> = Vec::new();
+    {
+        let guard = state.procs.lock().unwrap();
+        for (id, h) in guard.iter() {
+            embedded_pids.push(*id);
+            out.push(ProfileInstance {
+                profile: h.profile.clone(),
+                running: true,
+                pid: Some(*id),
+                source: Some("embedded".into()),
+                version: Some(h.version.clone()),
+            });
+        }
+    }
+    for (pid, profile) in external_running_profile_pids(&embedded_pids) {
+        // 已有同 profile 内嵌实例时外部进程按 PID 并列列出
+        out.push(ProfileInstance {
+            profile,
+            running: true,
+            pid: Some(pid),
+            source: Some("external".into()),
+            version: None,
+        });
+    }
+    out.sort_by(|a, b| a.profile.cmp(&b.profile));
+    out
+}
+
+/// 停止某个 profile 的实例：优先内嵌，其次外部进程
+pub fn stop_profile(state: &ProcState, profile: &str) -> Result<bool, String> {
+    let profile = profile.trim();
+    if profile.is_empty() {
+        return Err("profile 名称为空".into());
+    }
+    // 1) 内嵌实例
+    let embedded_id = {
+        let guard = state.procs.lock().unwrap();
+        guard
+            .iter()
+            .find(|(_, h)| h.profile == profile)
+            .map(|(id, _)| *id)
+    };
+    if let Some(id) = embedded_id {
+        let _ = stop(state, id);
+        return Ok(true);
+    }
+    // 2) 外部进程（同用户可直接 SIGKILL）
+    for (pid, prof) in external_running_profile_pids(&[]) {
+        if prof == profile {
+            #[cfg(target_os = "linux")]
+            {
+                let rc = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                if rc != 0 {
+                    return Err(format!("结束进程 {pid} 失败"));
+                }
+                return Ok(true);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = pid;
+                return Err("当前平台暂不支持停止外部实例".into());
+            }
+        }
+    }
+    Ok(false)
+}

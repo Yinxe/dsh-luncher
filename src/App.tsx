@@ -10,6 +10,7 @@ import type {
   ProcExitEvent,
   ProcLogEvent,
   ProfileInfo,
+  ProfileInstance,
   RegistryInfo,
   Settings,
   Toast,
@@ -18,7 +19,7 @@ import InstallCard from "./components/InstallCard";
 import ProcessDock from "./components/ProcessDock";
 import SettingsModal from "./components/SettingsModal";
 import UpdateBanner from "./components/UpdateBanner";
-import VersionRow, { mergeRows } from "./components/VersionRow";
+import VersionRow, { compareVersions, mergeRows } from "./components/VersionRow";
 
 let toastId = 0;
 
@@ -48,6 +49,7 @@ export default function App() {
     log: string[];
   } | null>(null);
   const runtimeBusy = useRef(false);
+  const [instances, setInstances] = useState<ProfileInstance[]>([]);
 
   const pendingLaunch = useRef<string | null>(null);
   const profileRef = useRef<string>("");
@@ -93,6 +95,75 @@ export default function App() {
       /* profile 目录不存在等情况，静默处理 */
     }
   }, []);
+
+  // 轮询 profile 实例状态（外部终端启动的进程也要能感知）
+  const refreshInstances = useCallback(async () => {
+    try {
+      setInstances(await api.listProfileInstances());
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // 轮询 profile 实例状态（外部终端启动的进程也要能感知）
+  useEffect(() => {
+    refreshInstances();
+    const t = setInterval(refreshInstances, 3000);
+    return () => clearInterval(t);
+  }, [refreshInstances]);
+
+  const instanceRows = useMemo(() => {
+    const names = new Map<string, ProfileInstance | null>();
+    for (const p of profiles) if (!names.has(p.name)) names.set(p.name, null);
+    for (const i of instances) names.set(i.profile, i);
+    return [...names.entries()].map(([profile, inst]) => ({
+      profile,
+      running: !!inst?.running,
+      pid: inst?.pid ?? null,
+      source: inst?.source ?? null,
+      version: inst?.version ?? null,
+    }));
+  }, [profiles, instances]);
+
+  const doStartProfile = useCallback(
+    async (profile: string) => {
+      try {
+        const info = await api.startEmbedded(null, profile);
+        setProcs((m) => ({
+          ...m,
+          [info.id]: {
+            id: info.id,
+            version: info.version,
+            profile: info.profile,
+            startedAt: info.startedAt,
+            lines: [],
+            exited: false,
+            code: null,
+            webUrl: null,
+          },
+        }));
+        setActiveProc(info.id);
+        setDockOpen(true);
+        addToast("ok", `profile「${info.profile}」已启动（dsh ${info.version}，PID ${info.id}）`);
+      } catch (e) {
+        addToast("err", `启动失败: ${e}`);
+      }
+    },
+    [addToast]
+  );
+
+  const doStopProfileInstance = useCallback(
+    async (profile: string) => {
+      try {
+        const hit = await api.stopProfileInstance(profile);
+        addToast(hit ? "ok" : "info", hit ? `已停止 profile「${profile}」` : "该 profile 未在运行");
+        refreshInstances();
+      } catch (e) {
+        addToast("err", `停止失败: ${e}`);
+      }
+    },
+    [addToast, refreshInstances]
+  );
 
   // ── 启动初始化 ──────────────────────────────
   useEffect(() => {
@@ -604,6 +675,49 @@ export default function App() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
+          <h3>Profile 实例</h3>
+          <div className="inst-list">
+            {instanceRows.map((row) => (
+              <div key={row.profile} className="inst-row">
+                <span className={`dot${row.running ? " on" : ""}`} />
+                <div className="inst-info">
+                  <div className="inst-name">{row.profile}</div>
+                  <div className="inst-meta">
+                    {row.running
+                      ? `${row.source === "external" ? "外部" : "内嵌"} · PID ${row.pid}${
+                          row.version ? ` · ${row.version}` : ""
+                        }`
+                      : "未运行"}
+                  </div>
+                </div>
+                {row.running ? (
+                  <button
+                    className="sm danger"
+                    onClick={() => doStopProfileInstance(row.profile)}
+                  >
+                    停止
+                  </button>
+                ) : (
+                  <button
+                    className="sm"
+                    disabled={installed.length === 0}
+                    title={
+                      installed.length === 0
+                        ? "请先安装 dsh"
+                        : `以最新已安装版本启动 ${row.profile}`
+                    }
+                    onClick={() => doStartProfile(row.profile)}
+                  >
+                    启动
+                  </button>
+                )}
+              </div>
+            ))}
+            {instanceRows.length === 0 && (
+              <div className="inst-meta">（未找到 profile）</div>
+            )}
+          </div>
+
           <h3>通道</h3>
           <div className="tag-group">
             <button className={`tag${channel === null ? " active" : ""}`} onClick={() => setChannel(null)}>
@@ -663,7 +777,15 @@ export default function App() {
             </div>
           )}
 
-          {filtered.map((r) => (
+          {filtered.map((r) => {
+            const upgradeTo =
+              r.installed &&
+              r.installed.version !== "unknown" &&
+              latestVersion &&
+              compareVersions(latestVersion, r.version) > 0
+                ? latestVersion
+                : null;
+            return (
             <VersionRow
               key={`${r.version}-${r.installed?.source ?? "remote"}`}
               row={r}
@@ -673,6 +795,8 @@ export default function App() {
                 (p) => p.version === r.version && !p.exited
               )}
               profileBusy={profileBusy}
+              upgradeTo={upgradeTo}
+              onUpgrade={(v) => doInstall(v, false)}
               onLaunch={doLaunch}
               onTerminal={doTerminal}
               onShowProc={(id) => {
@@ -687,7 +811,8 @@ export default function App() {
               onUninstall={doUninstall}
               onReveal={(p) => api.reveal(p).catch((e) => addToast("err", String(e)))}
             />
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -699,6 +824,14 @@ export default function App() {
         onSelect={setActiveProc}
         onStop={doStopProc}
         onOpenWeb={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
+        onExport={() => {
+          const p = activeProc != null ? procsRef.current[activeProc] : null;
+          if (!p) return;
+          api
+            .exportProcLog(p.profile || "default", p.id, p.lines.join("\n"))
+            .then((path) => addToast("ok", `日志已导出：${path}`))
+            .catch((e) => addToast("err", `导出失败: ${e}`));
+        }}
         onClearExited={() => {
           const next = Object.fromEntries(
             Object.entries(procsRef.current).filter(([, p]) => !p.exited)

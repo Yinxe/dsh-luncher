@@ -93,6 +93,9 @@ interface Props {
   runningProcs: ProcEntry[];
   /** 当前选中的 profile 已有实例在运行 */
   profileBusy: boolean;
+  /** 已安装版本低于官方 latest 时的目标版本 */
+  upgradeTo: string | null;
+  onUpgrade: (target: string) => void;
   onLaunch: (version: string) => void;
   onTerminal: (version: string) => void;
   onShowProc: (id: number) => void;
@@ -108,6 +111,8 @@ export default function VersionRow({
   busy,
   runningProcs,
   profileBusy,
+  upgradeTo,
+  onUpgrade,
   onLaunch,
   onTerminal,
   onShowProc,
@@ -132,6 +137,18 @@ export default function VersionRow({
           ]
             .filter(Boolean)
             .join(" · ")}
+          {upgradeTo && (
+            <>
+              {" · "}
+              <button
+                className="badge upgrade"
+                onClick={() => onUpgrade(upgradeTo)}
+                title={`已安装 ${row.version}，点击安装 ${upgradeTo}`}
+              >
+                可升级 → {upgradeTo}
+              </button>
+            </>
+          )}
         </div>
       </div>
 

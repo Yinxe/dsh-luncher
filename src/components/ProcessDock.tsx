@@ -7,6 +7,7 @@ interface Props {
   onSelect: (id: number) => void;
   onStop: (id: number) => void;
   onOpenWeb: (url: string) => void;
+  onExport: () => void;
   onClearExited: () => void;
   onToggle: () => void;
   open: boolean;
@@ -28,6 +29,7 @@ export default function ProcessDock({
   onSelect,
   onStop,
   onOpenWeb,
+  onExport,
   onClearExited,
   onToggle,
   open,
@@ -96,6 +98,11 @@ export default function ProcessDock({
                 : `运行中 ${fmtUptime(active.startedAt)}`}
             </span>
             <span style={{ flex: 1 }} />
+            {active.lines.length > 0 && (
+              <button className="sm ghost" onClick={onExport} title="保存到 ~/.dsh-launcher/logs/">
+                导出日志
+              </button>
+            )}
             {active.webUrl && !active.exited && (
               <button
                 className="sm primary"

@@ -506,3 +506,29 @@ input::placeholder { color: #55607a; }
   color: var(--text-dim);
 }
 .dock-foot .mono { font-family: var(--mono); }
+
+/* ── Profile 实例面板 ─────────────── */
+.inst-list { display: flex; flex-direction: column; gap: 6px; }
+.inst-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.inst-row .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--err); flex-shrink: 0; }
+.inst-row .dot.on { background: var(--ok); }
+.inst-info { flex: 1; min-width: 0; }
+.inst-name { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+.inst-meta { color: var(--text-dim); font-size: 10.5px; margin-top: 1px; }
+
+.badge.upgrade {
+  background: rgba(251, 191, 36, 0.16);
+  color: var(--warn);
+  cursor: pointer;
+  border: none;
+  font-family: inherit;
+}
+.badge.upgrade:hover { background: rgba(251, 191, 36, 0.28); }

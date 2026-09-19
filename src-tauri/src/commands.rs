@@ -194,20 +194,12 @@ pub async fn launch_version(
                 .ok_or_else(|| "还没有已安装的 dsh 版本，请先在列表中选择安装".to_string())?,
         };
         let launch_args = args
-            .or(Some(settings.default_args.clone()))
+            .or_else(|| Some(settings.default_args.clone()))
             .unwrap_or_default();
         let profile = profile.unwrap_or_else(|| settings.default_profile.clone());
-        // 每个 profile 同时只能有一个实例（内嵌与终端启动共用该约束）
-        let prof = profile.trim();
-        if !prof.is_empty() {
-            for p in crate::procs::list(&proc_state) {
-                if p.profile == prof {
-                    return Err(format!(
-                        "profile 「{prof}」已在运行（PID {}），每个 profile 同时只能启动一个实例",
-                        p.id
-                    ));
-                }
-            }
+        // 全局唯一性守卫：同一 profile（无论内嵌还是外部启动）只能有一个实例
+        if let Err(msg) = ensure_profile_free(&proc_state, &profile) {
+            return Err(msg.into());
         }
         Ok(launcher::launch(
             &settings,
@@ -251,20 +243,12 @@ pub async fn start_embedded(
                 .ok_or_else(|| "还没有已安装的 dsh 版本，请先在列表中选择安装".to_string())?,
         };
         let launch_args = args
-            .or(Some(settings.default_args.clone()))
+            .or_else(|| Some(settings.default_args.clone()))
             .unwrap_or_default();
         let profile = profile.unwrap_or_else(|| settings.default_profile.clone());
-        // 每个 profile 同时只能有一个实例
-        let prof = profile.trim();
-        if !prof.is_empty() {
-            for p in crate::procs::list(&proc_state) {
-                if p.profile == prof {
-                    return Err(format!(
-                        "profile 「{prof}」已在运行（PID {}），每个 profile 同时只能启动一个实例",
-                        p.id
-                    ));
-                }
-            }
+        // 全局唯一性守卫：同一 profile（无论内嵌还是外部启动）只能有一个实例
+        if let Err(msg) = ensure_profile_free(&proc_state, &profile) {
+            return Err(msg);
         }
         crate::procs::spawn_embedded(
             app,
@@ -277,6 +261,33 @@ pub async fn start_embedded(
     })
     .await
     .map_err(|e| format!("启动失败: {e}"))?
+}
+
+/// 校验 profile 未被任何实例（内嵌/外部）占用
+fn ensure_profile_free(
+    proc_state: &crate::procs::ProcState,
+    profile: &str,
+) -> Result<(), String> {
+    let prof = profile.trim();
+    if prof.is_empty() {
+        return Ok(());
+    }
+    for p in crate::procs::list(proc_state) {
+        if p.profile == prof {
+            return Err(format!(
+                "profile 「{prof}」已在运行（PID {}），每个 profile 同时只能启动一个实例",
+                p.id
+            ));
+        }
+    }
+    for (pid, ext_prof) in crate::procs::external_running_profile_pids(&[]) {
+        if ext_prof == prof {
+            return Err(format!(
+                "系统中已有 profile 「{prof}」的 dsh 进程（PID {pid}，可能由终端或外部启动），每个 profile 同时只能启动一个实例"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -292,6 +303,42 @@ pub fn list_processes(
     procs: State<'_, crate::procs::ProcState>,
 ) -> Result<Vec<crate::procs::ProcInfo>, String> {
     Ok(crate::procs::list(&procs))
+}
+
+/// 各 profile 实例状态（含终端/外部启动的）
+#[tauri::command]
+pub fn list_profile_instances(
+    procs: State<'_, crate::procs::ProcState>,
+) -> Result<Vec<crate::procs::ProfileInstance>, String> {
+    Ok(crate::procs::profile_instances(&procs))
+}
+
+/// 停止某个 profile 的实例（内嵌或外部）
+#[tauri::command]
+pub fn stop_profile_instance(
+    procs: State<'_, crate::procs::ProcState>,
+    profile: String,
+) -> Result<bool, String> {
+    crate::procs::stop_profile(&procs, &profile)
+}
+
+/// 把运行日志导出到 ~/.dsh-launcher/logs/
+#[tauri::command]
+pub fn export_proc_log(
+    profile: String,
+    pid: u32,
+    content: String,
+) -> Result<String, String> {
+    let dir = settings::launcher_home().join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let safe_profile = profile.trim().replace(['/', '\\', ' '], "_");
+    let path = dir.join(format!("dsh-{}-{}-{}.log", safe_profile, pid, ts));
+    std::fs::write(&path, content).map_err(|e| format!("写日志失败: {e}"))?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
