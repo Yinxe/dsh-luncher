@@ -56,6 +56,8 @@ export default function App() {
   profileRef.current = selectedProfile;
   const procsRef = useRef<Record<number, ProcEntry>>({});
   procsRef.current = procs;
+  const settingsRef = useRef<Settings | null>(null);
+  settingsRef.current = settings;
   /** 已自动打开过 Web UI 的进程 */
   const autoOpenedWeb = useRef<Set<number>>(new Set());
   const builtinUpdate = useRef<Update | null>(null);
@@ -152,6 +154,22 @@ export default function App() {
     [addToast]
   );
 
+  const doSetActiveVersion = useCallback(
+    async (v: string) => {
+      const s = settingsRef.current;
+      if (!s || s.activeVersion === v) return;
+      const next = { ...s, activeVersion: v };
+      setSettings(next);
+      try {
+        await api.saveSettings(next);
+        addToast("ok", `当前版本已切换为 ${v}，Profile 实例将基于它启动`);
+      } catch (e) {
+        addToast("err", `切换版本失败: ${e}`);
+      }
+    },
+    [addToast]
+  );
+
   const doStopProfileInstance = useCallback(
     async (profile: string) => {
       try {
@@ -190,6 +208,22 @@ export default function App() {
         }
         setEnv(e);
         setInstalled(installedList);
+        // 迁移：从未设置过当前版本时，取最新已安装版本
+        if (!s.activeVersion && installedList.length > 0) {
+          const best = [...installedList]
+            .filter((i) => i.version !== "unknown")
+            .sort((a, b) => compareVersions(b.version, a.version))[0];
+          if (best) {
+            const next = { ...s, activeVersion: best.version };
+            setSettings(next);
+            setSelectedProfile(
+              next.defaultProfile ||
+                (ps.some((p) => p.name === "web") ? "web" : (ps[0]?.name ?? ""))
+            );
+            api.saveSettings(next).catch(() => undefined);
+            addToast("info", `当前版本已设为 ${best.version}`);
+          }
+        }
         if (s.autoCheckVersions) refreshRemote();
         if (s.autoCheckUpdate) {
           api
@@ -231,6 +265,12 @@ export default function App() {
         if (e.success) {
           addToast("ok", `dsh ${e.version} 安装完成`);
           await refreshInstalled();
+          // 安装即启用：新装的版本成为当前版本（所有 Profile 基于它运行）
+          if (settingsRef.current && settingsRef.current.activeVersion !== e.version) {
+            const next = { ...settingsRef.current, activeVersion: e.version };
+            setSettings(next);
+            api.saveSettings(next).catch(() => undefined);
+          }
           if (pendingLaunch.current === e.version) {
             pendingLaunch.current = null;
             doLaunch(e.version);
@@ -668,14 +708,51 @@ export default function App() {
       {/* 主区 */}
       <div className="main">
         <div className="filters">
-          <h3>搜索</h3>
-          <input
-            type="text"
-            placeholder="版本号，如 0.1.5"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <h3>Profile 实例</h3>
+          <h3>① Node 环境</h3>
+          {env.node ? (
+            <div className="step-line">
+              <span className="dot on" />
+              <span className="mono">Node v{env.node}</span>
+              <span className="step-note">
+                {env.nodePath?.includes(".dsh-launcher") ? "（内置运行时）" : "（系统）"}
+              </span>
+            </div>
+          ) : (
+            <button className="sm primary" onClick={doInstallRuntime}>
+              一键安装内置 Node
+            </button>
+          )}
+
+          <h3>② DSH 版本</h3>
+          {installed.length > 0 ? (
+            <div
+              className="prof-chip"
+              title="当前版本：所有 Profile 实例都基于它运行；也可在下方版本列表安装/切换其他版本"
+            >
+              <span className="prof-label">当前</span>
+              <span className="prof-value">{settings.activeVersion || "未设置"}</span>
+              <span className="prof-caret">▾</span>
+              <select
+                className="prof-native"
+                value={settings.activeVersion}
+                onChange={(e) => doSetActiveVersion(e.target.value)}
+              >
+                {installed.map((i, idx) => (
+                  <option key={`${i.version}-${idx}`} value={i.version}>
+                    {i.version}
+                    {i.source === "managed" ? "" : ` · ${i.source === "global" ? "全局" : "PATH"}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <div className="step-line">
+              <span className="dot" />
+              <span className="step-note">未安装——在下方版本列表点「安装」</span>
+            </div>
+          )}
+
+          <h3>③ Profile 实例</h3>
           <div className="inst-tip">
             目前仅验证过 <b>web</b> 类 profile 可正常启动；其他 profile 可能是复制 web
             的配置（实例名不同、内容同为 web，仅端口等不同），也可能启动失败——以实际日志为准。
@@ -722,6 +799,13 @@ export default function App() {
             )}
           </div>
 
+          <h3>搜索版本</h3>
+          <input
+            type="text"
+            placeholder="版本号，如 0.1.5"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
           <h3>通道</h3>
           <div className="tag-group">
             <button className={`tag${channel === null ? " active" : ""}`} onClick={() => setChannel(null)}>
@@ -801,6 +885,8 @@ export default function App() {
               profileBusy={profileBusy}
               upgradeTo={upgradeTo}
               onUpgrade={(v) => doInstall(v, false)}
+              isActive={settings.activeVersion === r.version}
+              onSetActive={doSetActiveVersion}
               onLaunch={doLaunch}
               onTerminal={doTerminal}
               onShowProc={(id) => {

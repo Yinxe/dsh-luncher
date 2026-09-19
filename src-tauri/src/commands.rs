@@ -156,6 +156,7 @@ pub fn get_install_status(install_state: State<'_, InstallState>) -> Option<Stri
 
 #[tauri::command]
 pub fn uninstall_version(
+    state: State<'_, AppState>,
     procs: State<'_, crate::procs::ProcState>,
     version: String,
 ) -> Result<(), String> {
@@ -167,6 +168,12 @@ pub fn uninstall_version(
                 p.id
             ));
         }
+    }
+    // 当前使用中的版本不允许卸载，避免所有 profile 失去运行基础
+    if state.settings.lock().unwrap().active_version == version {
+        return Err(format!(
+            "{version} 是当前使用版本，请先在侧栏切换到其他版本后再卸载"
+        ));
     }
     crate::installer::uninstall_managed(&version)
 }

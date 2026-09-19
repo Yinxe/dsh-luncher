@@ -117,6 +117,8 @@ interface Props {
   isLatestTag: boolean;
   busy: boolean;
   runningProcs: ProcEntry[];
+  /** 该版本是否为全局「当前版本」 */
+  isActive: boolean;
   /** 当前选中的 profile 已有实例在运行 */
   profileBusy: boolean;
   /** 已安装版本低于官方 latest 时的目标版本 */
@@ -124,6 +126,7 @@ interface Props {
   onUpgrade: (target: string) => void;
   onLaunch: (version: string) => void;
   onTerminal: (version: string) => void;
+  onSetActive: (version: string) => void;
   onShowProc: (id: number) => void;
   onStopProc: (id: number) => void;
   onInstall: (version: string, force: boolean) => void;
@@ -136,11 +139,13 @@ export default function VersionRow({
   isLatestTag,
   busy,
   runningProcs,
+  isActive,
   profileBusy,
   upgradeTo,
   onUpgrade,
   onLaunch,
   onTerminal,
+  onSetActive,
   onShowProc,
   onStopProc,
   onInstall,
@@ -155,6 +160,7 @@ export default function VersionRow({
           <span>{row.version}</span>
           <span className={`badge ${row.channel}`}>{row.channel}</span>
           {isLatestTag && <span className="badge latest">latest</span>}
+          {isActive && <span className="badge installed">当前版本</span>}
         </div>
         <div className="d">
           {[
@@ -203,24 +209,36 @@ export default function VersionRow({
 
       <div className="vactions">
         {inst && inst.version !== "unknown" && (
-          <button
-            className="primary"
-            disabled={profileBusy}
-            onClick={() => onLaunch(row.version)}
-            title={
-              profileBusy
-                ? "选中的 profile 已有实例在运行，每个 profile 同时只能运行一个"
-                : "内嵌启动：进程随启动器生命周期，日志在下方面板查看"
-            }
-          >
-            启动
-          </button>
+          isActive ? (
+            <button
+              className="primary"
+              disabled={profileBusy}
+              onClick={() => onLaunch(row.version)}
+              title={
+                profileBusy
+                  ? "选中的 profile 已有实例在运行，每个 profile 同时只能运行一个"
+                  : "以内嵌方式启动当前版本（进程随启动器生命周期，日志在下方面板查看）"
+              }
+            >
+              启动
+            </button>
+          ) : (
+            <button
+              className="sm"
+              disabled={busy}
+              onClick={() => onSetActive(row.version)}
+              title="设为当前版本：所有 Profile 实例将基于该版本启动"
+            >
+              设为当前
+            </button>
+          )
         )}
         {!inst && (
           <button
             className="primary"
             disabled={busy}
             onClick={() => onInstall(row.version, false)}
+            title="安装完成后自动设为当前版本"
           >
             安装
           </button>
@@ -279,10 +297,12 @@ export default function VersionRow({
         )}
         <button
           className="sm ghost"
-          disabled={profileBusy}
+          disabled={profileBusy || !isActive}
           onClick={() => onTerminal(row.version)}
           title={
-            profileBusy
+            !isActive
+              ? "仅当前版本可启动；先点「设为当前」"
+              : profileBusy
               ? "该 profile 已有实例在运行，每个 profile 同时只能运行一个"
               : "在独立系统终端窗口中启动（不受启动器生命周期管理，可交互）"
           }

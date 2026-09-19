@@ -51,6 +51,8 @@ export interface Settings {
   defaultArgs: string;
   /** 默认启动的 profile（空 = 不带 --profile，走 dsh 默认） */
   defaultProfile: string;
+  /** 当前使用的 dsh 版本：所有 profile 都基于该版本运行 */
+  activeVersion: string;
   terminal: string;
   autoCheckUpdate: boolean;
   autoCheckVersions: boolean;
