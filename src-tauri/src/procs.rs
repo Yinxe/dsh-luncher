@@ -148,13 +148,16 @@ pub fn spawn_embedded(
 
     state.procs.lock().unwrap().insert(id, handle);
 
-    Ok(ProcInfo {
+    let info = ProcInfo {
         id,
         version: target.version.clone(),
         profile: prof.to_string(),
         started_at: now_millis(),
         running: true,
-    })
+    };
+    // 通知托盘等无 UI 依赖的监听方立即刷新状态
+    let _ = app.emit("proc-started", &info);
+    Ok(info)
 }
 
 /// 在专属 keeper 线程中 spawn dsh 并守候其退出。

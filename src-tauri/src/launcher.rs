@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tauri::Manager;
 
 use crate::installed::InstalledVersion;
 use crate::settings::Settings;
@@ -210,16 +209,5 @@ pub fn launch(
             ))
         }
         Err(e) => fail(format!("{e}\n手动命令：{inner}")),
-    }
-}
-
-/// 托盘/命令用的“启动最新已安装版本”
-pub fn launch_latest(app: &tauri::AppHandle) -> LaunchResult {
-    let state = app.state::<crate::settings::AppState>();
-    let settings = state.settings.lock().unwrap().clone();
-    let installed = crate::installed::collect_installed(&settings);
-    match crate::installed::pick_latest(&installed) {
-        Some(t) => launch(&settings, &t, &settings.default_args, &settings.default_profile),
-        None => fail("还没有已安装的 dsh 版本，请先在界面中安装"),
     }
 }
