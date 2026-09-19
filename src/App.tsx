@@ -676,6 +676,10 @@ export default function App() {
             onChange={(e) => setQuery(e.target.value)}
           />
           <h3>Profile 实例</h3>
+          <div className="inst-tip">
+            目前仅验证过 <b>web</b> 类 profile 可正常启动；其他 profile 可能是复制 web
+            的配置（实例名不同、内容同为 web，仅端口等不同），也可能启动失败——以实际日志为准。
+          </div>
           <div className="inst-list">
             {instanceRows.map((row) => (
               <div key={row.profile} className="inst-row">
