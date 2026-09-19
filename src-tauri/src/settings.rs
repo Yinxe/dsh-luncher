@@ -15,6 +15,8 @@ pub struct Settings {
     pub default_args: String,
     /// 默认启动的 profile（空 = 不带 --profile，走 dsh 默认）
     pub default_profile: String,
+    /// 当前使用的 dsh 版本：所有 profile 都基于该版本运行
+    pub active_version: String,
     /// 终端模拟器覆盖（"auto" 或可执行文件路径）
     pub terminal: String,
     /// 启动时自动检查启动器更新
@@ -36,6 +38,7 @@ impl Default for Settings {
             update_manifest_url: String::new(),
             default_args: String::new(),
             default_profile: String::new(),
+            active_version: String::new(),
             terminal: "auto".into(),
             auto_check_update: true,
             auto_check_versions: true,

@@ -184,15 +184,7 @@ pub async fn launch_version(
     let proc_state = procs.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let installed = crate::installed::collect_installed(&settings);
-        let target = match version.as_deref() {
-            Some(v) if v != "unknown" => installed
-                .iter()
-                .find(|i| i.version == v)
-                .cloned()
-                .ok_or_else(|| format!("未找到已安装的 {v}，请先安装"))?,
-            _ => crate::installed::pick_latest(&installed)
-                .ok_or_else(|| "还没有已安装的 dsh 版本，请先在列表中选择安装".to_string())?,
-        };
+        let target = resolve_target(&installed, version.as_deref(), &settings.active_version)?;
         let launch_args = args
             .or_else(|| Some(settings.default_args.clone()))
             .unwrap_or_default();
@@ -219,6 +211,34 @@ pub async fn list_profiles() -> Result<Vec<crate::profiles::ProfileInfo>, String
         .map_err(|e| format!("扫描 profile 失败: {e}"))?
 }
 
+/// 解析启动目标版本：显式指定 > 当前版本(active) > 最新已安装
+fn resolve_target(
+    installed: &[crate::installed::InstalledVersion],
+    version: Option<&str>,
+    active: &str,
+) -> Result<crate::installed::InstalledVersion, String> {
+    match version {
+        Some(v) if v != "unknown" => installed
+            .iter()
+            .find(|i| i.version == v)
+            .cloned()
+            .ok_or_else(|| format!("未找到已安装的 {v}，请先安装")),
+        _ => {
+            let act = active.trim();
+            let found = if act.is_empty() {
+                None
+            } else {
+                installed.iter().find(|i| i.version == act)
+            };
+            match found {
+                Some(i) => Ok(i.clone()),
+                None => crate::installed::pick_latest(installed)
+                    .ok_or_else(|| "还没有已安装的 dsh 版本，请先在版本列表中安装".to_string()),
+            }
+        }
+    }
+}
+
 /// 内嵌启动：dsh 作为启动器子进程运行，日志回传界面，启动器退出即全部结束
 #[tauri::command]
 pub async fn start_embedded(
@@ -233,15 +253,7 @@ pub async fn start_embedded(
     let proc_state = procs.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let installed = crate::installed::collect_installed(&settings);
-        let target = match version.as_deref() {
-            Some(v) if v != "unknown" => installed
-                .iter()
-                .find(|i| i.version == v)
-                .cloned()
-                .ok_or_else(|| format!("未找到已安装的 {v}，请先安装"))?,
-            _ => crate::installed::pick_latest(&installed)
-                .ok_or_else(|| "还没有已安装的 dsh 版本，请先在列表中选择安装".to_string())?,
-        };
+        let target = resolve_target(&installed, version.as_deref(), &settings.active_version)?;
         let launch_args = args
             .or_else(|| Some(settings.default_args.clone()))
             .unwrap_or_default();

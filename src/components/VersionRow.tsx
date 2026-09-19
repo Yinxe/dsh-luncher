@@ -23,28 +23,54 @@ export function deriveChannel(version: string): string {
   return "stable";
 }
 
+/**
+ * 标准语义比较：a > b 返回正数，a < b 返回负数，相等返回 0。
+ * 覆盖 0.1.5-rc.2 / 0.1.6-alpha.1 等格式，预发布段按 semver 规则
+ * （无预发布 > 有预发布；数字段 < 字母段；数字段按数值比较）。
+ */
 export function compareVersions(a: string, b: string): number {
-  const core = (v: string) =>
-    v
-      .replace(/^v/, "")
-      .split("-")[0]
+  const parse = (v: string) => {
+    const clean = v.trim().replace(/^v/, "");
+    const idx = clean.indexOf("-");
+    const core = (idx === -1 ? clean : clean.slice(0, idx))
       .split(".")
       .map((x) => parseInt(x, 10) || 0);
-  const pre = (v: string) => (v.includes("-") ? v.split("-").slice(1).join("-") : "");
-  const ca = core(a);
-  const cb = core(b);
-  const n = Math.max(ca.length, cb.length);
+    const pre = idx === -1 ? [] : clean.slice(idx + 1).split(".");
+    return { core, pre };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+
+  const n = Math.max(pa.core.length, pb.core.length);
   for (let i = 0; i < n; i++) {
-    const x = ca[i] ?? 0;
-    const y = cb[i] ?? 0;
-    if (x !== y) return y - x;
+    const x = pa.core[i] ?? 0;
+    const y = pb.core[i] ?? 0;
+    if (x !== y) return x - y;
   }
-  const pa = pre(a);
-  const pb = pre(b);
-  if (!pa && !pb) return 0;
-  if (!pa) return -1;
-  if (!pb) return 1;
-  return pb.localeCompare(pa);
+
+  if (pa.pre.length === 0 && pb.pre.length === 0) return 0;
+  if (pa.pre.length === 0) return 1;
+  if (pb.pre.length === 0) return -1;
+
+  const m = Math.max(pa.pre.length, pb.pre.length);
+  for (let i = 0; i < m; i++) {
+    const xs = pa.pre[i];
+    const ys = pb.pre[i];
+    if (xs === undefined) return -1;
+    if (ys === undefined) return 1;
+    const xn = /^\d+$/.test(xs) ? parseInt(xs, 10) : null;
+    const yn = /^\d+$/.test(ys) ? parseInt(ys, 10) : null;
+    if (xn !== null && yn !== null) {
+      if (xn !== yn) return xn - yn;
+    } else if (xn !== null) {
+      return -1;
+    } else if (yn !== null) {
+      return 1;
+    } else if (xs !== ys) {
+      return xs < ys ? -1 : 1;
+    }
+  }
+  return 0;
 }
 
 export interface MergedRow {
@@ -83,7 +109,7 @@ export function mergeRows(
       });
     }
   }
-  return [...rows.values()].sort((a, b) => compareVersions(a.version, b.version));
+  return [...rows.values()].sort((a, b) => compareVersions(b.version, a.version));
 }
 
 interface Props {
