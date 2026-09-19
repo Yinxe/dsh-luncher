@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
+import { RotateCcw, Save } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "../api";
 import type { ProfileDetail, PluginEntryInfo } from "../types";
 
@@ -48,17 +55,8 @@ export default function PluginsView({ profiles, onToast }: Props) {
     reload();
   }, [reload]);
 
-  const guard = useCallback(async () => {
-    if (!profile) {
-      onToast("err", "请先在 Profile 实例中选择一个 profile");
-      return false;
-    }
-    return true;
-  }, [profile, onToast]);
-
   const togglePlugin = useCallback(
     async (p: PluginEntryInfo) => {
-      if (!(await guard())) return;
       setBusy(true);
       try {
         await api.setProfilePlugin(profile, p.id, !p.disabled);
@@ -75,12 +73,11 @@ export default function PluginsView({ profiles, onToast }: Props) {
         setBusy(false);
       }
     },
-    [profile, reloadMode, reload, guard, onToast]
+    [profile, reloadMode, reload, onToast]
   );
 
   const toggleBundle = useCallback(
     async (name: string, enabled: boolean) => {
-      if (!(await guard())) return;
       setBusy(true);
       try {
         await api.setBundleEnabled(profile, name, enabled);
@@ -92,7 +89,7 @@ export default function PluginsView({ profiles, onToast }: Props) {
         setBusy(false);
       }
     },
-    [profile, reload, guard, onToast]
+    [profile, reload, onToast]
   );
 
   const uninstall = useCallback(
@@ -103,7 +100,6 @@ export default function PluginsView({ profiles, onToast }: Props) {
         )
       )
         return;
-      if (!(await guard())) return;
       setBusy(true);
       try {
         await api.uninstallBundle(profile, name);
@@ -115,11 +111,10 @@ export default function PluginsView({ profiles, onToast }: Props) {
         setBusy(false);
       }
     },
-    [profile, reload, guard, onToast]
+    [profile, reload, onToast]
   );
 
   const saveFile = useCallback(async () => {
-    if (!(await guard())) return;
     setBusy(true);
     try {
       await api.writeProfileFile(profile, editFile, draft);
@@ -130,7 +125,7 @@ export default function PluginsView({ profiles, onToast }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [profile, editFile, draft, guard, onToast, reload]);
+  }, [profile, editFile, draft, onToast, reload]);
 
   const switchFile = useCallback(
     async (f: FileKey) => {
@@ -148,130 +143,142 @@ export default function PluginsView({ profiles, onToast }: Props) {
   );
 
   if (profiles.length === 0) {
-    return <div className="page-empty">未找到任何 profile（$DSH_HOME/profiles 为空）</div>;
+    return (
+      <Card className="p-10 text-center text-muted-foreground">
+        未找到任何 profile（$DSH_HOME/profiles 为空）
+      </Card>
+    );
   }
 
   return (
-    <div className="page">
-      <div className="page-head">
-        <h2>插件管理</h2>
-        <div className="prof-chip">
-          <span className="prof-label">Profile</span>
-          <span className="prof-value">{profile}</span>
-          <span className="prof-caret">▾</span>
-          <select
-            className="prof-native"
-            value={profile}
-            onChange={(e) => setProfile(e.target.value)}
-          >
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="text-base font-semibold">插件管理</h2>
+        <Select value={profile} onValueChange={setProfile}>
+          <SelectTrigger className="w-52 font-mono">
+            <SelectValue placeholder="选择 profile" />
+          </SelectTrigger>
+          <SelectContent>
             {profiles.map((p) => (
-              <option key={p} value={p}>
+              <SelectItem key={p} value={p}>
                 {p}
-              </option>
+              </SelectItem>
             ))}
-          </select>
-        </div>
-        <span className="reload-hint">
-          patchReload = <b>{reloadMode}</b>
-          {reloadMode === "live"
-            ? "（保存后即时生效）"
-            : "（需重启 Profile 实例生效）"}
-        </span>
+          </SelectContent>
+        </Select>
+        <Badge variant={reloadMode === "live" ? "success" : "warning"}>
+          patchReload = {reloadMode}
+          {reloadMode === "live" ? "（保存后即时生效）" : "（需重启实例生效）"}
+        </Badge>
       </div>
 
-      <section className="panel">
-        <h3>插件服务（来自 cordis.patch，可动态启停）</h3>
-        <div className="plugin-grid">
+      <Card className="p-4">
+        <div className="mb-2.5 text-[13px] font-semibold">
+          插件服务
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            来自 cordis.patch 层，可动态启停
+          </span>
+        </div>
+        <div className="space-y-1.5">
           {plugins.map((p) => (
-            <div key={p.id} className={`plugin-row${p.disabled ? " off" : ""}`}>
-              <span className={`inst-dot ${p.disabled ? "stopped" : "ready"}`} />
-              <div className="inst-info">
-                <div className="inst-name">{p.id}</div>
-                <div className="inst-meta">
+            <div
+              key={p.id}
+              className={`flex items-center gap-3 rounded-lg border border-border bg-background/50 px-3 py-1.5 ${
+                p.disabled ? "opacity-60" : ""
+              }`}
+            >
+              <span className={`h-2 w-2 shrink-0 rounded-full ${p.disabled ? "bg-muted-foreground/40" : "bg-emerald-500"}`} />
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-[12.5px] font-medium">{p.id}</div>
+                <div className="text-[10.5px] text-muted-foreground">
                   {p.bundle ? `来自 ${p.bundle}` : "来自用户 patch 层"}
                   {p.disabled && !p.managed ? " · 手动禁用" : ""}
                 </div>
               </div>
-              <button
-                className={`sm ${p.disabled ? "" : "ghost"}`}
+              <Switch
+                checked={!p.disabled}
                 disabled={busy}
-                onClick={() => togglePlugin(p)}
-              >
-                {p.disabled ? "启用" : "停用"}
-              </button>
+                onCheckedChange={(v) => togglePlugin({ ...p, disabled: !v })}
+              />
             </div>
           ))}
-          {plugins.length === 0 && <div className="inst-meta">未读取到插件清单</div>}
+          {plugins.length === 0 && (
+            <div className="py-3 text-center text-xs text-muted-foreground">未读取到插件清单</div>
+          )}
         </div>
-      </section>
+      </Card>
 
-      <section className="panel">
-        <h3>插件包（dsh.profile.bundles，启停需重启实例）</h3>
-        <div className="plugin-grid">
+      <Card className="p-4">
+        <div className="mb-2.5 text-[13px] font-semibold">
+          插件包
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            dsh.profile.bundles，启停需重启实例
+          </span>
+        </div>
+        <div className="space-y-1.5">
           {(detail?.bundles ?? []).map((b) => (
-            <div key={b.name} className={`plugin-row${b.enabled ? "" : " off"}`}>
-              <span className={`inst-dot ${b.enabled ? "ready" : "stopped"}`} />
-              <div className="inst-info">
-                <div className="inst-name">{b.name}</div>
-                <div className="inst-meta">
+            <div
+              key={b.name}
+              className={`flex items-center gap-3 rounded-lg border border-border bg-background/50 px-3 py-1.5 ${
+                b.enabled ? "" : "opacity-60"
+              }`}
+            >
+              <span className={`h-2 w-2 shrink-0 rounded-full ${b.enabled ? "bg-emerald-500" : "bg-muted-foreground/40"}`} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-mono text-[12.5px] font-medium">{b.name}</div>
+                <div className="text-[10.5px] text-muted-foreground">
                   {b.version ?? "—"} · {b.source}
                 </div>
               </div>
-              <button
-                className="sm ghost danger"
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                 disabled={busy}
                 onClick={() => uninstall(b.name)}
                 title="从 bundles 与依赖声明中移除"
               >
                 卸载
-              </button>
-              <button
-                className={`sm ${b.enabled ? "ghost" : ""}`}
+              </Button>
+              <Switch
+                checked={b.enabled}
                 disabled={busy}
-                onClick={() => toggleBundle(b.name, !b.enabled)}
-              >
-                {b.enabled ? "停用" : "启用"}
-              </button>
+                onCheckedChange={(v) => toggleBundle(b.name, v)}
+              />
             </div>
           ))}
           {(!detail || detail.bundles.length === 0) && (
-            <div className="inst-meta">未读取到 bundle 列表</div>
+            <div className="py-3 text-center text-xs text-muted-foreground">未读取到 bundle 列表</div>
           )}
         </div>
-      </section>
+      </Card>
 
-      <section className="panel">
-        <div className="panel-head">
-          <h3>原始配置编辑</h3>
-          <div className="tag-group">
-            {(["cordis.patch.yml", "package.json"] as FileKey[]).map((f) => (
-              <button
-                key={f}
-                className={`tag${editFile === f ? " active" : ""}`}
-                onClick={() => switchFile(f)}
-              >
-                {f}
-              </button>
-            ))}
-          </div>
-          <span style={{ flex: 1 }} />
-          <button className="sm primary" disabled={busy || !dirty} onClick={saveFile}>
-            {dirty ? "保存（自动备份）" : "已保存"}
-          </button>
+      <Card className="p-4">
+        <div className="mb-2.5 flex flex-wrap items-center gap-3">
+          <div className="text-[13px] font-semibold">原始配置编辑</div>
+          <Select value={editFile} onValueChange={(v) => switchFile(v as FileKey)}>
+            <SelectTrigger className="h-7 w-44 font-mono text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="cordis.patch.yml">cordis.patch.yml</SelectItem>
+              <SelectItem value="package.json">package.json</SelectItem>
+            </SelectContent>
+          </Select>
+          {dirty && <Badge variant="warning">未保存</Badge>}
+          <span className="flex-1" />
+          <Button size="sm" disabled={busy || !dirty} onClick={saveFile}>
+            <Save /> 保存（自动备份）
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy || !dirty} onClick={reload}>
+            <RotateCcw /> 还原
+          </Button>
         </div>
-        <textarea
-          className="code-editor"
-          spellCheck={false}
-          value={draft}
-          onChange={(e) => {
-            setDraft(e.target.value);
-            setDirty(true);
-          }}
-        />
-        <div className="hint-line">
+        <Textarea rows={14} spellCheck={false} value={draft} onChange={(e) => { setDraft(e.target.value); setDirty(true); }} />
+        <div className="mt-1.5 text-[11px] text-muted-foreground">
           编辑保留全部注释；保存前做语法校验，原文件自动备份为 *.launcher-bak-*
         </div>
-      </section>
+      </Card>
     </div>
   );
 }
