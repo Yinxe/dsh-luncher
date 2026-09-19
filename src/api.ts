@@ -18,6 +18,8 @@ import type {
   RuntimeFinishedEvent,
   RuntimeProgressEvent,
   Settings,
+  WebQuickConfig,
+  WebQuickConfigInput,
 } from "./types";
 
 export const api = {
@@ -56,6 +58,10 @@ export const api = {
     invoke<string>("read_profile_file", { profile, file }),
   writeProfileFile: (profile: string, file: string, content: string) =>
     invoke<void>("write_profile_file", { profile, file, content }),
+  getWebQuickConfig: (profile: string) =>
+    invoke<WebQuickConfig>("get_web_quick_config", { profile }),
+  setWebQuickConfig: (profile: string, config: WebQuickConfigInput) =>
+    invoke<void>("set_web_quick_config", { profile, config }),
   readGlobalConfig: () => invoke<string>("read_global_config"),
   writeGlobalConfig: (content: string) => invoke<void>("write_global_config", { content }),
   listProfiles: () => invoke<ProfileInfo[]>("list_profiles"),

@@ -1,7 +1,7 @@
 use tauri::Emitter;
 use crate::settings::Settings;
 use crate::util;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::profiles;
@@ -744,9 +744,9 @@ pub fn install_bundle(
     start_plugin_cli(app, settings, profile, &["add", name])
 }
 
-/// 读 profile 内的文本文件（仅 cordis.patch.yml —— package.json 只归 dsh plugin 命令管）
+/// 读 profile 内的文本文件（cordis.patch.yml 可编辑；package.json 只读 —— 写入仍归 dsh plugin 命令管）
 pub fn read_profile_file(profile: &str, file: &str) -> Result<String, String> {
-    let allowed = ["cordis.patch.yml"];
+    let allowed = ["cordis.patch.yml", "package.json"];
     if !allowed.contains(&file) {
         return Err("不允许读取该文件".into());
     }
@@ -812,6 +812,234 @@ pub fn patch_reload_mode(profile: &str) -> String {
                 .map(String::from)
         })
         .unwrap_or_else(|| "live".into())
+}
+
+// ── Web 快捷配置（接管 webserver / web-runtime / connection 三个 patch 条目） ──
+
+const WEB_QUICK_MARKER: &str = "# dsh-launcher: web-quick";
+
+/// web 快捷配置当前值（解析自 cordis.patch.yml；条目不存在 = present=false，键缺失 = None）
+#[derive(Clone, Serialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WebQuickConfig {
+    pub webserver_present: bool,
+    pub host: Option<String>,
+    pub port: Option<u64>,
+    pub web_runtime_present: bool,
+    pub open_browser: Option<bool>,
+    pub print_url: Option<bool>,
+    pub surface_context: Option<bool>,
+    pub connection_present: bool,
+    pub cookie_max_age_days: Option<i64>,
+}
+
+/// 保存载荷：三个条目由启动器整块生成。patch 条目会整体替换该行 config，
+/// 所以每块的键必须成套写全；两条 trustedHosts 固定用 `!!js` 表达式联动
+/// webStartup → webRuntime 信任链（见 @deepseek-ai/dsh-web-app 的 cordis.patch.yml 定义）。
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WebQuickConfigInput {
+    pub host: String,
+    pub port: u64,
+    pub open_browser: bool,
+    pub print_url: bool,
+    pub surface_context: bool,
+    pub cookie_max_age_days: i64,
+}
+
+/// 解析 patch 文本中三个目标条目的当前配置（纯 disabled 条目不算已配置）
+fn web_quick_from_patch(raw: &str) -> WebQuickConfig {
+    let mut out = WebQuickConfig::default();
+    let Ok(serde_yaml::Value::Sequence(seq)) = serde_yaml::from_str::<serde_yaml::Value>(raw)
+    else {
+        return out;
+    };
+    for item in seq {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if item
+            .get("disabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(cfg) = item.get("config") else {
+            continue;
+        };
+        match id {
+            "webserver" => {
+                out.webserver_present = true;
+                out.host = cfg.get("host").and_then(|v| v.as_str()).map(String::from);
+                out.port = cfg.get("port").and_then(|v| v.as_u64());
+            }
+            "web-runtime" => {
+                out.web_runtime_present = true;
+                out.open_browser = cfg.get("openBrowser").and_then(|v| v.as_bool());
+                out.print_url = cfg.get("printUrl").and_then(|v| v.as_bool());
+                out.surface_context = cfg.get("surfaceContext").and_then(|v| v.as_bool());
+            }
+            "connection" => {
+                out.connection_present = true;
+                out.cookie_max_age_days = cfg.get("cookieMaxAgeDays").and_then(|v| v.as_i64());
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+pub fn get_web_quick_config(profile: &str) -> Result<WebQuickConfig, String> {
+    let raw = std::fs::read_to_string(user_patch_path(profile)?).unwrap_or_default();
+    Ok(web_quick_from_patch(&raw))
+}
+
+/// YAML 单引号标量：内部单引号翻倍转义
+fn yaml_single_quoted(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// 生成一个目标条目的整块文本（含启动器标记注释行）
+fn web_quick_block(id: &str, input: &WebQuickConfigInput) -> String {
+    let body = match id {
+        "webserver" => format!(
+            "- id: webserver\n  config:\n    host: {}\n    port: {}\n",
+            yaml_single_quoted(input.host.trim()),
+            input.port
+        ),
+        "web-runtime" => format!(
+            "- id: web-runtime\n  config:\n    openBrowser: {}\n    printUrl: {}\n    surfaceContext: {}\n    trustedHosts: !!js ctx.webStartup.trustedHosts\n",
+            input.open_browser, input.print_url, input.surface_context
+        ),
+        _ => format!(
+            "- id: connection\n  config:\n    trustedHosts: !!js ctx.webRuntime.trustedHosts\n    cookieMaxAgeDays: {}\n",
+            input.cookie_max_age_days
+        ),
+    };
+    format!("{WEB_QUICK_MARKER} {id}（启动器管理：保存「快捷配置」整块覆盖此条目）\n{body}")
+}
+
+/// 整块替换时连带清理紧邻上一行的启动器 web-quick 标记注释（用户注释保留）
+fn drop_web_quick_marker(out: &mut Vec<String>) {
+    let mut last = out.len();
+    while last > 0 && out[last - 1].trim().is_empty() {
+        last -= 1;
+    }
+    if last > 0 && out[last - 1].trim_start().starts_with(WEB_QUICK_MARKER) {
+        out.truncate(last - 1);
+    }
+}
+
+/// 把三个 web 快捷配置条目整块写入用户 cordis.patch.yml：
+/// 已有同 id 的 config 条目（非 disabled）就地整块替换（重复条目丢弃）；
+/// 缺失的条目插到首个「插件启停」管理块之前（避免落在 disabled 条目之后又把它覆盖回启用），
+/// 没有管理块则追加到末尾；空列表 `[]` 占位行移除。用户注释一律保留；写前备份 + YAML 校验。
+pub fn set_web_quick_config(profile: &str, input: &WebQuickConfigInput) -> Result<(), String> {
+    let host = input.host.trim();
+    if host.is_empty() || host.len() > 253 || host.chars().any(|c| c.is_control()) {
+        return Err("host 不能为空且不得包含控制字符".into());
+    }
+    if !(1..=65535).contains(&input.port) {
+        return Err("port 需在 1-65535 之间".into());
+    }
+    if !(1..=3_650_000).contains(&input.cookie_max_age_days) {
+        return Err("cookieMaxAgeDays 需在 1-3650000 之间".into());
+    }
+
+    let ids = ["webserver", "web-runtime", "connection"];
+    let blocks: Vec<String> = ids.iter().map(|id| web_quick_block(id, input)).collect();
+
+    let path = user_patch_path(profile)?;
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let lines: Vec<&str> = raw.lines().collect();
+
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 16);
+    let mut replaced = [false; 3];
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].starts_with("- ") {
+            // 空 `[]` 占位在补块后非法（flow 与 block 序列不能混用），先行移除
+            if lines[i].trim() == "[]" && replaced.iter().any(|r| !r) {
+                i += 1;
+                continue;
+            }
+            out.push(lines[i].to_string());
+            i += 1;
+            continue;
+        }
+        // 顶层条目块：起始行 + 后续缩进行/空行
+        let mut j = i + 1;
+        while j < lines.len() && (lines[j].starts_with(' ') || lines[j].trim().is_empty()) {
+            j += 1;
+        }
+        let item = yaml_item_of(&lines[i..j].join("\n"));
+        let id = item
+            .as_ref()
+            .and_then(|it| it.get("id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+        let k = id.as_deref().and_then(|id| ids.iter().position(|x| *x == id));
+        let is_config = item.as_ref().is_some_and(|it| {
+            it.get("config").is_some()
+                && !it
+                    .get("disabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+        });
+        if let (Some(k), true) = (k, is_config) {
+            if !replaced[k] {
+                drop_web_quick_marker(&mut out);
+                out.push(blocks[k].clone());
+                replaced[k] = true;
+            }
+            // 同 id 重复条目直接丢弃，统一由唯一新块接管
+            i = j;
+            continue;
+        }
+        out.extend(lines[i..j].iter().map(|l| l.to_string()));
+        i = j;
+    }
+
+    // 顶层必须是条目列表：是映射则不接管（多半是手写坏的文件，去 patch 编辑器排查）
+    if !raw.trim().is_empty() {
+        if let Ok(serde_yaml::Value::Mapping(_)) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+            return Err("cordis.patch.yml 顶层不是条目列表，无法写入快捷配置".into());
+        }
+    }
+
+    let mut ins: Vec<String> = Vec::new();
+    for (k, b) in blocks.iter().enumerate() {
+        if replaced[k] {
+            continue;
+        }
+        ins.push(String::new());
+        ins.extend(b.trim_end_matches('\n').split('\n').map(String::from));
+    }
+    if !ins.is_empty() {
+        // 插入点：首个插件启停管理标记之前；没有则追加到末尾
+        let mut at = out
+            .iter()
+            .position(|l| l.starts_with(MANAGE_MARKER))
+            .unwrap_or(out.len());
+        while at > 0 && out[at - 1].trim().is_empty() {
+            out.remove(at - 1);
+            at -= 1;
+        }
+        if at < out.len() {
+            ins.push(String::new());
+        }
+        out.splice(at..at, ins);
+    }
+
+    let mut out_text = out.join("\n");
+    if !out_text.is_empty() {
+        out_text.push('\n');
+    }
+    validate_yaml(&out_text)?;
+    backup(&path)?;
+    std::fs::write(&path, out_text).map_err(|e| format!("写入失败: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -980,6 +1208,228 @@ mod tests {
 
         // 已无禁用条目时再启用应报“本就处于启用状态”
         assert!(set_ids_disabled("web", "@x/pkg", &["plain".to_string()], false).is_err());
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    #[test]
+    fn web_quick_replaces_config_entries_in_place() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-webq-test-{}", std::process::id()));
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        // 初始：用户注释 + webserver 配置 + 一个无关的插件禁用管理块
+        std::fs::write(
+            prof_dir.join("cordis.patch.yml"),
+            "# user notes\n\
+             - id: webserver\n  config:\n    host: '0.0.0.0'\n    port: 3080\n\
+             \n\
+             # dsh-launcher: disable x/y（启动器管理：关闭开关会自动移除此块）\n\
+             - id: other\n  disabled: true\n",
+        )
+        .unwrap();
+
+        let input = WebQuickConfigInput {
+            host: "127.0.0.1".into(),
+            port: 3081,
+            open_browser: true,
+            print_url: false,
+            surface_context: true,
+            cookie_max_age_days: 36500,
+        };
+        set_web_quick_config("web", &input).unwrap();
+        let raw = std::fs::read_to_string(prof_dir.join("cordis.patch.yml")).unwrap();
+
+        // 用户注释保留；webserver 就地替换；web-runtime/connection 整块写入且键成套
+        assert!(raw.contains("# user notes"), "用户注释必须保留:\n{raw}");
+        assert!(raw.contains("host: '127.0.0.1'") && raw.contains("port: 3081"));
+        assert!(!raw.contains("0.0.0.0"), "旧配置应被整块替换:\n{raw}");
+        assert!(raw.contains("openBrowser: true"));
+        assert!(raw.contains("printUrl: false"));
+        assert!(raw.contains("surfaceContext: true"));
+        assert!(raw.contains("trustedHosts: !!js ctx.webStartup.trustedHosts"));
+        assert!(raw.contains("trustedHosts: !!js ctx.webRuntime.trustedHosts"));
+        assert!(raw.contains("cookieMaxAgeDays: 36500"));
+        // 无关的禁用管理块保留，且新条目都在它之前（否则 disabled 会被覆盖回启用）
+        assert!(raw.contains("- id: other") && raw.contains("disabled: true"));
+        let disable_pos = raw.find("# dsh-launcher: disable").unwrap();
+        for id in ["webserver", "web-runtime", "connection"] {
+            assert!(
+                raw.find(&format!("- id: {id}")).unwrap() < disable_pos,
+                "{id} 应在管理禁用块之前:\n{raw}"
+            );
+        }
+        serde_yaml::from_str::<serde_yaml::Value>(&raw).unwrap();
+
+        // 回读
+        let cfg = get_web_quick_config("web").unwrap();
+        assert!(cfg.webserver_present && cfg.web_runtime_present && cfg.connection_present);
+        assert_eq!(cfg.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(cfg.port, Some(3081));
+        assert_eq!(cfg.open_browser, Some(true));
+        assert_eq!(cfg.print_url, Some(false));
+        assert_eq!(cfg.surface_context, Some(true));
+        assert_eq!(cfg.cookie_max_age_days, Some(36500));
+
+        // 再次保存：幂等（块唯一、标记不堆积）
+        set_web_quick_config("web", &input).unwrap();
+        let raw = std::fs::read_to_string(prof_dir.join("cordis.patch.yml")).unwrap();
+        assert_eq!(raw.matches("- id: webserver\n").count(), 1, "webserver 块唯一:\n{raw}");
+        assert_eq!(raw.matches("- id: web-runtime\n").count(), 1);
+        assert_eq!(raw.matches("- id: connection\n").count(), 1);
+        assert_eq!(raw.matches(WEB_QUICK_MARKER).count(), 3);
+        serde_yaml::from_str::<serde_yaml::Value>(&raw).unwrap();
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    #[test]
+    fn web_quick_appends_to_empty_patch() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-webq2-test-{}", std::process::id()));
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        // 空列表占位（headless 的初始形态）：补块后 `[]` 必须移除，注释保留
+        std::fs::write(
+            prof_dir.join("cordis.patch.yml"),
+            "# header comment\n[]\n",
+        )
+        .unwrap();
+
+        let input = WebQuickConfigInput {
+            host: "0.0.0.0".into(),
+            port: 3080,
+            open_browser: false,
+            print_url: true,
+            surface_context: true,
+            cookie_max_age_days: 30,
+        };
+        set_web_quick_config("web", &input).unwrap();
+        let raw = std::fs::read_to_string(prof_dir.join("cordis.patch.yml")).unwrap();
+        assert!(raw.contains("# header comment"));
+        assert!(!raw.contains("[]"), "`[]` 占位应被移除:\n{raw}");
+        assert!(raw.contains("host: '0.0.0.0'"));
+        serde_yaml::from_str::<serde_yaml::Value>(&raw).unwrap();
+
+        let cfg = get_web_quick_config("web").unwrap();
+        assert!(cfg.webserver_present && cfg.web_runtime_present && cfg.connection_present);
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    #[test]
+    fn web_quick_missing_entries_report_absent() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-webq3-test-{}", std::process::id()));
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        // 纯禁用条目 / 无 config 条目 / 缺键：都不算已接管
+        std::fs::write(
+            prof_dir.join("cordis.patch.yml"),
+            "- id: webserver\n  disabled: true\n\
+             - id: web-runtime\n  other: 1\n",
+        )
+        .unwrap();
+        let cfg = get_web_quick_config("web").unwrap();
+        assert!(!cfg.webserver_present);
+        assert!(!cfg.web_runtime_present);
+        assert!(!cfg.connection_present);
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    #[test]
+    fn web_quick_rejects_invalid_input() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-webq4-test-{}", std::process::id()));
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        std::fs::write(prof_dir.join("cordis.patch.yml"), "[]\n").unwrap();
+
+        let base = |host: &str, port: u64, days: i64| WebQuickConfigInput {
+            host: host.into(),
+            port,
+            open_browser: true,
+            print_url: true,
+            surface_context: true,
+            cookie_max_age_days: days,
+        };
+        assert!(set_web_quick_config("web", &base("", 3080, 30)).is_err());
+        assert!(set_web_quick_config("web", &base("0.0.0.0", 0, 30)).is_err());
+        assert!(set_web_quick_config("web", &base("0.0.0.0", 70000, 30)).is_err());
+        assert!(set_web_quick_config("web", &base("0.0.0.0", 3080, 0)).is_err());
+        // 全部非法时不应动原文件
+        assert_eq!(
+            std::fs::read_to_string(prof_dir.join("cordis.patch.yml")).unwrap(),
+            "[]\n"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// 真实数据冒烟：把 ~/.dsh/profiles/web/cordis.patch.yml（含 !!js、insert、大量管理禁用块）
+    /// 拷进临时 DSH_HOME 后完整跑一遍 get/set，只读真实文件、写入全部发生在临时目录。
+    #[test]
+    fn web_quick_real_home_smoke() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let real = PathBuf::from(home).join(".dsh/profiles/web/cordis.patch.yml");
+        let Ok(real_raw) = std::fs::read_to_string(&real) else {
+            return;
+        };
+        let tmp = std::env::temp_dir().join(format!("dsh-webq-real-{}", std::process::id()));
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        std::fs::write(prof_dir.join("cordis.patch.yml"), &real_raw).unwrap();
+
+        let before = get_web_quick_config("web").unwrap();
+        let input = WebQuickConfigInput {
+            host: before.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
+            port: before.port.unwrap_or(3080),
+            open_browser: before.open_browser.unwrap_or(true),
+            print_url: before.print_url.unwrap_or(true),
+            surface_context: before.surface_context.unwrap_or(true),
+            cookie_max_age_days: before.cookie_max_age_days.unwrap_or(36500),
+        };
+        set_web_quick_config("web", &input).unwrap();
+        let raw = std::fs::read_to_string(prof_dir.join("cordis.patch.yml")).unwrap();
+
+        // 结构不变量：YAML 合法；块唯一；用户条目/insert/管理禁用块保留
+        serde_yaml::from_str::<serde_yaml::Value>(&raw).unwrap();
+        assert_eq!(raw.matches("- id: webserver\n").count(), 1);
+        assert_eq!(raw.matches("- id: web-runtime\n").count(), 1);
+        assert_eq!(raw.matches("- id: connection\n").count(), 1);
+        for id in ["web", "dshp-inx-qqbot", "genui", "dsh-market"] {
+            if real_raw.contains(&format!("- id: {id}")) {
+                assert!(raw.contains(&format!("- id: {id}")), "{id} 条目丢失");
+            }
+        }
+        if real_raw.contains("- insert:") {
+            assert!(raw.contains("- insert:"), "insert 块丢失");
+        }
+        // 管理禁用块数量不变，且新写入条目都位于首个管理块之前
+        assert_eq!(raw.matches(MANAGE_MARKER).count(), real_raw.matches(MANAGE_MARKER).count());
+        let disable_pos = raw.find(MANAGE_MARKER).unwrap();
+        for id in ["webserver", "web-runtime", "connection"] {
+            assert!(raw.find(&format!("- id: {id}")).unwrap() < disable_pos);
+        }
+        // 回读与输入一致
+        let after = get_web_quick_config("web").unwrap();
+        assert_eq!(after.host.as_deref(), Some(input.host.as_str()));
+        assert_eq!(after.port, Some(input.port));
+        assert_eq!(after.cookie_max_age_days, Some(input.cookie_max_age_days));
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");

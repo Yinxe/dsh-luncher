@@ -182,6 +182,29 @@ export interface ProfileDetail {
   patchEntries: PatchEntryInfo[];
 }
 
+/** web 快捷配置当前值（解析自 cordis.patch.yml；条目不存在 = *Present=false，键缺失 = null） */
+export interface WebQuickConfig {
+  webserverPresent: boolean;
+  host: string | null;
+  port: number | null;
+  webRuntimePresent: boolean;
+  openBrowser: boolean | null;
+  printUrl: boolean | null;
+  surfaceContext: boolean | null;
+  connectionPresent: boolean;
+  cookieMaxAgeDays: number | null;
+}
+
+/** web 快捷配置保存载荷：三个 patch 条目由启动器整块生成（键成套写全，trustedHosts 联动 !!js 信任链） */
+export interface WebQuickConfigInput {
+  host: string;
+  port: number;
+  openBrowser: boolean;
+  printUrl: boolean;
+  surfaceContext: boolean;
+  cookieMaxAgeDays: number;
+}
+
 export interface PluginJobEvent {
   profile: string;
   line: string;

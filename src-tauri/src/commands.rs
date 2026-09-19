@@ -491,6 +491,21 @@ pub fn write_profile_file(
 }
 
 #[tauri::command]
+pub fn get_web_quick_config(
+    profile: String,
+) -> Result<crate::profile_cfg::WebQuickConfig, String> {
+    crate::profile_cfg::get_web_quick_config(&profile)
+}
+
+#[tauri::command]
+pub fn set_web_quick_config(
+    profile: String,
+    config: crate::profile_cfg::WebQuickConfigInput,
+) -> Result<(), String> {
+    crate::profile_cfg::set_web_quick_config(&profile, &config)
+}
+
+#[tauri::command]
 pub fn read_global_config() -> Result<String, String> {
     crate::profile_cfg::read_global_config()
 }

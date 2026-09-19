@@ -4,7 +4,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import {
   Package, Rocket, Puzzle, FileCog, RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
-  TriangleAlert,
+  TriangleAlert, ChevronDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
@@ -16,6 +16,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Toaster } from "@/components/ui/sonner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import ProfileConfigPanel from "./components/ProfileConfigPanel";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
@@ -87,6 +89,8 @@ export default function App() {
   const [view, setView] = useState<View>("versions");
   const [verScope, setVerScope] = useState<"all" | "installed">("all");
   const [verType, setVerType] = useState<"all" | "stable" | "pre">("all");
+  /** 各 profile 配置折叠面板的展开状态 */
+  const [expandedProfiles, setExpandedProfiles] = useState<Record<string, boolean>>({});
 
   const procsRef = useRef<Record<number, ProcEntry>>({});
   procsRef.current = procs;
@@ -907,59 +911,81 @@ export default function App() {
                   const canOpen = row.phase === "ready" && !!row.webUrl;
                   const targetMeta = TARGET_META[row.target];
                   const canStart = targetMeta.launchable;
+                  const expanded = !!expandedProfiles[row.profile];
                   return (
-                    <Card key={row.profile} className="flex-row items-center gap-3 p-3">
-                      {row.phase === "starting" ? (
-                        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-amber-500" />
-                      ) : row.phase === "ready" ? (
-                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
-                      ) : row.phase === "failed" ? (
-                        <XCircle className="h-4 w-4 shrink-0 text-red-500" />
-                      ) : (
-                        <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${row.phase === "external" ? "bg-sky-500" : "bg-muted-foreground/30"}`} />
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-mono text-[13px] font-semibold">{row.profile}</span>
-                          <Badge variant={targetMeta.variant} title={targetMeta.desc}>
-                            {targetMeta.label}
-                          </Badge>
+                    <Card key={row.profile} className="gap-0 py-0">
+                      <Collapsible
+                        open={expanded}
+                        onOpenChange={(o) => setExpandedProfiles((m) => ({ ...m, [row.profile]: o }))}
+                      >
+                        <div className="flex flex-row items-center gap-3 p-3">
+                          {row.phase === "starting" ? (
+                            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-amber-500" />
+                          ) : row.phase === "ready" ? (
+                            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                          ) : row.phase === "failed" ? (
+                            <XCircle className="h-4 w-4 shrink-0 text-red-500" />
+                          ) : (
+                            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${row.phase === "external" ? "bg-sky-500" : "bg-muted-foreground/30"}`} />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-[13px] font-semibold">{row.profile}</span>
+                              <Badge variant={targetMeta.variant} title={targetMeta.desc}>
+                                {targetMeta.label}
+                              </Badge>
+                            </div>
+                            <div className="text-[11px] text-muted-foreground">
+                              {phaseText}
+                              {row.pid ? ` · PID ${row.pid}` : ""}
+                              {row.version ? ` · ${row.version}` : ""}
+                            </div>
+                          </div>
+                          {canOpen && (
+                            <Button
+                              size="sm"
+                              onClick={() => row.webUrl && api.openUrl(row.webUrl).catch((e) => addToast("err", String(e)))}
+                            >
+                              <ExternalLink /> 打开
+                            </Button>
+                          )}
+                          {canStop ? (
+                            <Button size="sm" variant="destructive" onClick={() => doStopProfileInstance(row.profile)}>
+                              <Square /> 停止
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={installed.length === 0 || !canStart}
+                              title={installed.length === 0
+                                ? "请先在「版本与安装」页安装 dsh"
+                                : !canStart
+                                ? `${targetMeta.desc}——当前仅支持启动 Web 类型 profile`
+                                : row.phase === "failed"
+                                ? "重新启动该 profile"
+                                : `基于当前版本（${settings.activeVersion}）启动 ${row.profile}`}
+                              onClick={() => doStartProfile(row.profile)}
+                            >
+                              <Play /> 启动
+                            </Button>
+                          )}
+                          <CollapsibleTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title={expanded ? "收起配置面板" : "展开配置面板（快捷配置 / cordis.patch.yml / package.json）"}
+                            >
+                              <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? "rotate-180" : ""}`} />
+                            </Button>
+                          </CollapsibleTrigger>
                         </div>
-                        <div className="text-[11px] text-muted-foreground">
-                          {phaseText}
-                          {row.pid ? ` · PID ${row.pid}` : ""}
-                          {row.version ? ` · ${row.version}` : ""}
-                        </div>
-                      </div>
-                      {canOpen && (
-                        <Button
-                          size="sm"
-                          onClick={() => row.webUrl && api.openUrl(row.webUrl).catch((e) => addToast("err", String(e)))}
-                        >
-                          <ExternalLink /> 打开
-                        </Button>
-                      )}
-                      {canStop ? (
-                        <Button size="sm" variant="destructive" onClick={() => doStopProfileInstance(row.profile)}>
-                          <Square /> 停止
-                        </Button>
-                      ) : (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={installed.length === 0 || !canStart}
-                          title={installed.length === 0
-                            ? "请先在「版本与安装」页安装 dsh"
-                            : !canStart
-                            ? `${targetMeta.desc}——当前仅支持启动 Web 类型 profile`
-                            : row.phase === "failed"
-                            ? "重新启动该 profile"
-                            : `基于当前版本（${settings.activeVersion}）启动 ${row.profile}`}
-                          onClick={() => doStartProfile(row.profile)}
-                        >
-                          <Play /> 启动
-                        </Button>
-                      )}
+                        <CollapsibleContent>
+                          <div className="border-t border-border px-3 pb-4 pt-3">
+                            <ProfileConfigPanel profile={row.profile} target={row.target} onToast={addToast} />
+                          </div>
+                        </CollapsibleContent>
+                      </Collapsible>
                     </Card>
                   );
                 })}

@@ -57,6 +57,8 @@ pub fn run() {
             commands::install_bundle,
             commands::read_profile_file,
             commands::write_profile_file,
+            commands::get_web_quick_config,
+            commands::set_web_quick_config,
             commands::read_global_config,
             commands::write_global_config,
         ])
