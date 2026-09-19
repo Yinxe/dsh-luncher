@@ -4,6 +4,7 @@ mod installer;
 mod launcher;
 mod profiles;
 mod procs;
+mod profile_cfg;
 mod registry;
 mod runtime;
 mod semver;
@@ -49,6 +50,16 @@ pub fn run() {
             commands::reveal_folder,
             commands::open_external,
             commands::install_runtime,
+            commands::get_profile_detail,
+            commands::list_profile_plugins,
+            commands::set_profile_plugin,
+            commands::get_patch_reload,
+            commands::set_bundle_enabled,
+            commands::uninstall_bundle,
+            commands::read_profile_file,
+            commands::write_profile_file,
+            commands::read_global_config,
+            commands::write_global_config,
         ])
         .setup(|app| {
             tray::create(app.handle())?;
@@ -77,7 +88,8 @@ pub fn run() {
     app.run(|app, event| {
         // 启动器退出 → 结束所有内嵌 dsh 子进程
         if let tauri::RunEvent::Exit = event {
-            procs::stop_all(&app.state::<procs::ProcState>());
+            let state = app.state::<procs::ProcState>();
+            procs::stop_all(&app, &state);
         }
     });
 }

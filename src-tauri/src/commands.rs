@@ -321,10 +321,11 @@ fn ensure_profile_free(
 
 #[tauri::command]
 pub fn stop_process(
+    app: AppHandle,
     procs: State<'_, crate::procs::ProcState>,
     id: u32,
 ) -> Result<bool, String> {
-    Ok(crate::procs::stop(&procs, id))
+    Ok(crate::procs::stop(&app, &procs, id))
 }
 
 #[tauri::command]
@@ -345,10 +346,11 @@ pub fn list_profile_instances(
 /// 停止某个 profile 的实例（内嵌或外部）
 #[tauri::command]
 pub fn stop_profile_instance(
+    app: AppHandle,
     procs: State<'_, crate::procs::ProcState>,
     profile: String,
 ) -> Result<bool, String> {
-    crate::procs::stop_profile(&procs, &profile)
+    crate::procs::stop_profile(&app, &procs, &profile)
 }
 
 /// 把运行日志导出到 ~/.dsh-launcher/logs/
@@ -368,6 +370,70 @@ pub fn export_proc_log(
     let path = dir.join(format!("dsh-{}-{}-{}.log", safe_profile, pid, ts));
     std::fs::write(&path, content).map_err(|e| format!("写日志失败: {e}"))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+// ── 插件管理与配置文件 ──────────────────────
+
+#[tauri::command]
+pub fn get_profile_detail(
+    profile: String,
+) -> Result<crate::profile_cfg::ProfileDetail, String> {
+    crate::profile_cfg::read_detail(&profile)
+}
+
+#[tauri::command]
+pub fn list_profile_plugins(
+    profile: String,
+) -> Result<Vec<crate::profile_cfg::PluginEntryInfo>, String> {
+    crate::profile_cfg::plugin_inventory(&profile)
+}
+
+#[tauri::command]
+pub fn set_profile_plugin(
+    profile: String,
+    id: String,
+    disabled: bool,
+) -> Result<(), String> {
+    crate::profile_cfg::set_plugin_disabled(&profile, &id, disabled)
+}
+
+#[tauri::command]
+pub fn get_patch_reload(profile: String) -> Result<String, String> {
+    Ok(crate::profile_cfg::patch_reload_mode(&profile))
+}
+
+#[tauri::command]
+pub fn set_bundle_enabled(profile: String, name: String, enabled: bool) -> Result<(), String> {
+    crate::profile_cfg::set_bundle_enabled(&profile, &name, enabled)
+}
+
+#[tauri::command]
+pub fn uninstall_bundle(profile: String, name: String) -> Result<(), String> {
+    crate::profile_cfg::uninstall_bundle(&profile, &name)
+}
+
+#[tauri::command]
+pub fn read_profile_file(profile: String, file: String) -> Result<String, String> {
+    crate::profile_cfg::read_profile_file(&profile, &file)
+}
+
+#[tauri::command]
+pub fn write_profile_file(
+    profile: String,
+    file: String,
+    content: String,
+) -> Result<(), String> {
+    crate::profile_cfg::write_profile_file(&profile, &file, &content)
+}
+
+#[tauri::command]
+pub fn read_global_config() -> Result<String, String> {
+    crate::profile_cfg::read_global_config()
+}
+
+#[tauri::command]
+pub fn write_global_config(content: String) -> Result<(), String> {
+    crate::profile_cfg::write_global_config(&content)
 }
 
 #[tauri::command]

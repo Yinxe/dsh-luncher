@@ -255,29 +255,40 @@ fn wait_exit(app: AppHandle, state: ProcState, id: u32) {
     );
 }
 
-/// 停止指定进程（SIGKILL）；返回是否存在
-pub fn stop(state: &ProcState, id: u32) -> bool {
+/// 停止指定进程（SIGKILL）；返回是否存在。停止后会广播 stopped 退出事件。
+pub fn stop(app: &AppHandle, state: &ProcState, id: u32) -> bool {
     let mut guard = state.procs.lock().unwrap();
     let Some(handle) = guard.remove(&id) else {
         return false;
     };
+    let version = handle.version.clone();
+    let profile = handle.profile.clone();
     if let Some(mut c) = handle.child.lock().unwrap().take() {
         let _ = c.kill();
         let _ = c.wait();
     }
+    let _ = app.emit(
+        "proc-exit",
+        ProcExitEvent {
+            id,
+            version,
+            profile,
+            code: None,
+            stopped: true,
+        },
+    );
     true
 }
 
 /// 停止所有内嵌进程（启动器退出时调用）
-pub fn stop_all(state: &ProcState) {
-    let mut guard = state.procs.lock().unwrap();
-    for (_, handle) in guard.iter_mut() {
-        if let Some(mut c) = handle.child.lock().unwrap().take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
+pub fn stop_all(app: &AppHandle, state: &ProcState) {
+    let ids: Vec<u32> = {
+        let guard = state.procs.lock().unwrap();
+        guard.keys().copied().collect()
+    };
+    for id in ids {
+        stop(app, state, id);
     }
-    guard.clear();
 }
 
 /// 列出仍在运行的进程
@@ -389,7 +400,7 @@ pub fn profile_instances(state: &ProcState) -> Vec<ProfileInstance> {
 }
 
 /// 停止某个 profile 的实例：优先内嵌，其次外部进程
-pub fn stop_profile(state: &ProcState, profile: &str) -> Result<bool, String> {
+pub fn stop_profile(app: &AppHandle, state: &ProcState, profile: &str) -> Result<bool, String> {
     let profile = profile.trim();
     if profile.is_empty() {
         return Err("profile 名称为空".into());
@@ -403,7 +414,7 @@ pub fn stop_profile(state: &ProcState, profile: &str) -> Result<bool, String> {
             .map(|(id, _)| *id)
     };
     if let Some(id) = embedded_id {
-        let _ = stop(state, id);
+        let _ = stop(app, state, id);
         return Ok(true);
     }
     // 2) 外部进程（同用户可直接 SIGKILL）

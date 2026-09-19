@@ -144,6 +144,44 @@ export interface ProfileInstance {
   version: string | null;
 }
 
+export interface BundleInfo {
+  name: string;
+  version: string | null;
+  source: string;
+  enabled: boolean;
+}
+
+export interface PatchItemInfo {
+  id: string | null;
+  name: string | null;
+  disabled: boolean;
+}
+
+export interface PatchEntryInfo {
+  index: number;
+  kind: string;
+  id: string | null;
+  disabled: boolean;
+  items: PatchItemInfo[];
+}
+
+export interface ProfileDetail {
+  profile: string;
+  exists: boolean;
+  bundles: BundleInfo[];
+  disabledBundles: string[];
+  packageRaw: string;
+  patchRaw: string;
+  patchEntries: PatchEntryInfo[];
+}
+
+export interface PluginEntryInfo {
+  id: string;
+  bundle: string | null;
+  disabled: boolean;
+  managed: boolean;
+}
+
 export interface Toast {
   id: number;
   kind: "ok" | "err" | "info";

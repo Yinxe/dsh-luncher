@@ -16,6 +16,8 @@ import type {
   Toast,
 } from "./types";
 import InstallCard from "./components/InstallCard";
+import ConfigView from "./components/ConfigView";
+import PluginsView from "./components/PluginsView";
 import ProcessDock from "./components/ProcessDock";
 import SettingsModal from "./components/SettingsModal";
 import UpdateBanner from "./components/UpdateBanner";
@@ -34,12 +36,8 @@ export default function App() {
   const [update, setUpdate] = useState<LauncherUpdateStatus | null>(null);
   const [updateApplying, setUpdateApplying] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [query, setQuery] = useState("");
-  const [channel, setChannel] = useState<string | null>(null);
-  const [onlyInstalled, setOnlyInstalled] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
-  const [selectedProfile, setSelectedProfile] = useState("");
   const [procs, setProcs] = useState<Record<number, ProcEntry>>({});
   const [activeProc, setActiveProc] = useState<number | null>(null);
   const [dockOpen, setDockOpen] = useState(true);
@@ -50,16 +48,12 @@ export default function App() {
   } | null>(null);
   const runtimeBusy = useRef(false);
   const [instances, setInstances] = useState<ProfileInstance[]>([]);
+  const [view, setView] = useState<View>("versions");
 
-  const pendingLaunch = useRef<string | null>(null);
-  const profileRef = useRef<string>("");
-  profileRef.current = selectedProfile;
   const procsRef = useRef<Record<number, ProcEntry>>({});
   procsRef.current = procs;
   const settingsRef = useRef<Settings | null>(null);
   settingsRef.current = settings;
-  /** 已自动打开过 Web UI 的进程 */
-  const autoOpenedWeb = useRef<Set<number>>(new Set());
   const builtinUpdate = useRef<Update | null>(null);
   const installedRef = useRef<InstalledVersion[]>([]);
   installedRef.current = installed;
@@ -114,18 +108,68 @@ export default function App() {
     return () => clearInterval(t);
   }, [refreshInstances]);
 
+  // Profile 实例阶段化：stopped → starting → ready（以出现 URL 为准）/ failed
   const instanceRows = useMemo(() => {
-    const names = new Map<string, ProfileInstance | null>();
-    for (const p of profiles) if (!names.has(p.name)) names.set(p.name, null);
-    for (const i of instances) names.set(i.profile, i);
-    return [...names.entries()].map(([profile, inst]) => ({
-      profile,
-      running: !!inst?.running,
-      pid: inst?.pid ?? null,
-      source: inst?.source ?? null,
-      version: inst?.version ?? null,
-    }));
-  }, [profiles, instances]);
+    type Phase = "stopped" | "starting" | "ready" | "failed" | "external";
+    type Row = {
+      profile: string;
+      phase: Phase;
+      pid: number | null;
+      source: "embedded" | "external" | null;
+      version: string | null;
+      webUrl: string | null;
+      code: number | null;
+    };
+    const map = new Map<string, Row>();
+    for (const p of profiles) {
+      map.set(p.name, {
+        profile: p.name,
+        phase: "stopped",
+        pid: null,
+        source: null,
+        version: null,
+        webUrl: null,
+        code: null,
+      });
+    }
+    // 外部实例（终端/其他方式启动）
+    for (const i of instances) {
+      map.set(i.profile, {
+        profile: i.profile,
+        phase: "external",
+        pid: i.pid,
+        source: "external",
+        version: i.version,
+        webUrl: null,
+        code: null,
+      });
+    }
+    // 内嵌实例信息最全（有日志/URL/退出码），覆盖同 profile 条目
+    const latestByProfile = new Map<string, ProcEntry>();
+    for (const p of Object.values(procs)) {
+      const cur = latestByProfile.get(p.profile);
+      if (!cur || p.startedAt > cur.startedAt) latestByProfile.set(p.profile, p);
+    }
+    for (const p of latestByProfile.values()) {
+      const phase: Phase = p.exited
+        ? p.code == null || p.code === 0
+          ? "stopped"
+          : "failed"
+        : p.webUrl
+        ? "ready"
+        : "starting";
+      map.set(p.profile, {
+        profile: p.profile,
+        phase,
+        pid: p.id,
+        source: "embedded",
+        version: p.version,
+        webUrl: p.webUrl,
+        code: p.code,
+      });
+    }
+    return [...map.values()].sort((a, b) => a.profile.localeCompare(b.profile));
+  }, [profiles, instances, procs]);
 
   const doStartProfile = useCallback(
     async (profile: string) => {
@@ -194,12 +238,9 @@ export default function App() {
           api.listProfiles().catch(() => [] as ProfileInfo[]),
         ]);
         setProfiles(ps);
-        // 不提供“默认 profile”空选项：默认选中 web，其次取第一个
-        const def =
-          s.defaultProfile ||
-          (ps.some((p) => p.name === "web") ? "web" : (ps[0]?.name ?? ""));
-        setSelectedProfile(def);
-        if (s.defaultProfile !== def) {
+        // 迁移默认 profile：默认选中 web，其次取第一个
+        if (!s.defaultProfile && ps.length > 0) {
+          const def = ps.some((p) => p.name === "web") ? "web" : ps[0].name;
           const next = { ...s, defaultProfile: def };
           setSettings(next);
           api.saveSettings(next).catch(() => undefined);
@@ -216,10 +257,6 @@ export default function App() {
           if (best) {
             const next = { ...s, activeVersion: best.version };
             setSettings(next);
-            setSelectedProfile(
-              next.defaultProfile ||
-                (ps.some((p) => p.name === "web") ? "web" : (ps[0]?.name ?? ""))
-            );
             api.saveSettings(next).catch(() => undefined);
             addToast("info", `当前版本已设为 ${best.version}`);
           }
@@ -263,17 +300,13 @@ export default function App() {
       events.onInstallFinished?.(async (e) => {
         setInstallJob((job) => (job && job.version === e.version ? null : job));
         if (e.success) {
-          addToast("ok", `dsh ${e.version} 安装完成`);
+          addToast("ok", `dsh ${e.version} 安装完成，已设为当前版本`);
           await refreshInstalled();
           // 安装即启用：新装的版本成为当前版本（所有 Profile 基于它运行）
           if (settingsRef.current && settingsRef.current.activeVersion !== e.version) {
             const next = { ...settingsRef.current, activeVersion: e.version };
             setSettings(next);
             api.saveSettings(next).catch(() => undefined);
-          }
-          if (pendingLaunch.current === e.version) {
-            pendingLaunch.current = null;
-            doLaunch(e.version);
           }
         } else {
           addToast("err", `dsh ${e.version} 安装失败：${e.message.split("\n")[0]}`);
@@ -283,7 +316,7 @@ export default function App() {
     track(events.onLauncherUpdate?.((s) => setUpdate(s)));
     track(
       events.onProcLog?.((e: ProcLogEvent) => {
-        // 识别 dsh web UI 地址：`dsh web: http://...`
+        // 识别 dsh web UI 地址：`dsh web: http://...` —— 出现 URL 即视为启动成功
         const hit = /dsh web:\s*(https?:\/\/\S+)/.exec(e.line);
         setProcs((m) => {
           const old =
@@ -304,13 +337,8 @@ export default function App() {
             [e.id]: { ...old, webUrl, lines: [...old.lines.slice(-500), e.line] },
           };
         });
-        // 首次识别到 Web UI 地址时自动在浏览器打开
-        if (hit && !autoOpenedWeb.current.has(e.id)) {
-          autoOpenedWeb.current.add(e.id);
-          api
-            .openUrl(hit[1])
-            .then(() => addToast("ok", "dsh web UI 已在浏览器打开"))
-            .catch((err) => addToast("err", `打开浏览器失败: ${err}`));
+        if (hit) {
+          addToast("ok", `dsh「${e.profile}」启动成功，可在面板中打开主界面`);
         }
         setActiveProc((a) => a ?? e.id);
       })
@@ -368,45 +396,6 @@ export default function App() {
     [addToast]
   );
 
-  const doLaunch = useCallback(
-    async (version: string) => {
-      try {
-        const info = await api.startEmbedded(version, profileRef.current);
-        setProcs((m) => ({
-          ...m,
-          [info.id]: {
-            id: info.id,
-            version: info.version,
-            profile: info.profile,
-            startedAt: info.startedAt,
-            lines: [],
-            exited: false,
-            code: null,
-            webUrl: null,
-          },
-        }));
-        setActiveProc(info.id);
-        setDockOpen(true);
-        addToast("ok", `dsh ${info.version} 已内嵌启动（PID ${info.id}）`);
-      } catch (e) {
-        addToast("err", `启动失败: ${e}`);
-      }
-    },
-    [addToast]
-  );
-
-  const doTerminal = useCallback(
-    async (version: string) => {
-      try {
-        const r = await api.launch(version, null, profileRef.current);
-        addToast(r.ok ? "ok" : "err", r.message);
-      } catch (e) {
-        addToast("err", `启动失败: ${e}`);
-      }
-    },
-    [addToast]
-  );
-
   const doStopProc = useCallback(
     async (id: number) => {
       try {
@@ -434,21 +423,6 @@ export default function App() {
       setRuntimeJob(null);
     }
   }, [addToast]);
-
-  const changeProfile = useCallback(
-    async (name: string) => {
-      setSelectedProfile(name);
-      if (!settings) return;
-      const next = { ...settings, defaultProfile: name };
-      setSettings(next);
-      try {
-        await api.saveSettings(next);
-      } catch (e) {
-        addToast("err", `保存默认 profile 失败: ${e}`);
-      }
-    },
-    [settings, addToast]
-  );
 
   const doUninstall = useCallback(
     async (version: string) => {
@@ -540,32 +514,24 @@ export default function App() {
     [remote, installed]
   );
 
-  const channels = useMemo(() => {
-    const set = new Set<string>();
-    for (const r of rows) set.add(r.channel);
-    return [...set].sort();
-  }, [rows]);
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return rows.filter((r) => {
-      if (channel && r.channel !== channel) return false;
-      if (onlyInstalled && !r.installed) return false;
-      if (q && !r.version.toLowerCase().includes(q)) return false;
-      return true;
-    });
-  }, [rows, query, channel, onlyInstalled]);
-
   const latestVersion = remote?.tags?.latest;
 
-  const busyProfiles = useMemo(() => {
-    const s = new Set<string>();
-    for (const p of Object.values(procs)) {
-      if (!p.exited && p.profile) s.add(p.profile);
-    }
-    return s;
-  }, [procs]);
-  const profileBusy = selectedProfile !== "" && busyProfiles.has(selectedProfile);
+  const upgradableCount = useMemo(
+    () =>
+      rows.filter(
+        (r) =>
+          r.installed &&
+          r.installed.version !== "unknown" &&
+          latestVersion != null &&
+          compareVersions(latestVersion, r.version) > 0
+      ).length,
+    [rows, latestVersion]
+  );
+
+  const runningInstanceCount = useMemo(
+    () => Object.values(procs).filter((p) => !p.exited).length,
+    [procs]
+  );
 
   // 运行中且已检测到 Web UI 地址的实例（新的在前）
   const liveWebProcs = useMemo(
@@ -575,6 +541,8 @@ export default function App() {
         .sort((a, b) => b.startedAt - a.startedAt),
     [procs]
   );
+
+  type View = "versions" | "profiles" | "plugins" | "config";
 
   if (!settings || !env) {
     return (
@@ -610,36 +578,6 @@ export default function App() {
           <span className="chip">
             {env.os}/{env.arch}
           </span>
-          <div
-            className={`prof-chip${profileBusy ? " busy" : ""}`}
-            title={`Profile 目录：${env.profilesDir}\n点击可重新扫描；同一 profile 同时只能运行一个实例，不同 profile 可并行`}
-          >
-            <span className="prof-label">Profile</span>
-            <span className={`prof-dot ${profileBusy ? "busy" : "idle"}`} />
-            <span className="prof-value">{selectedProfile || "未找到"}</span>
-            <span className="prof-caret">▾</span>
-            <select
-              className="prof-native"
-              value={selectedProfile}
-              onClick={() => refreshProfiles()}
-              onChange={(e) => changeProfile(e.target.value)}
-            >
-              {profiles.length === 0 && (
-                <option value="" disabled>
-                  未找到 profile
-                </option>
-              )}
-              {selectedProfile && !profiles.some((p) => p.name === selectedProfile) && (
-                <option value={selectedProfile}>{selectedProfile}（目录中已不存在）</option>
-              )}
-              {profiles.map((p) => (
-                <option key={p.path} value={p.name}>
-                  {p.name}
-                  {busyProfiles.has(p.name) ? "  ● 运行中" : ""}
-                </option>
-              ))}
-            </select>
-          </div>
         </div>
         <button disabled={remoteLoading} onClick={refreshRemote}>
           {remoteLoading ? "刷新中…" : "刷新版本"}
@@ -707,141 +645,102 @@ export default function App() {
 
       {/* 主区 */}
       <div className="main">
-        <div className="filters">
-          <h3>① Node 环境</h3>
-          {env.node ? (
-            <div className="step-line">
-              <span className="dot on" />
-              <span className="mono">Node v{env.node}</span>
-              <span className="step-note">
-                {env.nodePath?.includes(".dsh-launcher") ? "（内置运行时）" : "（系统）"}
-              </span>
-            </div>
-          ) : (
-            <button className="sm primary" onClick={doInstallRuntime}>
-              一键安装内置 Node
-            </button>
-          )}
-
-          <h3>② DSH 版本</h3>
-          {installed.length > 0 ? (
-            <div
-              className="prof-chip"
-              title="当前版本：所有 Profile 实例都基于它运行；也可在下方版本列表安装/切换其他版本"
-            >
-              <span className="prof-label">当前</span>
-              <span className="prof-value">{settings.activeVersion || "未设置"}</span>
-              <span className="prof-caret">▾</span>
-              <select
-                className="prof-native"
-                value={settings.activeVersion}
-                onChange={(e) => doSetActiveVersion(e.target.value)}
-              >
-                {installed.map((i, idx) => (
-                  <option key={`${i.version}-${idx}`} value={i.version}>
-                    {i.version}
-                    {i.source === "managed" ? "" : ` · ${i.source === "global" ? "全局" : "PATH"}`}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ) : (
-            <div className="step-line">
-              <span className="dot" />
-              <span className="step-note">未安装——在下方版本列表点「安装」</span>
-            </div>
-          )}
-
-          <h3>③ Profile 实例</h3>
-          <div className="inst-tip">
-            目前仅验证过 <b>web</b> 类 profile 可正常启动；其他 profile 可能是复制 web
-            的配置（实例名不同、内容同为 web，仅端口等不同），也可能启动失败——以实际日志为准。
-          </div>
-          <div className="inst-list">
-            {instanceRows.map((row) => (
-              <div key={row.profile} className="inst-row">
-                <span className={`dot${row.running ? " on" : ""}`} />
-                <div className="inst-info">
-                  <div className="inst-name">{row.profile}</div>
-                  <div className="inst-meta">
-                    {row.running
-                      ? `${row.source === "external" ? "外部" : "内嵌"} · PID ${row.pid}${
-                          row.version ? ` · ${row.version}` : ""
-                        }`
-                      : "未运行"}
-                  </div>
-                </div>
-                {row.running ? (
-                  <button
-                    className="sm danger"
-                    onClick={() => doStopProfileInstance(row.profile)}
-                  >
-                    停止
-                  </button>
-                ) : (
-                  <button
-                    className="sm"
-                    disabled={installed.length === 0}
-                    title={
-                      installed.length === 0
-                        ? "请先安装 dsh"
-                        : `以最新已安装版本启动 ${row.profile}`
-                    }
-                    onClick={() => doStartProfile(row.profile)}
-                  >
-                    启动
-                  </button>
-                )}
-              </div>
-            ))}
-            {instanceRows.length === 0 && (
-              <div className="inst-meta">（未找到 profile）</div>
-            )}
-          </div>
-
-          <h3>搜索版本</h3>
-          <input
-            type="text"
-            placeholder="版本号，如 0.1.5"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <h3>通道</h3>
-          <div className="tag-group">
-            <button className={`tag${channel === null ? " active" : ""}`} onClick={() => setChannel(null)}>
-              全部
-            </button>
-            {channels.map((c) => (
-              <button
-                key={c}
-                className={`tag${channel === c ? " active" : ""}`}
-                onClick={() => setChannel(channel === c ? null : c)}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-          <h3>筛选</h3>
-          <div className="tag-group">
+        <div className="sidebar">
+          {([
+            ["versions", "版本与安装", "📦"],
+            ["profiles", "Profile 实例", "🚀"],
+            ["plugins", "插件管理", "🧩"],
+            ["config", "配置文件", "📄"],
+          ] as const).map(([key, label, ico]) => (
             <button
-              className={`tag${onlyInstalled ? " active" : ""}`}
-              onClick={() => setOnlyInstalled((v) => !v)}
+              key={key}
+              className={`nav-btn${view === key ? " active" : ""}`}
+              onClick={() => setView(key)}
             >
-              仅已安装
+              <span className="nav-ico">{ico}</span>
+              <span>{label}</span>
+              {key === "profiles" && runningInstanceCount > 0 && (
+                <span className="nav-badge ok">{runningInstanceCount}</span>
+              )}
+              {key === "versions" && upgradableCount > 0 && (
+                <span className="nav-badge warn">{upgradableCount}</span>
+              )}
             </button>
-          </div>
-          <div className="meta">
-            <div>官方版本 {remote?.versions.length ?? "—"} 个</div>
-            <div>已安装 {installed.length} 个</div>
-            <div>
-              profile {profiles.length} 个（{env.dshNativeHome}/profile）
+          ))}
+
+          <div className="side-status">
+            <div className="step-line">
+              <span className={`dot${env.node ? " on" : ""}`} />
+              <span className="mono">{env.node ? `Node v${env.node}` : "Node 未装"}</span>
             </div>
+            <div className="step-line">
+              <span className={`dot${settings.activeVersion ? " on" : ""}`} />
+              <span className="mono">{settings.activeVersion || "版本未选"}</span>
+            </div>
+            <div className="step-line">
+              <span className={`dot${runningInstanceCount > 0 ? " on" : ""}`} />
+              <span className="mono">{runningInstanceCount} 个实例运行中</span>
+            </div>
+          </div>
+
+          <div className="meta">
             <div>registry：{env.registry}</div>
             <div>数据目录：{env.versionsDir}</div>
           </div>
         </div>
 
+        <div className="content">
+        {view === "versions" && (
         <div className="list">
+          <div className="workflow">
+            <div className="step-block">
+              <h3>① Node 环境</h3>
+              {env.node ? (
+                <div className="step-line">
+                  <span className="dot on" />
+                  <span className="mono">Node v{env.node}</span>
+                  <span className="step-note">
+                    {env.nodePath?.includes(".dsh-launcher") ? "（内置运行时）" : "（系统）"}
+                  </span>
+                </div>
+              ) : (
+                <button className="sm primary" onClick={doInstallRuntime}>
+                  一键安装内置 Node
+                </button>
+              )}
+            </div>
+            <div className="step-block">
+              <h3>② DSH 版本</h3>
+              {installed.length > 0 ? (
+                <div
+                  className="prof-chip"
+                  title="当前版本：所有 Profile 实例都基于它运行；也可在下方列表安装或「设为当前」切换"
+                >
+                  <span className="prof-label">当前</span>
+                  <span className="prof-value">{settings.activeVersion || "未设置"}</span>
+                  <span className="prof-caret">▾</span>
+                  <select
+                    className="prof-native"
+                    value={settings.activeVersion}
+                    onChange={(e) => doSetActiveVersion(e.target.value)}
+                  >
+                    {installed.map((i, idx) => (
+                      <option key={`${i.version}-${idx}`} value={i.version}>
+                        {i.version}
+                        {i.source === "managed" ? "" : ` · ${i.source === "global" ? "全局" : "PATH"}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div className="step-line">
+                  <span className="dot" />
+                  <span className="step-note">未安装——在下方列表点「安装」</span>
+                </div>
+              )}
+            </div>
+          </div>
+
           {installJob && (
             <InstallCard version={installJob.version} logs={installJob.logs} onCancel={doCancelInstall} />
           )}
@@ -854,18 +753,14 @@ export default function App() {
             </div>
           )}
 
-          {!remoteErr && filtered.length === 0 && !remoteLoading && (
+          {!remoteErr && rows.length === 0 && !remoteLoading && (
             <div className="empty">
               <div className="big">📦</div>
-              <div>
-                {rows.length === 0
-                  ? "还没有版本数据，点击“刷新版本”从 registry 拉取 @deepseek-ai/dsh 的官方发布版本"
-                  : "没有符合筛选条件的版本"}
-              </div>
+              <div>还没有版本数据，点击右上角「刷新版本」从 registry 拉取 @deepseek-ai/dsh 的官方发布版本</div>
             </div>
           )}
 
-          {filtered.map((r) => {
+          {rows.map((r) => {
             const upgradeTo =
               r.installed &&
               r.installed.version !== "unknown" &&
@@ -879,30 +774,113 @@ export default function App() {
               row={r}
               isLatestTag={latestVersion === r.version}
               busy={installJob !== null}
-              runningProcs={Object.values(procs).filter(
-                (p) => p.version === r.version && !p.exited
-              )}
-              profileBusy={profileBusy}
               upgradeTo={upgradeTo}
               onUpgrade={(v) => doInstall(v, false)}
               isActive={settings.activeVersion === r.version}
               onSetActive={doSetActiveVersion}
-              onLaunch={doLaunch}
-              onTerminal={doTerminal}
-              onShowProc={(id) => {
-                setActiveProc(id);
-                setDockOpen(true);
-              }}
-              onStopProc={doStopProc}
-              onInstall={(v, force) => {
-                pendingLaunch.current = null;
-                doInstall(v, force);
-              }}
+              onInstall={(v, force) => doInstall(v, force)}
               onUninstall={doUninstall}
               onReveal={(p) => api.reveal(p).catch((e) => addToast("err", String(e)))}
             />
             );
           })}
+        </div>
+        )}
+
+        {view === "profiles" && (
+        <div className="list">
+          <div className="page-head">
+            <h2>Profile 实例</h2>
+            <span className="reload-hint">
+              基于「当前版本」<b className="mono">{settings.activeVersion || "（未选择）"}</b> 启动；
+              不同 profile 可并行，同一 profile 同时只能运行一个
+            </span>
+          </div>
+          <div className="inst-tip">
+            目前仅验证过 <b>web</b> 类 profile 可正常启动；其他 profile 可能是复制 web
+            的配置（实例名不同、内容同为 web，仅端口等不同），也可能启动失败——以实际日志为准。
+          </div>
+          <div className="inst-list">
+            {instanceRows.map((row) => {
+              const phaseText =
+                row.phase === "starting"
+                  ? "启动中…"
+                  : row.phase === "ready"
+                  ? "启动成功"
+                  : row.phase === "failed"
+                  ? `启动失败${row.code != null ? `（退出码 ${row.code}）` : ""}`
+                  : row.phase === "external"
+                  ? "运行中（外部启动）"
+                  : "未运行";
+              const canStop = row.phase === "starting" || row.phase === "ready" || row.phase === "external";
+              const canOpen = row.phase === "ready" && !!row.webUrl;
+              return (
+                <div key={row.profile} className={`inst-row ${row.phase}`}>
+                  <span className={`inst-dot ${row.phase}`} />
+                  <div className="inst-info">
+                    <div className="inst-name">{row.profile}</div>
+                    <div className="inst-meta">
+                      {phaseText}
+                      {row.pid ? ` · PID ${row.pid}` : ""}
+                      {row.version ? ` · ${row.version}` : ""}
+                    </div>
+                  </div>
+                  {canOpen && (
+                    <button
+                      className="sm primary"
+                      onClick={() =>
+                        row.webUrl && api.openUrl(row.webUrl).catch((e) => addToast("err", String(e)))
+                      }
+                      title="在浏览器打开 dsh 主界面"
+                    >
+                      打开
+                    </button>
+                  )}
+                  {canStop ? (
+                    <button
+                      className="sm danger"
+                      onClick={() => doStopProfileInstance(row.profile)}
+                      title="结束该 profile 实例"
+                    >
+                      停止
+                    </button>
+                  ) : (
+                    <button
+                      className="sm"
+                      disabled={installed.length === 0}
+                      title={
+                        installed.length === 0
+                          ? "请先在「版本与安装」页安装 dsh"
+                          : row.phase === "failed"
+                          ? "重新启动该 profile"
+                          : `基于当前版本（${settings.activeVersion}）启动 ${row.profile}`
+                      }
+                      onClick={() => doStartProfile(row.profile)}
+                    >
+                      启动
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            {instanceRows.length === 0 && (
+              <div className="inst-meta">（未找到 profile，检查 $DSH_HOME/profiles 目录）</div>
+            )}
+          </div>
+          <div className="hint-line">
+            启停遇到插件问题时，到「插件管理」页停用可疑插件后重启实例。
+          </div>
+        </div>
+        )}
+
+        {view === "plugins" && (
+          <PluginsView
+            profiles={profiles.map((p) => p.name)}
+            onToast={addToast}
+          />
+        )}
+
+        {view === "config" && <ConfigView onToast={addToast} />}
         </div>
       </div>
 

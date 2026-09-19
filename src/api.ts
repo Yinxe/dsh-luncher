@@ -12,6 +12,8 @@ import type {
   ProcLogEvent,
   ProfileInfo,
   ProfileInstance,
+  PluginEntryInfo,
+  ProfileDetail,
   RegistryInfo,
   RuntimeFinishedEvent,
   RuntimeProgressEvent,
@@ -41,6 +43,23 @@ export const api = {
     invoke<boolean>("stop_profile_instance", { profile }),
   exportProcLog: (profile: string, pid: number, content: string) =>
     invoke<string>("export_proc_log", { profile, pid, content }),
+  getProfileDetail: (profile: string) =>
+    invoke<ProfileDetail>("get_profile_detail", { profile }),
+  listProfilePlugins: (profile: string) =>
+    invoke<PluginEntryInfo[]>("list_profile_plugins", { profile }),
+  setProfilePlugin: (profile: string, id: string, disabled: boolean) =>
+    invoke<void>("set_profile_plugin", { profile, id, disabled }),
+  getPatchReload: (profile: string) => invoke<string>("get_patch_reload", { profile }),
+  setBundleEnabled: (profile: string, name: string, enabled: boolean) =>
+    invoke<void>("set_bundle_enabled", { profile, name, enabled }),
+  uninstallBundle: (profile: string, name: string) =>
+    invoke<void>("uninstall_bundle", { profile, name }),
+  readProfileFile: (profile: string, file: string) =>
+    invoke<string>("read_profile_file", { profile, file }),
+  writeProfileFile: (profile: string, file: string, content: string) =>
+    invoke<void>("write_profile_file", { profile, file, content }),
+  readGlobalConfig: () => invoke<string>("read_global_config"),
+  writeGlobalConfig: (content: string) => invoke<void>("write_global_config", { content }),
   listProfiles: () => invoke<ProfileInfo[]>("list_profiles"),
   reveal: (path: string) => invoke<void>("reveal_folder", { path }),
   openUrl: (url: string) => invoke<void>("open_external", { url }),
