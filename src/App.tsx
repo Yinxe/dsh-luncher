@@ -394,22 +394,17 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       {/* 顶栏 */}
-      <header className="flex h-12 shrink-0 items-center gap-2.5 border-b border-border bg-card px-4">
-        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-violet-500 text-[10px] font-extrabold text-primary-foreground">
-          DSH
-        </div>
-        <div className="mr-2 leading-tight">
-          <div className="text-[13px] font-bold">DSH Launcher</div>
-          <div className="text-[10.5px] text-muted-foreground">@deepseek-ai/dsh 版本管理器 · v{env.appVersion}</div>
-        </div>
-        <span className="mx-1 h-5 w-px bg-border" />
-        <Badge variant={env.node ? "success" : "destructive"} title={env.nodePath ?? ""}>
-          Node {env.node ? `v${env.node}` : "未检测到"}
+      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background/80 px-4">
+        <span className="eyebrow mr-1">Environment</span>
+        <Badge variant="outline" title={env.nodePath ?? ""} className="font-mono">
+          <span className={`led ${env.node ? "bg-emerald-500 text-emerald-500 led-glow" : "bg-red-500"}`} />
+          node {env.node ? `v${env.node}` : "未装"}
         </Badge>
-        <Badge variant={env.npm ? "success" : "destructive"} title={env.npmPath ?? ""}>
-          npm {env.npm ?? "未检测到"}
+        <Badge variant="outline" title={env.npmPath ?? ""} className="font-mono">
+          <span className={`led ${env.npm ? "bg-emerald-500" : "bg-red-500"}`} />
+          npm {env.npm ?? "未装"}
         </Badge>
-        <Badge variant="outline">{env.os}/{env.arch}</Badge>
+        <Badge variant="outline" className="font-mono">{env.os}/{env.arch}</Badge>
         <div className="flex-1" />
         {liveWebProcs.length > 0 && (
           <Button
@@ -478,16 +473,28 @@ export default function App() {
       {/* 主体 */}
       <div className="flex min-h-0 flex-1">
         {/* 侧栏导航 */}
-        <nav className="flex w-52 shrink-0 flex-col gap-1 border-r border-border bg-card p-2.5">
+        <nav className="flex w-56 shrink-0 flex-col gap-0.5 border-r border-border bg-card/70 p-2.5">
+          <div className="mb-3 flex items-center gap-2.5 px-1.5 pb-2 pt-0.5">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-violet-500 text-[9.5px] font-extrabold text-primary-foreground shadow-md">
+              DSH
+            </div>
+            <div className="leading-tight">
+              <div className="text-[13px] font-bold tracking-tight">DSH Launcher</div>
+              <div className="text-[10px] text-muted-foreground">@deepseek-ai/dsh · v{env.appVersion}</div>
+            </div>
+          </div>
           {navItems.map(([key, label, Icon, badge]) => (
             <Button
               key={key}
-              variant={view === key ? "secondary" : "ghost"}
-              className="w-full justify-start"
+              variant="ghost"
+              className={`relative h-8 w-full justify-start gap-2.5 ${view === key ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground"}`}
               onClick={() => setView(key)}
             >
-              <Icon />
-              {label}
+              {view === key && (
+                <span className="absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-primary" />
+              )}
+              <Icon className="h-4 w-4 opacity-80" />
+              <span>{label}</span>
               {badge != null && (
                 <Badge variant={key === "profiles" ? "success" : "warning"} className="ml-auto">
                   {badge}
@@ -520,9 +527,9 @@ export default function App() {
         <main className="min-w-0 flex-1 overflow-y-auto p-5">
           {view === "versions" && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-[300px_1fr] gap-3">
                 <Card className="p-4">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">① Node 环境</div>
+                  <div className="eyebrow mb-2.5">① Node 环境</div>
                   {env.node ? (
                     <div className="flex items-center gap-2 text-sm">
                       <CheckCircle2 className="h-4 w-4 text-emerald-500" />
@@ -536,7 +543,7 @@ export default function App() {
                   )}
                 </Card>
                 <Card className="p-4">
-                  <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">② 当前 DSH 版本</div>
+                  <div className="eyebrow mb-2.5">② 当前 DSH 版本 —— 所有 Profile 实例基于它运行</div>
                   {installed.length > 0 ? (
                     <Select value={settings.activeVersion} onValueChange={doSetActiveVersion}>
                       <SelectTrigger className="w-64 font-mono">
@@ -629,7 +636,7 @@ export default function App() {
                   const canStop = row.phase === "starting" || row.phase === "ready" || row.phase === "external";
                   const canOpen = row.phase === "ready" && !!row.webUrl;
                   return (
-                    <Card key={row.profile} className="flex items-center gap-3 p-3">
+                    <Card key={row.profile} className="flex-row items-center gap-3 p-3">
                       {row.phase === "starting" ? (
                         <Loader2 className="h-4 w-4 shrink-0 animate-spin text-amber-500" />
                       ) : row.phase === "ready" ? (

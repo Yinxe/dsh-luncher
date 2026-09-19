@@ -1,4 +1,4 @@
-import { FolderOpen, PlayCircle, RefreshCw } from "lucide-react";
+import { FolderOpen, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -24,13 +24,13 @@ interface Props {
   onReveal: (path: string) => void;
 }
 
-const CHANNEL_VARIANT: Record<string, "default" | "success" | "warning" | "info" | "secondary"> = {
-  latest: "default",
-  stable: "success",
-  rc: "info",
-  alpha: "warning",
-  beta: "warning",
-  next: "secondary",
+const RAIL: Record<string, string> = {
+  latest: "bg-emerald-500",
+  stable: "bg-emerald-600/70",
+  rc: "bg-sky-500",
+  alpha: "bg-amber-500",
+  beta: "bg-amber-500",
+  next: "bg-violet-500",
 };
 
 export default function VersionRow({
@@ -44,92 +44,113 @@ export default function VersionRow({
 
   return (
     <Card
-      className={`flex items-center gap-4 p-3.5 transition-colors ${
-        isActive ? "border-primary/50 ring-1 ring-primary/30" : "hover:border-primary/30"
+      className={`brackets relative flex-row items-stretch gap-0 overflow-hidden p-0 transition-colors ${
+        isActive ? "border-primary/45 shadow-[0_0_0_1px_rgba(99,102,241,0.15)]" : "hover:border-primary/25"
       }`}
     >
-      <div className="w-[280px] shrink-0">
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-[15px] font-bold">{row.version}</span>
-          <Badge variant={CHANNEL_VARIANT[row.channel] ?? "secondary"}>{row.channel}</Badge>
-          {isLatestTag && <Badge variant="info">latest</Badge>}
-          {isActive && <Badge variant="success">当前版本</Badge>}
+      {/* 通道色轨 */}
+      <span className={`w-[3px] shrink-0 ${RAIL[row.channel] ?? "bg-border"} ${isActive ? "bg-primary" : ""}`} />
+
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-2.5">
+        {/* 版本标识区 */}
+        <div className="w-60 shrink-0">
+          <div className="flex items-center gap-1.5">
+            <span className="font-mono text-[13.5px] font-bold tracking-tight">{row.version}</span>
+            <Badge variant={CHANNEL_V[row.channel] ?? "secondary"} className="uppercase">
+              {row.channel}
+            </Badge>
+            {isLatestTag && <Badge variant="info">latest</Badge>}
+          </div>
+          <div className="mt-0.5 font-mono text-[10.5px] text-muted-foreground">
+            {[
+              row.remote ? fmtDate(row.remote.publishedAt) : null,
+              row.remote ? fmtSize(row.remote.unpackedSize) : null,
+              upgradeTo ? null : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </div>
         </div>
-        <div className="mt-1 text-[11px] text-muted-foreground">
-          {[
-            row.remote ? fmtDate(row.remote.publishedAt) : null,
-            row.remote ? fmtSize(row.remote.unpackedSize) : null,
-          ]
-            .filter(Boolean)
-            .join(" · ")}
-          {upgradeTo && (
+
+        {/* 状态区 */}
+        <div className="min-w-0 flex-1">
+          {inst ? (
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className={`led ${isActive ? "bg-primary led-glow text-primary" : "bg-emerald-500 text-emerald-500"}`} />
+                <span className="text-[11.5px]">
+                  {inst.source === "managed" ? "启动器管理" : inst.source === "global" ? "npm 全局" : "PATH"}
+                </span>
+                {upgradeTo && (
+                  <button
+                    className="text-[11px] font-semibold text-amber-500 underline-offset-2 hover:underline"
+                    onClick={() => onUpgrade(upgradeTo)}
+                    title={`已安装 ${row.version}，点击安装 ${upgradeTo}`}
+                  >
+                    可升级 → {upgradeTo}
+                  </button>
+                )}
+              </div>
+              <div className="mt-0.5 truncate font-mono text-[10.5px] text-muted-foreground/80" title={inst.location}>
+                {inst.location}
+              </div>
+            </div>
+          ) : (
+            <div className="truncate text-xs text-muted-foreground/80">
+              {row.remote?.description ?? "未安装"}
+            </div>
+          )}
+        </div>
+
+        {/* 操作区 */}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {inst && inst.version !== "unknown" && !isActive && (
+            <Button size="sm" disabled={busy} onClick={() => onSetActive(row.version)}>
+              设为当前
+            </Button>
+          )}
+          {!inst && (
+            <Button size="sm" disabled={busy} onClick={() => onInstall(row.version, false)} title="安装完成后自动设为当前版本">
+              安装
+            </Button>
+          )}
+          {inst && inst.source === "managed" && (
             <>
-              {" · "}
-              <button
-                className="font-semibold text-amber-500 underline-offset-2 hover:underline"
-                onClick={() => onUpgrade(upgradeTo)}
-                title={`已安装 ${row.version}，点击安装 ${upgradeTo}`}
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => onReveal(inst.location)} title="打开安装目录">
+                <FolderOpen />
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={busy || isActive}
+                onClick={() => onInstall(row.version, true)}
+                title={isActive ? "当前版本正在使用，请先切换到其他版本再重装" : "删除后重新下载安装（会设为当前版本）"}
               >
-                可升级 → {upgradeTo}
-              </button>
+                <RefreshCw /> 重装
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                disabled={busy || isActive}
+                onClick={() => onUninstall(row.version)}
+                title={isActive ? "当前版本不允许卸载，请先切换到其他版本" : undefined}
+              >
+                卸载
+              </Button>
             </>
           )}
         </div>
       </div>
-
-      <div className="min-w-0 flex-1">
-        {inst ? (
-          <>
-            <Badge variant={inst.source === "managed" ? "success" : inst.source === "global" ? "info" : "outline"}>
-              {inst.source === "managed" ? "已装 · 启动器管理" : inst.source === "global" ? "已装 · npm 全局" : "已装 · PATH"}
-            </Badge>
-            <div className="mt-1 truncate font-mono text-[10.5px] text-muted-foreground" title={inst.location}>
-              {inst.location}
-            </div>
-          </>
-        ) : (
-          <span className="text-xs text-muted-foreground">{row.remote?.description ?? "未安装"}</span>
-        )}
-      </div>
-
-      <div className="flex shrink-0 items-center gap-2">
-        {inst && inst.version !== "unknown" && !isActive && (
-          <Button size="sm" disabled={busy} onClick={() => onSetActive(row.version)} title="设为当前版本：所有 Profile 实例将基于该版本启动">
-            设为当前
-          </Button>
-        )}
-        {!inst && (
-          <Button size="sm" disabled={busy} onClick={() => onInstall(row.version, false)} title="安装完成后自动设为当前版本">
-            <PlayCircle /> 安装
-          </Button>
-        )}
-        {inst && inst.source === "managed" && (
-          <>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => onReveal(inst.location)}>
-              <FolderOpen /> 目录
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy || isActive}
-              onClick={() => onInstall(row.version, true)}
-              title={isActive ? "当前版本正在使用，请先切换到其他版本再重装" : "删除后重新下载安装（会设为当前版本）"}
-            >
-              <RefreshCw /> 重装
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-              disabled={busy || isActive}
-              onClick={() => onUninstall(row.version)}
-              title={isActive ? "当前版本不允许卸载，请先切换到其他版本" : undefined}
-            >
-              卸载
-            </Button>
-          </>
-        )}
-      </div>
     </Card>
   );
 }
+
+const CHANNEL_V: Record<string, "default" | "success" | "warning" | "info" | "secondary" | "outline"> = {
+  latest: "success",
+  stable: "success",
+  rc: "info",
+  alpha: "warning",
+  beta: "warning",
+  next: "secondary",
+};
