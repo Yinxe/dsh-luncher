@@ -9,7 +9,11 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "icon": "tauri icon src-tauri/icons/app-icon.png"
+    "icon": "tauri icon src-tauri/icons/app-icon.png",
+    "app": "tauri dev",
+    "build:debug": "npm run build && cd src-tauri && PKG_CONFIG_PATH=\"$PWD/.sysroot/usr/lib/x86_64-linux-gnu/pkgconfig:$PWD/.sysroot/usr/share/pkgconfig\" RUSTFLAGS=\"-L native=$PWD/.sysroot/usr/lib/x86_64-linux-gnu\" cargo build",
+    "start": "cd src-tauri && LD_LIBRARY_PATH=\"$PWD/.sysroot/usr/lib/x86_64-linux-gnu\" ./target/debug/dsh-launcher",
+    "release": "npm run build && cd src-tauri && cargo build --release"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

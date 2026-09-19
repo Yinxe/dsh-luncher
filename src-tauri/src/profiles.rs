@@ -14,9 +14,14 @@ pub fn dsh_native_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".dsh"))
 }
 
-/// dsh 的 profile 目录：$DSH_HOME/profile
+/// dsh 的 profile 目录：$DSH_HOME/profiles（旧版/兼容单数 profile）
 pub fn profiles_dir() -> PathBuf {
-    dsh_native_home().join("profile")
+    let home = dsh_native_home();
+    let plural = home.join("profiles");
+    if plural.is_dir() {
+        return plural;
+    }
+    home.join("profile")
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -24,12 +29,12 @@ pub fn profiles_dir() -> PathBuf {
 pub struct ProfileInfo {
     /// 传给 --profile 的名字
     pub name: String,
-    /// dir = profile/ 下的子目录；file = yaml/json 配置文件（名字去掉扩展名）
+    /// dir = profiles/ 下的子目录；file = yaml/json 配置文件（名字去掉扩展名）
     pub kind: String,
     pub path: String,
 }
 
-/// 枚举可启动的 profile：profile/ 下的子目录 + yaml/yml/json 文件（按名字排序）
+/// 枚举可启动的 profile：profiles/ 下的子目录 + yaml/yml/json 文件（按名字排序）
 pub fn scan_profiles() -> Vec<ProfileInfo> {
     let mut out = Vec::new();
     let dir = profiles_dir();
@@ -43,7 +48,8 @@ pub fn scan_profiles() -> Vec<ProfileInfo> {
         };
         let name_os = entry.file_name();
         let name = name_os.to_string_lossy();
-        if name.starts_with('.') {
+        // 跳过隐藏项与依赖目录
+        if name.starts_with('.') || name == "node_modules" {
             continue;
         }
         if ft.is_dir() {
