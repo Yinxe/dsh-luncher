@@ -1,88 +1,99 @@
 name: Release 打包
 
+# 基于 Tauri 官方模板：https://v2.tauri.app/distribute/pipelines/github
+# 构建与发布全部交给 tauri-apps/tauri-action@v1 —— 它自己读 tauri.conf.json 的
+# version、替换 __VERSION__、创建 Draft Release 并上传产物，无需任何自定义脚本。
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: '发布版本号（例如 0.2.0）'
-        required: true
+        description: '发布版本号（留空则用 tauri.conf.json 中的版本）'
+        required: false
         type: string
+  push:
+    branches:
+      - release
 
 jobs:
-  build:
+  publish-tauri:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: ubuntu-22.04 # deb + AppImage
-            args: ''
-          - platform: windows-latest # NSIS 安装包（.exe）
-            args: ''
-          - platform: macos-latest # universal dmg（Intel + Apple Silicon）
+          # macOS 用 universal 单包同时覆盖 Apple Silicon 与 Intel（官方示例之一）
+          - platform: 'macos-latest'
             args: '--target universal-apple-darwin'
+          # Linux：deb + rpm + AppImage（由 tauri.conf.json 的 bundle.targets = all 决定）
+          - platform: 'ubuntu-22.04'
+            args: ''
+          # Windows：NSIS .exe + .msi
+          - platform: 'windows-latest'
+            args: ''
+
     runs-on: ${{ matrix.platform }}
-    permissions:
-      contents: write
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装 Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      - name: Rust 编译缓存
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
+      - uses: actions/checkout@v7
 
       - name: 安装 Linux 系统依赖
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
 
-      - name: 写入版本号
-        shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          node -e "
-            const fs = require('fs');
-            const v = process.env.VERSION;
-            if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(v)) {
-              console.error('无效的版本号: ' + v + '，需要形如 1.2.3 或 1.2.3-beta.1');
-              process.exit(1);
-            }
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.version = v;
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-            const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
-            conf.version = v;
-            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
-            const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
-            fs.writeFileSync('src-tauri/Cargo.toml', cargo.replace(/^version = \".*\"/m, 'version = \"' + v + '\"'));
-            console.log('版本已设置为 ' + v);
-          "
+      - name: 安装 Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # 交叉目标只有 macOS 需要，其他平台留空以省编译时间
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust 编译缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
 
       - name: 安装前端依赖
         run: npm ci
 
+      # 可选版本号：填了就通过官方 `tauri build --config` 覆盖（不修改任何文件），
+      # 留空则由 tauri-action 从 tauri.conf.json 读取。config_arg 会同时进入
+      # tauri-action 的版本解析（决定 __VERSION__）和 tauri build 的实际参数。
+      - name: 解析版本号
+        id: ver
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -z "$INPUT_VERSION" ]; then
+            echo "未填版本号，使用 tauri.conf.json 中的版本"
+            echo "config_arg=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node -e '
+            const v = process.env.INPUT_VERSION;
+            if (!/^\d+\.\d+\.\d+(-[\w.]+)?(\+[\w.]+)?$/.test(v)) {
+              console.error("无效的版本号: " + v + "，需要形如 1.2.3 或 1.2.3-beta.1");
+              process.exit(1);
+            }
+          '
+          echo "config_arg=--config '{\"version\":\"$INPUT_VERSION\"}'" >> "$GITHUB_OUTPUT"
+          echo "本次发布版本: $INPUT_VERSION"
+
       - name: 打包并上传到 Draft Release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
+          tagName: v__VERSION__ # action 自动把 __VERSION__ 替换为应用版本号
           releaseName: 'DSH Launcher v__VERSION__'
-          releaseBody: '跨平台安装包，请从下方 Assets 下载：Linux（deb / AppImage）、Windows（NSIS 安装包）、macOS（universal dmg）。'
+          releaseBody: '跨平台安装包，请从下方 Assets 下载：Linux（.deb / .rpm / .AppImage）、Windows（NSIS .exe 安装包 / .msi）、macOS（universal .dmg）。'
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ steps.ver.outputs.config_arg }}

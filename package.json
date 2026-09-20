@@ -12,9 +12,8 @@
     "icon": "tauri icon src-tauri/icons/app-icon.png",
     "app": "tauri dev",
     "build:debug": "tauri build --debug --no-bundle",
-    "build:release": "tauri build --no-bundle",
-    "start": "([ -x src-tauri/target/release/dsh-launcher ] || npm run build:release) && ./src-tauri/target/release/dsh-launcher",
-    "release": "tauri build"
+    "build:release": "tauri build",
+    "release": "npm run build:release"
   },
   "dependencies": {
     "@codemirror/lang-yaml": "^6.1.3",
