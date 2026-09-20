@@ -21,6 +21,39 @@ interface Options {
   onFinished?: (e: PluginJobEvent) => void;
 }
 
+/** 把后端快照和本地实时状态按 id 合并。
+ *  快照是在 `await` 之前抓的，本地可能在等待期间已经收到过 plugin-job 终态事件——
+ *  绝不能用更早的快照把已结束的任务退回「运行中」（否则转圈 / busy 锁死、onFinished 不再触发）。
+ *  规则：本地已到终态则保留本地的状态字段；日志取较多的一方；本地有而快照没有的任务保留。 */
+function mergeJobs(prev: PluginJob[], list: PluginJob[]): PluginJob[] {
+  const prevById = new Map(prev.map((j) => [j.id, j]));
+  const merged: PluginJob[] = list.map((j) => {
+    const local = prevById.get(j.id);
+    if (!local) return j;
+    const keepStatus = !local.running; // 终态单调：不再回到运行中
+    return {
+      ...j,
+      ...(keepStatus
+        ? {
+            running: local.running,
+            ok: local.ok,
+            exitCode: local.exitCode,
+            cancelled: local.cancelled,
+            finishedAt: local.finishedAt,
+            hint: local.hint,
+            pendingBuilds: local.pendingBuilds,
+            label: local.label,
+          }
+        : {}),
+      lines: local.lines.length > j.lines.length ? local.lines : j.lines,
+      dropped: Math.max(local.dropped, j.dropped),
+    };
+  });
+  const inList = new Set(list.map((j) => j.id));
+  const extras = prev.filter((j) => !inList.has(j.id)); // 刚发出快照请求就收到的新任务
+  return [...extras, ...merged];
+}
+
 /**
  * 插件任务流：挂载时拉一次后端快照（重挂载/切换视图后历史不丢），
  * 之后靠 plugin-log / plugin-job 事件增量更新。
@@ -30,6 +63,7 @@ export function usePluginJobs({ onFinished }: Options = {}): PluginJobsApi {
   const [activeId, setActiveId] = useState<number | null>(null);
   const pending = useRef<PluginLogEvent[]>([]);
   const timer = useRef<number | null>(null);
+  const refreshSeq = useRef(0);
   const finishedRef = useRef(onFinished);
   finishedRef.current = onFinished;
 
@@ -57,15 +91,20 @@ export function usePluginJobs({ onFinished }: Options = {}): PluginJobsApi {
   }, [flush]);
 
   const refresh = useCallback(async () => {
+    const my = ++refreshSeq.current;
+    let list: PluginJob[];
     try {
-      const list = await api.listPluginJobs();
-      setJobs(list);
-      setActiveId((cur) =>
-        cur != null && list.some((j) => j.id === cur) ? cur : (list[0]?.id ?? null),
-      );
+      list = await api.listPluginJobs();
     } catch {
-      /* 后端尚未就绪时静默 */
+      return; /* 后端尚未就绪时静默 */
     }
+    if (refreshSeq.current !== my) return; // 有更新的刷新在途，丢弃这次过期快照
+    setJobs((prev) => mergeJobs(prev, list));
+    setActiveId((cur) => {
+      if (cur != null) return cur; // 已有聚焦就不动（合并不会凭空删掉当前任务）
+      const first = list[0];
+      return first ? first.id : null;
+    });
   }, []);
 
   useEffect(() => {
@@ -139,17 +178,24 @@ export function usePluginJobs({ onFinished }: Options = {}): PluginJobsApi {
 
   const cancel = useCallback(
     (id: number) => {
-      api.cancelPluginJob(id).catch(() => undefined);
+      // 后端返回 false = 任务已不存在 / 已结束（此时不会有 plugin-job 事件来纠正本地状态），
+      // 拉一次快照对齐，避免转圈与 busy 锁死；异常同样用快照兜底。
+      api
+        .cancelPluginJob(id)
+        .then((ok) => {
+          if (!ok) void refresh();
+        })
+        .catch(() => void refresh());
     },
-    [],
+    [refresh],
   );
 
   const clear = useCallback(() => {
     api
       .clearPluginJobs()
       .then(() => setJobs((prev) => prev.filter((j) => j.running)))
-      .catch(() => undefined);
-  }, []);
+      .catch(() => void refresh());
+  }, [refresh]);
 
   return {
     jobs,
