@@ -43,7 +43,7 @@
 
   - 开发构建（`npm run app` / 未打包的二进制）没有格式标记，**不会**放开应用内安装——否则 updater 会把安装包字节写到开发二进制上；这种形态只提示有新版。
   - **可以走 GitHub 加速**：检查更新（拉 latest.json）和下载安装包都套用设置里的加速前缀，与 clone / 插件下载共用同一份测速结果（`githubAccel` 开关 + `githubProxy` 指定前缀）。代理不支持某个地址（如 ghfast.top 对 `api.github.com` 会 403）或中途断流时，会自动回退直连重试。安装包有签名校验，所以**经第三方代理也无法投毒**——代理改一个字节就验签失败。
-  - CI 里有一个 `normalize-updater-json` 作业，会在打包完成后把 latest.json 的下载地址从 `api.github.com/.../releases/assets/<id>` 改写成 `github.com/<repo>/releases/download/<tag>/<asset>`：前者只有部分代理认，后者所有代理都认，而且点开就是浏览器能直接下的地址。
+  - latest.json 里的下载地址由 tauri-action 生成，形如 `api.github.com/.../releases/assets/<id>`；客户端在开加速时会把它也套上前缀（gh-proxy 认这种地址；ghfast 之类只认 `github.com/...` 的会 403，此时客户端会自动回退直连重试）。
 
 ## 自动更新是怎么工作的
 

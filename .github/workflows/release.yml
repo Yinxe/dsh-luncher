@@ -37,6 +37,7 @@ jobs:
       # 版本号没变就别白跑 7 分钟：已经正式发布过就跳过这一步之后的动作
       - name: 该版本是否已发布
         id: gate
+        shell: bash          # Windows runner 默认是 PowerShell，这里必须显式指定
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
