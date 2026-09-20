@@ -100,13 +100,12 @@ jobs:
           tagName: v__VERSION__ # action 自动把 __VERSION__ 替换为应用版本号
           releaseName: 'DSH Launcher v__VERSION__'
           releaseBody: '跨平台安装包，请从下方 Assets 下载：Linux（.deb / .rpm / .AppImage）、Windows（NSIS .exe 安装包 / .msi）、macOS（universal .dmg）。'
-          # 直接发布成正式 Release（非 draft、非 pre-release）。
-          # GitHub 的三种状态里只有「non-draft + non-prerelease」才会被
-          # releases/latest 指到；草稿和预发布都会让 latest.json 变成 404，
-          # 客户端只表现为「检查不到更新」。所以这里不留人工步骤。
-          # 想先审一遍再发就把 releaseDraft 改回 true，然后在 Releases 页面点
-          # Publish release（注意别勾 "Set as a pre-release"）。
-          releaseDraft: false
+          # 必须是 true：三个平台的 job 并发往「同一个草稿 release」里传产物。
+          # 设成 false 时，先跑完的那个 job 会把 release 直接发布出去，另外两个
+          # 再来找草稿就找不到了，于是尝试创建 → 422 already_exists（tag_name），
+          # 结果是整个平台产物缺失（踩过一次：v0.1.1 少了全部 Linux 包）。
+          # 草稿的发布动作交给最后的 publish-release 作业，仍是全自动、无需人工点击。
+          releaseDraft: true
           prerelease: false
           # 生成 updater 清单 latest.json 并上传到同一个 Release —— 应用内自动更新的数据源。
           # 注意输入名：v1 是 uploadUpdaterJson（v0 那版叫 includeUpdaterJson，写错会被静默忽略）
@@ -177,3 +176,28 @@ jobs:
           # --clobber：同名资产先删后传，避免中途失败把 latest.json 弄丢
           gh release upload "$TAG" /tmp/latest.json --clobber
           echo "完成，latest.json 现在是 canonical 地址"
+
+  # 上一个作业跑完（latest.json 已规范化）再把草稿转成正式 release。
+  # 这样既避开了多平台并发创建 release 的竞态，又不需要人工去点 Publish，
+  # 也就不会有人误勾 "Set as a pre-release"（勾了 latest 会 404）。
+  publish-release:
+    needs: normalize-updater-json
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 把草稿发布为正式 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-$(node -p "require('./src-tauri/tauri.conf.json').version")}"
+          TAG="v$VERSION"
+          gh release edit "$TAG" \
+            --draft=false --prerelease=false --repo "$GITHUB_REPOSITORY"
+          echo "已发布 $TAG，当前状态："
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,url
