@@ -333,6 +333,10 @@ pub fn is_safe_version(v: &str) -> bool {
 
 /// 把参数按 shell 规则加单引号
 pub fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        // 空参数若不显式加引号会在拼接时整个消失，导致 argv 错位
+        return "''".to_string();
+    }
     if s.chars().all(|c| {
         c.is_ascii_alphanumeric()
             || matches!(c, '/' | '.' | '-' | '_' | '=' | ':' | ',' | '@' | '+')
@@ -345,7 +349,7 @@ pub fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_version;
+    use super::{is_safe_version, shell_quote};
 
     #[test]
     fn safe_versions() {
@@ -353,5 +357,12 @@ mod tests {
         assert!(!is_safe_version("../etc"));
         assert!(!is_safe_version(""));
         assert!(!is_safe_version("a/b"));
+    }
+
+    #[test]
+    fn shell_quote_preserves_empty_arg() {
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("a/b-1.2"), "a/b-1.2");
+        assert_eq!(shell_quote("it's"), r#"'it'\''s'"#);
     }
 }

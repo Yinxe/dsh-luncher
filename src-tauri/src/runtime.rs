@@ -197,11 +197,13 @@ fn extract(app: &tauri::AppHandle, archive: &Path) -> Result<(), String> {
     let root = runtime_root();
     std::fs::create_dir_all(&root).map_err(|e| format!("创建目录失败: {e}"))?;
     if cfg!(windows) {
-        // zip → PowerShell 展开
+        // zip → PowerShell 展开。路径落到单引号字符串里，' 必须转义成 ''，
+        // 否则用户名/目录含 ' 会破坏引号并注入任意 PowerShell。
+        let psq = |s: &str| s.replace('\'', "''");
         let ps = format!(
             "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-            archive.display(),
-            root.display()
+            psq(&archive.to_string_lossy()),
+            psq(&root.to_string_lossy())
         );
         let out = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &ps])

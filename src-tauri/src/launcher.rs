@@ -68,7 +68,21 @@ pub fn build_inner_command(
 
     let path_line = node
         .and_then(|n| n.parent())
-        .map(|dir| format!("export PATH='{}':\"$PATH\"\n", dir.display()))
+        .map(|dir| {
+            #[cfg(windows)]
+            {
+                // cmd.exe：用 set "VAR=..." 形式；POSIX 的 export/单引号在 cmd 里无法执行
+                format!("set \"PATH={};%PATH%\"\n", dir.display())
+            }
+            #[cfg(not(windows))]
+            {
+                // 走 shell_quote，路径含单引号时正确转义，避免注入到 export 行
+                format!(
+                    "export PATH={}:\"$PATH\"\n",
+                    util::shell_quote(&dir.to_string_lossy())
+                )
+            }
+        })
         .unwrap_or_default();
 
     // 不用 exec：退出后显示退出码并等待回车，报错不会被终端闪退吞掉
