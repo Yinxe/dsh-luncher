@@ -2129,7 +2129,7 @@ mod tests {
                 soft: false,
             }],
         };
-        let id = start_job(handle, &state, Settings::default(), req).unwrap();
+        let id = start_job(handle, &state, Settings { github_accel: false, ..Default::default() }, req).unwrap();
         let job = wait_job(&state, id);
         assert_eq!(job.ok, Some(true), "job={job:?}");
         assert_eq!(job.exit_code, Some(0));
