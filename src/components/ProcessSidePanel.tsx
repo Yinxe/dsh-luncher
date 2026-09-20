@@ -95,7 +95,7 @@ export default function ProcessSidePanel({
         side="right"
         showCloseButton={false}
         aria-describedby={undefined}
-        className="w-[420px] gap-0 border-l border-border bg-card p-0 shadow-2xl sm:max-w-[88vw]"
+        className="w-full max-w-[420px] gap-0 border-l border-border bg-card p-0 shadow-2xl"
       >
         {/* 面板头 */}
         <div className="flex items-center gap-2.5 border-b border-border px-4 py-3">

@@ -60,7 +60,7 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
       <SheetContent
         side="right"
-        className="w-[560px] gap-0 border-l border-border bg-card p-0 sm:max-w-[92vw]"
+        className="w-full max-w-[560px] gap-0 border-l border-border bg-card p-0"
       >
         <SheetHeader className="border-b border-border">
           <SheetTitle>设置</SheetTitle>
@@ -112,7 +112,7 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
           </Section>
 
           <Section title="dsh 启动">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-3 sm:grid-cols-2">
               <Field>
                 <FieldLabel htmlFor="set-terminal">终端模拟器</FieldLabel>
                 <Input

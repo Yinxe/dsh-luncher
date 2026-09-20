@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { check as updaterCheck, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
-  Package, Rocket, Puzzle, FileCog, RefreshCw, Settings as SettingsIcon,
+  Puzzle, RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
-  TriangleAlert, ChevronDown, CopyPlus, KeyRound, Info, RotateCw, Bot, FileText,
-  Pencil, Trash2, ShieldPlus,
+  TriangleAlert, ChevronDown, CopyPlus, Info, RotateCw, FileText,
+  Pencil, Trash2, ShieldPlus, MoreHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
@@ -15,6 +15,12 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Toaster } from "@/components/ui/sonner";
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { useSidebarOpen } from "@/hooks/use-layout";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -36,13 +42,12 @@ import ProcessSidePanel from "./components/ProcessSidePanel";
 import VersionRow from "./components/VersionRow";
 import SettingsDrawer from "./components/SettingsDrawer";
 import UpdateBanner from "./components/UpdateBanner";
+import AppSidebar from "./components/AppSidebar";
 import type {
   EnvironmentInfo, InstalledVersion, LauncherUpdateStatus, ProcEntry,
   ProcExitEvent, ProcLogEvent, ProfileInfo, ProfileInstance, ProfileTarget,
-  RegistryInfo, Settings as SettingsT,
+  RegistryInfo, Settings as SettingsT, View,
 } from "./types";
-
-type View = "versions" | "profiles" | "plugins" | "models" | "config" | "credentials";
 
 /** 恢复模式 profile 名（与后端 profile_cfg::RECOVERY_PROFILE 保持一致） */
 const RECOVERY_PROFILE = "web-Recovery";
@@ -122,6 +127,9 @@ export default function App() {
   const builtinUpdate = useRef<Update | null>(null);
 
   const { resolved, setTheme } = useTheme();
+
+  /** 侧栏开合：默认跟随窗口档位（宽展开 / 窄收成图标栏 / 超窄走抽屉），手动可覆盖 */
+  const [sidebarOpen, setSidebarOpen] = useSidebarOpen();
 
   const addToast = useCallback((kind: "ok" | "err" | "info", text: string) => {
     if (kind === "ok") toast.success(text);
@@ -695,182 +703,176 @@ export default function App() {
     );
   }
 
-  const navItems: Array<[View, string, typeof Package, number | null]> = [
-    ["versions", "版本与安装", Package, upgradableCount > 0 ? upgradableCount : null],
-    ["profiles", "Profile 实例", Rocket, runningInstanceCount > 0 ? runningInstanceCount : null],
-    ["plugins", "插件管理", Puzzle, null],
-    ["models", "模型配置", Bot, null],
-    ["config", "配置文件", FileCog, null],
-    ["credentials", "凭据管理", KeyRound, null],
-  ];
-
   return (
-    <div className="flex h-full flex-col">
-      {/* 顶栏 */}
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background/80 px-4">
-        <span className="eyebrow mr-1">Environment</span>
-        <Badge variant="outline" title={env.nodePath ?? ""} className="font-mono">
-          <span className={`led ${env.node ? "bg-emerald-500 text-emerald-500 led-glow" : "bg-red-500"}`} />
-          node {env.node ? `v${env.node}` : "未装"}
-        </Badge>
-        <Badge variant="outline" title={env.npmPath ?? ""} className="font-mono">
-          <span className={`led ${env.npm ? "bg-emerald-500" : "bg-red-500"}`} />
-          npm {env.npm ?? "未装"}
-        </Badge>
-        <Badge variant="outline" className="font-mono">{env.os}/{env.arch}</Badge>
-        <div className="flex-1" />
-        {liveWebProcs.length > 0 && (
-          <Button
-            size="sm"
-            onClick={() => liveWebProcs[0].webUrl && api.openUrl(liveWebProcs[0].webUrl).catch((e) => addToast("err", String(e)))}
-            title={liveWebProcs.length === 1
-              ? `打开 dsh 主界面：${liveWebProcs[0].webUrl}`
-              : `${liveWebProcs.length} 个实例运行中，点击打开最新一个`}
-          >
-            <ExternalLink /> 打开 DSH 界面
-          </Button>
-        )}
-        <Button variant="outline" size="sm" onClick={doCheckUpdate}>检查更新</Button>
-        <Button
-          variant={drawerOpen ? "secondary" : "outline"}
-          size="sm"
-          onClick={() => setDrawerOpen((v) => !v)}
-          title="打开/收起实例终端"
-        >
-          <Terminal /> 实例终端
-          {runningInstanceCount > 0 && (
-            <Badge variant="success" className="ml-0.5">{runningInstanceCount}</Badge>
-          )}
-        </Button>
-        <Button variant="ghost" size="icon" title="设置" onClick={() => setShowSettings(true)}>
-          <SettingsIcon className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          title={resolved === "dark" ? "切换浅色" : "切换深色"}
-          onClick={() => setTheme(resolved === "dark" ? "light" : "dark")}
-        >
-          {resolved === "dark" ? (
-            <Sun className="h-4 w-4 animate-in fade-in zoom-in-50 duration-150" />
-          ) : (
-            <Moon className="h-4 w-4 animate-in fade-in zoom-in-50 duration-150" />
-          )}
-        </Button>
-      </header>
+    <SidebarProvider
+      open={sidebarOpen}
+      onOpenChange={setSidebarOpen}
+      className="h-full min-h-0 w-full"
+    >
+      <AppSidebar
+        view={view}
+        onNavigate={(v) => {
+          // 从侧栏进入插件页：清掉 Profile 卡片带过来的预选，走默认 profile
+          if (v === "plugins") setPluginsSeed(null);
+          setView(v);
+        }}
+        env={env}
+        settings={settings}
+        runningInstanceCount={runningInstanceCount}
+        upgradableCount={upgradableCount}
+      />
 
-      {/* 更新 / 运行时横幅 */}
-      {update && (
-        <UpdateBanner
-          status={update}
-          applying={updateApplying}
-          onDismiss={() => setUpdate(null)}
-          onOpenUrl={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
-          onApply={doApplyUpdate}
-        />
-      )}
-      {env && !env.node && (
-        <Alert
-          variant="destructive"
-          className={`shrink-0 animate-in gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px] fade-in slide-in-from-top-2 duration-300 ${runtimeJob ? "" : "pr-40"}`}
-        >
-          <XCircle />
-          {runtimeJob ? (
-            <>
-              <AlertTitle className="font-normal">
-                正在安装内置 Node…
-                {runtimeJob.total > 0 &&
-                  ` ${Math.round((runtimeJob.received / runtimeJob.total) * 100)}% (${(runtimeJob.received / 1048576).toFixed(1)}/${(runtimeJob.total / 1048576).toFixed(1)} MB)`}
-              </AlertTitle>
-              {runtimeJob.total > 0 && (
-                <AlertDescription>
-                  <Progress
-                    value={(runtimeJob.received / runtimeJob.total) * 100}
-                    className="h-1.5 max-w-md bg-red-500/20"
-                  />
-                </AlertDescription>
-              )}
-              <AlertDescription className="truncate font-mono text-[11px]">
-                {runtimeJob.log[runtimeJob.log.length - 1] ?? "连接镜像站…"}
-              </AlertDescription>
-            </>
-          ) : (
-            <>
-              <AlertTitle className="font-normal">未检测到 Node.js（dsh 依赖 Node 运行）</AlertTitle>
-              <AlertDescription>
-                可一键安装启动器内置 Node LTS（用户级、无需 root，默认走 npmmirror 镜像）
-              </AlertDescription>
-              <AlertAction>
-                <Button size="sm" onClick={doInstallRuntime}>一键安装 Node</Button>
-              </AlertAction>
-            </>
-          )}
-        </Alert>
-      )}
-
-      {/* 主体 */}
-      <div className="flex min-h-0 flex-1">
-        {/* 侧栏导航 */}
-        <nav className="flex w-56 shrink-0 flex-col gap-0.5 border-r border-border bg-card/70 p-2.5">
-          <div className="mb-3 flex items-center gap-2.5 px-1.5 pb-2 pt-0.5">
-            {/* 走 public/ 静态资源，避免把 SVG 当 JS 模块加载（见 index.html 的 favicon） */}
-            <img src="/dsh-logo.svg" alt="DSH" className="h-8 w-8" draggable={false} />
-            <div className="leading-tight">
-              <div className="text-[13px] font-bold tracking-tight">DSH Launcher</div>
-              <div className="text-[10px] text-muted-foreground">@deepseek-ai/dsh · v{env.appVersion}</div>
-            </div>
-          </div>
-          {navItems.map(([key, label, Icon, badge]) => (
+      {/* 内容侧：顶栏 / 视图 / 状态栏都放在 SidebarInset 内，随侧栏收放一起让位 */}
+      <SidebarInset className="min-w-0 overflow-hidden bg-transparent">
+        {/* 顶栏（低优先级项按断点逐级收起，超窄窗口统一进「更多」菜单） */}
+        <header className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background/80 px-2 lg:gap-2 lg:px-4">
+          <SidebarTrigger title="折叠 / 展开侧栏（Ctrl+B）" />
+          {/* 抽屉态（< md）侧栏不可见，顶栏补上品牌标识 */}
+          <img src="/dsh-logo.svg" alt="DSH" className="h-6 w-6 shrink-0 md:hidden" draggable={false} />
+          <span className="eyebrow mr-1 hidden xl:inline">Environment</span>
+          <Badge variant="outline" title={env.nodePath ?? ""} className="font-mono">
+            <span className={`led ${env.node ? "bg-emerald-500 text-emerald-500 led-glow" : "bg-red-500"}`} />
+            <span className="hidden sm:inline">node&nbsp;</span>
+            {env.node ? `v${env.node}` : "未装"}
+          </Badge>
+          <Badge variant="outline" title={env.npmPath ?? ""} className="hidden font-mono lg:inline-flex">
+            <span className={`led ${env.npm ? "bg-emerald-500" : "bg-red-500"}`} />
+            npm {env.npm ?? "未装"}
+          </Badge>
+          <Badge variant="outline" className="hidden font-mono xl:inline-flex">{env.os}/{env.arch}</Badge>
+          <div className="flex-1" />
+          {liveWebProcs.length > 0 && (
             <Button
-              key={key}
-              variant="ghost"
-              className={`relative h-8 w-full justify-start gap-2.5 ${view === key ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-              onClick={() => {
-                if (key === "plugins") setPluginsSeed(null);
-                setView(key);
-              }}
+              size="sm"
+              onClick={() => liveWebProcs[0].webUrl && api.openUrl(liveWebProcs[0].webUrl).catch((e) => addToast("err", String(e)))}
+              title={liveWebProcs.length === 1
+                ? `打开 dsh 主界面：${liveWebProcs[0].webUrl}`
+                : `${liveWebProcs.length} 个实例运行中，点击打开最新一个`}
             >
-              {view === key && (
-                <span className="absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 animate-in fade-in slide-in-from-left-1 rounded-full bg-primary duration-200" />
-              )}
-              <Icon className="h-4 w-4 opacity-80" />
-              <span>{label}</span>
-              {badge != null && (
-                <Badge variant={key === "profiles" ? "success" : "warning"} className="ml-auto">
-                  {badge}
-                </Badge>
-              )}
+              <ExternalLink /> <span className="hidden lg:inline">打开 DSH 界面</span>
             </Button>
-          ))}
+          )}
+          <Button variant="outline" size="sm" className="hidden md:inline-flex" onClick={doCheckUpdate}>
+            检查更新
+          </Button>
+          <Button
+            variant={drawerOpen ? "secondary" : "outline"}
+            size="sm"
+            onClick={() => setDrawerOpen((v) => !v)}
+            title="打开/收起实例终端"
+          >
+            <Terminal /> <span className="hidden lg:inline">实例终端</span>
+            {runningInstanceCount > 0 && (
+              <Badge variant="success" className="ml-0.5">{runningInstanceCount}</Badge>
+            )}
+          </Button>
+          <Button variant="ghost" size="icon" title="设置" onClick={() => setShowSettings(true)}>
+            <SettingsIcon className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            title={resolved === "dark" ? "切换浅色" : "切换深色"}
+            onClick={() => setTheme(resolved === "dark" ? "light" : "dark")}
+          >
+            {resolved === "dark" ? (
+              <Sun className="h-4 w-4 animate-in fade-in zoom-in-50 duration-150" />
+            ) : (
+              <Moon className="h-4 w-4 animate-in fade-in zoom-in-50 duration-150" />
+            )}
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="md:hidden" title="更多操作与环境信息">
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuLabel>操作</DropdownMenuLabel>
+              {liveWebProcs.length > 0 && (
+                <DropdownMenuItem
+                  onSelect={() => {
+                    const u = liveWebProcs[0].webUrl;
+                    if (u) api.openUrl(u).catch((e) => addToast("err", String(e)));
+                  }}
+                >
+                  <ExternalLink /> 打开 DSH 界面
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem onSelect={() => { doCheckUpdate(); }}>
+                <RefreshCw /> 检查更新
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel>环境</DropdownMenuLabel>
+              <DropdownMenuItem disabled className="font-mono text-[11.5px]">
+                node {env.node ? `v${env.node}` : "未装"}
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled className="font-mono text-[11.5px]">
+                npm {env.npm ?? "未装"} · {env.os}/{env.arch}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </header>
 
-          <div className="mt-auto space-y-2 border-t border-border pt-3 text-[11.5px]">
-            <div className="flex items-center gap-2">
-              <span className={`h-1.5 w-1.5 rounded-full ${env.node ? "bg-emerald-500" : "bg-red-500"}`} />
-              <span className="font-mono">{env.node ? `Node v${env.node}` : "Node 未装"}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className={`h-1.5 w-1.5 rounded-full ${settings.activeVersion ? "bg-emerald-500" : "bg-amber-500"}`} />
-              <span className="font-mono">{settings.activeVersion || "版本未选"}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className={`h-1.5 w-1.5 rounded-full ${runningInstanceCount > 0 ? "bg-emerald-500" : "bg-muted-foreground/40"}`} />
-              <span className="font-mono">{runningInstanceCount} 个实例运行中</span>
-            </div>
-            <div className="pt-1 text-[10.5px] leading-relaxed text-muted-foreground">
-              <div>registry：{env.registry}</div>
-              <div className="break-all">数据目录：{env.versionsDir}</div>
-            </div>
-          </div>
-        </nav>
+        {/* 更新 / 运行时横幅 */}
+        {update && (
+          <UpdateBanner
+            status={update}
+            applying={updateApplying}
+            onDismiss={() => setUpdate(null)}
+            onOpenUrl={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
+            onApply={doApplyUpdate}
+          />
+        )}
+        {env && !env.node && (
+          <Alert
+            variant="destructive"
+            className={`shrink-0 animate-in gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px] fade-in slide-in-from-top-2 duration-300 ${runtimeJob ? "" : "pr-40"}`}
+          >
+            <XCircle />
+            {runtimeJob ? (
+              <>
+                <AlertTitle className="font-normal">
+                  正在安装内置 Node…
+                  {runtimeJob.total > 0 &&
+                    ` ${Math.round((runtimeJob.received / runtimeJob.total) * 100)}% (${(runtimeJob.received / 1048576).toFixed(1)}/${(runtimeJob.total / 1048576).toFixed(1)} MB)`}
+                </AlertTitle>
+                {runtimeJob.total > 0 && (
+                  <AlertDescription>
+                    <Progress
+                      value={(runtimeJob.received / runtimeJob.total) * 100}
+                      className="h-1.5 max-w-md bg-red-500/20"
+                    />
+                  </AlertDescription>
+                )}
+                <AlertDescription className="truncate font-mono text-[11px]">
+                  {runtimeJob.log[runtimeJob.log.length - 1] ?? "连接镜像站…"}
+                </AlertDescription>
+              </>
+            ) : (
+              <>
+                <AlertTitle className="font-normal">未检测到 Node.js（dsh 依赖 Node 运行）</AlertTitle>
+                <AlertDescription>
+                  可一键安装启动器内置 Node LTS（用户级、无需 root，默认走 npmmirror 镜像）
+                </AlertDescription>
+                <AlertAction>
+                  <Button size="sm" onClick={doInstallRuntime}>一键安装 Node</Button>
+                </AlertAction>
+              </>
+            )}
+          </Alert>
+        )}
 
-        {/* 内容区（key 随视图变化：切换时重新挂载并播放入场动画） */}
-        <main
+        {/* 内容区（key 随视图变化：切换时重新挂载并播放入场动画）
+            超窄窗口收紧内边距，把横向空间尽量留给表格与表单 */}
+        <div
           key={view}
-          className="min-w-0 flex-1 animate-in fade-in slide-in-from-bottom-2 overflow-y-auto p-5 duration-200"
+          className="min-h-0 flex-1 animate-in fade-in slide-in-from-bottom-2 overflow-y-auto p-3 duration-200 sm:p-4 lg:p-5"
         >
           {view === "versions" && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+              {/* 两张总览卡片：窄窗口单列堆叠，宽窗口并排 */}
+              <div className="grid gap-3 lg:grid-cols-2">
                 <Card className="p-4">
                   <div className="eyebrow mb-2.5">① Node 环境 —— 系统级 / 隔离级可切换</div>
                   <Tabs
@@ -1136,7 +1138,8 @@ export default function App() {
                         open={expanded}
                         onOpenChange={(o) => setExpandedProfiles((m) => ({ ...m, [row.profile]: o }))}
                       >
-                        <div className="flex flex-row items-center gap-3 p-3">
+                        {/* 窄窗口：状态块独占一行，操作按钮整排换到第二行（否则会被卡片裁掉） */}
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 p-3">
                           {row.phase === "starting" ? (
                             <Loader2 className="h-4 w-4 shrink-0 animate-spin text-amber-500" />
                           ) : row.phase === "ready" ? (
@@ -1146,7 +1149,7 @@ export default function App() {
                           ) : (
                             <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${row.phase === "external" ? "bg-sky-500" : "bg-muted-foreground/30"}`} />
                           )}
-                          <div className="min-w-0 flex-1">
+                          <div className="min-w-0 grow basis-[calc(100%-1.75rem)] xl:basis-0">
                             <div className="flex items-center gap-1.5">
                               <span className="font-mono text-[13px] font-semibold">
                                 {row.profile || (row.port != null ? `:${row.port}` : "（未命名实例）")}
@@ -1332,8 +1335,15 @@ export default function App() {
           {view === "models" && <ModelConfigView onToast={addToast} />}
           {view === "config" && <ConfigView onToast={addToast} />}
           {view === "credentials" && <CredentialsView onToast={addToast} />}
-        </main>
-      </div>
+        </div>
+
+        {/* 状态栏：窄窗口只留官方源，其余按断点逐级收起 */}
+        <footer className="flex h-7 shrink-0 items-center gap-4 border-t border-border bg-card px-3 text-[11px] text-muted-foreground lg:px-4">
+          <span className="truncate">官方源 {env.registry}</span>
+          <span className="hidden truncate font-mono lg:inline" title={env.dshHome}>{env.dshHome}</span>
+          <span className="ml-auto hidden shrink-0 xl:inline">退出启动器会结束所有内嵌 dsh 进程；关闭窗口最小化到托盘</span>
+        </footer>
+      </SidebarInset>
 
       <ProcessSidePanel
         procs={panelProcs}
@@ -1360,12 +1370,6 @@ export default function App() {
           setActiveProc((a) => (a != null && next[a] ? a : (Object.values(next)[0]?.id ?? null)));
         }}
       />
-
-      <footer className="flex h-7 shrink-0 items-center gap-4 border-t border-border bg-card px-4 text-[11px] text-muted-foreground">
-        <span>官方源 {env.registry}</span>
-        <span className="font-mono">{env.dshHome}</span>
-        <span className="ml-auto">退出启动器会结束所有内嵌 dsh 进程；关闭窗口最小化到托盘</span>
-      </footer>
 
       <SettingsDrawer
         open={showSettings}
@@ -1457,7 +1461,7 @@ export default function App() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
+    </SidebarProvider>
   );
 }
 

@@ -36,7 +36,9 @@
   --chart-3: #1f2a24;
   --chart-4: #dbe3d7;
   --chart-5: #16a34a;
-  --sidebar: #fbf7ef;
+  /* 侧栏（shadcn Sidebar）：比奶油页底略亮一档的实色面板，
+     与卡片同属暖白族但不必和 background 同色（否则只剩一条分隔线） */
+  --sidebar: #fdfbf6;
   --sidebar-foreground: #1f2a24;
   --sidebar-primary: #2f8f46;
   --sidebar-primary-foreground: #ffffff;
