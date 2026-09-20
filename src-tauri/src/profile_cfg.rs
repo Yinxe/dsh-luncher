@@ -1833,6 +1833,7 @@ mod tests {
     /// 更新检测必须直接给出「私有仓库不支持」，既不能挂起也不能弹登录。
     #[test]
     fn private_clone_source_is_rejected() {
+        let _net = crate::util::NET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("dsh-upd-priv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);

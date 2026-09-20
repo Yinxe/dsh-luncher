@@ -16,6 +16,7 @@ import type {
   ProfileDetail,
   PackageSearchItem,
   PluginUpdateInfo,
+  ChannelProbe,
   GitHubRepoInfo,
   GitHubRateLimit,
   PluginCandidate,
@@ -141,7 +142,8 @@ export const api = {
     invoke<string>("restore_deleted_profile", { dirName }),
   purgeDeletedProfile: (dirName: string) =>
     invoke<void>("purge_deleted_profile", { dirName }),
-  /** 生成恢复模式 profile：基于官方 web 复制，只留官方插件，换成邻近空闲端口 */
+  /** 生成恢复模式 profile：dsh 用 `--from-default-profile web` 从随附模板新建，
+   *  再写入端口等快捷配置（不复制当前的 web profile） */
   createRecoveryProfile: () =>
     invoke<{ name: string; port: number }>("create_recovery_profile"),
   searchPackages: (query: string) =>
@@ -152,6 +154,8 @@ export const api = {
     invoke<GitHubRepoInfo>("fetch_github_repo", { repo }),
   /** 当前 GitHub API 额度（元数据增强用；探测与更新检测走免额度通道） */
   getGithubRateLimit: () => invoke<GitHubRateLimit>("get_github_rate_limit"),
+  /** 通道自检：并发探测 refs / jsDelivr / raw / api 的可达性与延迟 */
+  checkChannels: () => invoke<ChannelProbe[]>("check_channels"),
   readGlobalConfig: () => invoke<string>("read_global_config"),
   writeGlobalConfig: (content: string) => invoke<void>("write_global_config", { content }),
   getModelConfig: () => invoke<ModelConfigInfo>("get_model_config"),

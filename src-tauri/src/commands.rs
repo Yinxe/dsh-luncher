@@ -916,6 +916,15 @@ pub async fn fetch_github_repo(
     crate::registry::fetch_github_repo(&repo, token.as_deref()).await
 }
 
+/// 通道自检：并发探测 github.com refs / jsDelivr / raw / api.github.com 四条通道的
+/// 可达性与延迟（这台机器到 github.com 是间歇性不可达，有了这个能一眼看出当时哪条通）
+#[tauri::command]
+pub async fn check_channels(state: State<'_, AppState>) -> Result<Vec<crate::registry::ChannelProbe>, String> {
+    let token = state.settings.lock().unwrap().github_token.clone();
+    let token = crate::registry::github_token(Some(&token));
+    Ok(crate::registry::check_channels(token.as_deref()).await)
+}
+
 /// 当前 GitHub API 额度（探测/更新检测已走免额度通道，这里只用于展示元数据额度）
 #[tauri::command]
 pub fn get_github_rate_limit() -> crate::registry::GitHubRateLimit {

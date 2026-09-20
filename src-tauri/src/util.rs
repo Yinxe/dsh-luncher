@@ -15,6 +15,12 @@ pub struct NpmInvocation {
 #[cfg(test)]
 pub(crate) static DSH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 通道健康度 / 探测延迟 / API 额度都是**进程级 static**，而网络用例本身又会写它们。
+/// 凡是会发网络请求或读这些状态的测试都拿这把锁串行执行，否则用例之间会互相污染
+/// （一个用例把某条通道熔断，另一个用例的探测就换了通道）。
+#[cfg(test)]
+pub(crate) static NET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn home_dir() -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var("USERPROFILE").ok().map(PathBuf::from)

@@ -87,6 +87,7 @@ pub fn run() {
             commands::search_registry_packages,
             commands::fetch_github_repo,
             commands::get_github_rate_limit,
+            commands::check_channels,
             commands::check_plugin_updates,
             commands::read_global_config,
             commands::write_global_config,

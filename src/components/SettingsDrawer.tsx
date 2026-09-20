@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FolderOpen } from "lucide-react";
+import { Activity, FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Sheet, SheetClose, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle,
@@ -7,11 +7,12 @@ import {
 import {
   Field, FieldDescription, FieldLabel,
 } from "@/components/ui/field";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { api } from "../api";
-import type { EnvironmentInfo, GitHubRateLimit, Settings } from "../types";
+import type { ChannelProbe, EnvironmentInfo, GitHubRateLimit, Settings } from "../types";
 
 interface Props {
   open: boolean;
@@ -46,9 +47,30 @@ function SwitchRow({
 }
 
 /** 设置侧边抽屉：分区展示；ESC / 遮罩点击关闭 */
+/** 通道内部名 → 展示名 */
+const CHANNEL_LABEL: Record<string, string> = {
+  "github-refs": "github.com",
+  jsdelivr: "jsDelivr",
+  raw: "raw.gh",
+  "github-api": "api.github",
+};
+
 export default function SettingsDrawer({ open, initial, env, onSave, onClose, onReveal }: Props) {
   const [draft, setDraft] = useState<Settings>(initial);
   const [rate, setRate] = useState<GitHubRateLimit | null>(null);
+  const [probes, setProbes] = useState<ChannelProbe[] | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const runCheck = async () => {
+    setChecking(true);
+    try {
+      setProbes(await api.checkChannels());
+    } catch {
+      setProbes(null);
+    } finally {
+      setChecking(false);
+    }
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -115,6 +137,43 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
                   仓库探测与更新检测走 jsDelivr / git 免额度通道，<strong>不填也能正常用</strong>；
                   也可用 GITHUB_TOKEN / GH_TOKEN 环境变量代替。{rlText}
                 </span>
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel>通道自检</FieldLabel>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={checking}
+                  onClick={() => void runCheck()}
+                >
+                  <Activity /> {checking ? "探测中…" : "检测各通道"}
+                </Button>
+                <span className="text-[10.5px] text-muted-foreground">
+                  并发探测 github.com / jsDelivr / raw / api，看当时哪条通、多快
+                </span>
+              </div>
+              {probes && (
+                <div className="mt-1.5 space-y-1">
+                  {probes.map((p) => (
+                    <div key={p.name} className="flex items-center gap-2 text-[11px]">
+                      <span className="w-[104px] shrink-0 font-mono">{CHANNEL_LABEL[p.name] ?? p.name}</span>
+                      <Badge variant={p.ok ? "success" : "destructive"}>
+                        {p.ok ? "可用" : "不可用"}
+                      </Badge>
+                      <span className="font-mono text-muted-foreground">{p.ms}ms</span>
+                      <span className="min-w-0 flex-1 truncate text-muted-foreground" title={p.detail ?? ""}>
+                        {p.detail ?? ""}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <FieldDescription>
+                探测与更新检测优先走<strong>免额度</strong>通道（github.com refs / jsDelivr），
+                连续失败的通道会被临时跳过 5 分钟，避免每次都白等一个超时；api 只用于元数据。
               </FieldDescription>
             </Field>
             <Field>

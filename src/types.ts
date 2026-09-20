@@ -78,6 +78,16 @@ export interface Settings {
   githubToken: string;
 }
 
+/** 一条免额度/受限通道的自检结果 */
+export interface ChannelProbe {
+  /** github-refs | jsdelivr | raw | github-api */
+  name: string;
+  ok: boolean;
+  /** 往返毫秒 */
+  ms: number;
+  detail: string | null;
+}
+
 /** GitHub API 额度状态（探测/更新检测走免额度通道，这里只反映元数据额度） */
 export interface GitHubRateLimit {
   limit: number | null;

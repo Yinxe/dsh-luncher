@@ -422,11 +422,372 @@ mod glob_tests {
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
+    // 30s：只给"值得等"的调用（registry packument、元数据）用
+    client_with(Duration::from_secs(30)).map_err(|e| format!("初始化 HTTP 客户端失败: {e}"))
+}
+
+fn client_with(timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(timeout)
         .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("初始化 HTTP 客户端失败: {e}"))
+}
+
+/// github.com 的 git 智能 HTTP：**必须短超时**。
+///
+/// 本机实测该域名间歇性挂起（同一分钟内一次 0.5s、一次 40s 无响应），
+/// 而这条通道只是"免额度优先"的一档，失败要立刻让位给 API/CDN，
+/// 不能把 30s 的超时压在下游每一次提交比对、每一次探测前面。
+fn refs_client() -> reqwest::Client {
+    client_with(Duration::from_secs(6)).unwrap_or_default()
+}
+
+/// 免额度 CDN / 探测用：12s，比内容抓取宽松一点（树可能较大）
+fn probe_client() -> reqwest::Client {
+    client_with(Duration::from_secs(12)).unwrap_or_default()
+}
+
+// ── 通道健康度 / 熔断 ───────────────────────────────────────
+//
+// 这台机器到 github.com 是**间歇性不可达**（实测同一分钟内一次 0.5s、一次 40s 超时）。
+// 每次操作都去撞一遍会很难受，所以给每条免额度通道记连续失败次数：
+// 连续失败到阈值就**短暂停用**该通道，让调用方直接走下一档，避免每次都白等一个超时。
+// 计时到点自动恢复（半开），任何一个成功都会把计数清零。
+//
+// 注意这是**本地进程内的启发式**，不是把某个域名永久拉黑：窗口只有几分钟。
+
+#[derive(Clone, Copy)]
+struct ChannelState {
+    failures: u32,
+    disable_until: Option<Instant>,
+    /// 最近一次成功的往返毫秒（EWMA），用于"按实测选更快的通道"。
+    /// 本机实测 api 0.6s、jsDelivr 5~9s、github.com/raw 直接超时——
+    /// 固定顺序在这种网络上一定是错的。
+    latency_ms: Option<u64>,
+}
+
+impl Default for ChannelState {
+    fn default() -> Self {
+        ChannelState {
+            failures: 0,
+            disable_until: None,
+            latency_ms: None,
+        }
+    }
+}
+
+/// 连续失败到 2 次就停用；窗口 5 分钟后自动半开重试
+const CHANNEL_FAIL_THRESHOLD: u32 = 2;
+const CHANNEL_DISABLE_SECS: u64 = 300;
+
+static CHANNELS: Mutex<Option<std::collections::HashMap<&'static str, ChannelState>>> =
+    Mutex::new(None);
+
+/// 通道名（同时用于自检展示）
+pub const CH_REF: &str = "github-refs"; // github.com 的 git 智能 HTTP（免额度）
+pub const CH_JSDELIVR: &str = "jsdelivr"; // data.jsdelivr.com + cdn.jsdelivr.net（免额度）
+pub const CH_RAW: &str = "raw"; // raw.githubusercontent.com（免额度，兜底）
+pub const CH_API: &str = "github-api"; // api.github.com（额度受限）
+
+fn with_channels<R>(f: impl FnOnce(&mut std::collections::HashMap<&'static str, ChannelState>) -> R) -> R {
+    let mut guard = CHANNELS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(Default::default);
+    f(map)
+}
+
+/// 该通道当前是否可用（熔断窗口内的直接判为不可用）
+pub fn channel_available(name: &'static str) -> bool {
+    with_channels(|m| {
+        let st = m.entry(name).or_default();
+        match st.disable_until {
+            Some(until) if Instant::now() < until => false,
+            Some(_) => {
+                // 窗口到期：半开，清零后允许再试
+                st.disable_until = None;
+                st.failures = 0;
+                true
+            }
+            None => true,
+        }
+    })
+}
+
+/// 记一次通道结果
+pub fn note_channel(name: &'static str, ok: bool) {
+    note_channel_ms(name, ok, None);
+}
+
+/// 记一次通道结果（带耗时，供"按实测延迟挑通道"）
+pub fn note_channel_ms(name: &'static str, ok: bool, ms: Option<u64>) {
+    with_channels(|m| {
+        let st = m.entry(name).or_default();
+        if ok {
+            st.failures = 0;
+            st.disable_until = None;
+            if let Some(v) = ms {
+                // EWMA：新值权重 0.4，避免单次抖动就把顺序翻过来
+                st.latency_ms = Some(match st.latency_ms {
+                    Some(old) => (old * 3 + v * 2) / 5,
+                    None => v,
+                });
+            }
+        } else {
+            st.failures += 1;
+            if st.failures >= CHANNEL_FAIL_THRESHOLD {
+                st.disable_until = Some(Instant::now() + Duration::from_secs(CHANNEL_DISABLE_SECS));
+            }
+        }
+    });
+}
+
+/// 该通道最近的成功往返毫秒（没有记录返回 None）
+pub fn channel_latency(name: &'static str) -> Option<u64> {
+    with_channels(|m| m.get(name).and_then(|st| st.latency_ms))
+}
+
+/// 文件树该先问哪条通道（**纯函数**，便于离线测试，也避免测试之间互相污染）。
+/// 规则：jsDelivr 不可用 → 只能 api；api 额度用尽 → 只能 jsDelivr；
+/// 两条都有实测延迟且 api 快一倍以上 → api 先；否则**免额度优先**（jsDelivr 先）。
+fn choose_tree_order(
+    jsd_available: bool,
+    api_ready: bool,
+    jsd_ms: Option<u64>,
+    api_ms: Option<u64>,
+) -> Vec<&'static str> {
+    if !jsd_available {
+        return vec![CH_API];
+    }
+    if !api_ready {
+        return vec![CH_JSDELIVR];
+    }
+    match (jsd_ms, api_ms) {
+        (Some(j), Some(a)) if a * 2 < j => vec![CH_API, CH_JSDELIVR],
+        _ => vec![CH_JSDELIVR, CH_API],
+    }
+}
+
+/// 读当前通道状态后套用上面的规则
+fn tree_channel_order(api_ready: bool) -> Vec<&'static str> {
+    choose_tree_order(
+        channel_available(CH_JSDELIVR),
+        api_ready,
+        channel_latency(CH_JSDELIVR),
+        channel_latency(CH_API),
+    )
+}
+
+/// 手动清空所有通道的熔断状态（自检按钮会调用：用户想知道"现在还行不行"）
+pub fn reset_channels() {
+    with_channels(|m| m.clear());
+}
+
+// ── 单次通道探测（自检 + 熔断共用） ─────────────────────────
+
+/// 一次通道探测结果
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelProbe {
+    /// github-refs | jsdelivr | raw | github-api
+    pub name: String,
+    pub ok: bool,
+    /// 往返毫秒（失败时是耗时到超时/报错的毫秒数）
+    pub ms: u64,
+    pub detail: Option<String>,
+}
+
+fn elapsed_ms(t: Instant) -> u64 {
+    t.elapsed().as_millis() as u64
+}
+
+/// 探测 github.com 的 git 智能 HTTP（免额度通道：refs）
+pub async fn probe_channel_refs(owner: &str, repo: &str) -> ChannelProbe {
+    let t = Instant::now();
+    let client = refs_client();
+    let url = format!("https://github.com/{owner}/{repo}.git/info/refs?service=git-upload-pack");
+    match client
+        .get(&url)
+        .header("Accept", "application/x-git-upload-pack-advertisement")
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {
+            let body = r.text().await.unwrap_or_default();
+            let refs = parse_upload_pack_refs(&body);
+            let ok = !refs.is_empty();
+            note_channel(CH_REF, ok);
+            ChannelProbe {
+                name: CH_REF.into(),
+                ok,
+                ms: elapsed_ms(t),
+                detail: Some(format!("{} 个 ref", refs.len())),
+            }
+        }
+        Ok(r) => {
+            note_channel(CH_REF, false);
+            ChannelProbe {
+                name: CH_REF.into(),
+                ok: false,
+                ms: elapsed_ms(t),
+                detail: Some(format!("HTTP {}", r.status().as_u16())),
+            }
+        }
+        Err(e) => {
+            note_channel(CH_REF, false);
+            ChannelProbe {
+                name: CH_REF.into(),
+                ok: false,
+                ms: elapsed_ms(t),
+                detail: Some(short_err(&e.to_string())),
+            }
+        }
+    }
+}
+
+/// 探测 jsDelivr（data API 取树 + CDN 取文件）
+pub async fn probe_channel_jsdelivr(owner: &str, repo: &str, rev: &str, file: &str) -> ChannelProbe {
+    let t = Instant::now();
+    let client = probe_client();
+    let mut detail: Vec<String> = Vec::new();
+    let mut ok = false;
+    let data = format!("https://data.jsdelivr.com/v1/packages/gh/{owner}/{repo}@{rev}?structure=flat");
+    match client.get(&data).send().await {
+        Ok(r) if r.status().is_success() => {
+            let n = r
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("files").and_then(|f| f.as_array()).map(|a| a.len()))
+                .unwrap_or(0);
+            ok = n > 0;
+            detail.push(format!("树 {n} 条"));
+        }
+        Ok(r) => detail.push(format!("树 HTTP {}", r.status().as_u16())),
+        Err(e) => detail.push(format!("树 {}", short_err(&e.to_string()))),
+    }
+    let cdn = format!("https://cdn.jsdelivr.net/gh/{owner}/{repo}@{rev}/{file}");
+    match client.get(&cdn).send().await {
+        Ok(r) if r.status().is_success() => {
+            ok = true;
+            detail.push("CDN 200".into());
+        }
+        Ok(r) => detail.push(format!("CDN HTTP {}", r.status().as_u16())),
+        Err(e) => detail.push(format!("CDN {}", short_err(&e.to_string()))),
+    }
+    note_channel(CH_JSDELIVR, ok);
+    ChannelProbe {
+        name: CH_JSDELIVR.into(),
+        ok,
+        ms: elapsed_ms(t),
+        detail: Some(detail.join(" · ")),
+    }
+}
+
+/// 探测 raw.githubusercontent.com（内容兜底通道）
+pub async fn probe_channel_raw(owner: &str, repo: &str, rev: &str, file: &str) -> ChannelProbe {
+    let t = Instant::now();
+    let client = probe_client();
+    let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/{rev}/{file}");
+    match client.get(&url).send().await {
+        Ok(r) => {
+            let ok = r.status().is_success();
+            note_channel(CH_RAW, ok);
+            ChannelProbe {
+                name: CH_RAW.into(),
+                ok,
+                ms: elapsed_ms(t),
+                detail: Some(format!("HTTP {}", r.status().as_u16())),
+            }
+        }
+        Err(e) => {
+            note_channel(CH_RAW, false);
+            ChannelProbe {
+                name: CH_RAW.into(),
+                ok: false,
+                ms: elapsed_ms(t),
+                detail: Some(short_err(&e.to_string())),
+            }
+        }
+    }
+}
+
+/// 探测 api.github.com（只用于元数据；顺带回传额度与是否带 token）
+pub async fn probe_channel_api(owner: &str, repo: &str, token: Option<&str>) -> ChannelProbe {
+    let t = Instant::now();
+    match api_get_json(&format!("https://api.github.com/repos/{owner}/{repo}"), token).await {
+        Ok((status, _)) => {
+            let ok = (200..300).contains(&status);
+            note_channel(CH_API, ok);
+            let rl = rate_limit();
+            ChannelProbe {
+                name: CH_API.into(),
+                ok,
+                ms: elapsed_ms(t),
+                detail: Some(format!(
+                    "HTTP {status} · 额度 {}/{}",
+                    rl.remaining.unwrap_or(0),
+                    rl.limit.unwrap_or(60)
+                )),
+            }
+        }
+        Err(e) => {
+            note_channel(CH_API, false);
+            ChannelProbe {
+                name: CH_API.into(),
+                ok: false,
+                ms: elapsed_ms(t),
+                detail: Some(short_err(&e.lines().next().unwrap_or(""))),
+            }
+        }
+    }
+}
+
+/// 一次完整的通道自检：四条通道**并发**探测，返回各自的可达性与延迟
+pub async fn check_channels(token: Option<&str>) -> Vec<ChannelProbe> {
+    reset_channels();
+    // 靶子用 GitHub 官方的测试仓库：体积极小、永远公开、默认分支是 master
+    // （顺带验证默认分支不等于 main 的场景）。不要用本项目的仓库——名字写错会
+    // 让四条通道一起 404，把"网络不通"和"仓库不存在"混在一起。
+    let (owner, repo) = ("octocat", "Hello-World");
+    let rev = "master";
+    // 先从树里挑一个**真实存在**的文件当靶子，避免 404 被误读成通道不通
+    let file = match jsdelivr_tree(owner, repo, rev).await {
+        Some((t, _)) => t.any_blob().unwrap_or_else(|| "package.json".into()),
+        None => "package.json".into(),
+    };
+    // 四条通道并发探测（spawn 后按序 await：全部已同时开跑，总耗时 ≈ 最慢那条）
+    let (o1, r1) = (owner.to_string(), repo.to_string());
+    let (o2, r2, v2) = (owner.to_string(), repo.to_string(), rev.to_string());
+    let (o3, r3, v3) = (owner.to_string(), repo.to_string(), rev.to_string());
+    let (o4, r4) = (owner.to_string(), repo.to_string());
+    let tok = token.map(str::to_string);
+    let h_refs = tauri::async_runtime::spawn(async move { probe_channel_refs(&o1, &r1).await });
+    let f2 = file.clone();
+    let h_jsd =
+        tauri::async_runtime::spawn(async move { probe_channel_jsdelivr(&o2, &r2, &v2, &f2).await });
+    let f3 = file.clone();
+    let h_raw =
+        tauri::async_runtime::spawn(async move { probe_channel_raw(&o3, &r3, &v3, &f3).await });
+    let h_api = tauri::async_runtime::spawn(async move {
+        probe_channel_api(&o4, &r4, tok.as_deref()).await
+    });
+    let mut out = Vec::new();
+    for h in [h_refs, h_jsd, h_raw, h_api] {
+        match h.await {
+            Ok(p) => out.push(p),
+            Err(e) => eprintln!("通道探测任务失败: {e}"),
+        }
+    }
+    out
+}
+
+fn short_err(s: &str) -> String {
+    let s = s.replace('\n', " ");
+    if s.chars().count() > 90 {
+        format!("{}…", s.chars().take(90).collect::<String>())
+    } else {
+        s
+    }
 }
 
 // ── GitHub REST 额度守卫 + 进程内缓存 ────────────────────────
@@ -574,6 +935,7 @@ fn api_budget_guard() -> Result<(), String> {
 /// 带额度守卫 + token 的 GitHub API GET，返回 (状态码, JSON)
 async fn api_get_json(url: &str, token: Option<&str>) -> Result<(u16, serde_json::Value), String> {
     api_budget_guard()?;
+    let t0 = Instant::now();
     let client = http_client()?;
     let etag_key = format!("etag:{url}");
     let body_key = format!("body:{url}");
@@ -607,6 +969,7 @@ async fn api_get_json(url: &str, token: Option<&str>) -> Result<(u16, serde_json
         return Err(rate_limit_message());
     }
     let text = resp.text().await.unwrap_or_default();
+    note_channel_ms(CH_API, (200..300).contains(&status), Some(t0.elapsed().as_millis() as u64));
     if (200..300).contains(&status) {
         if let Some(et) = &etag {
             cache_put(&etag_key, et);
@@ -656,6 +1019,12 @@ impl FileTree {
     pub fn is_empty(&self) -> bool {
         self.blobs.is_empty()
     }
+
+    /// 任取一个文件路径（自检时用它当靶子：拿真实存在的文件探测 CDN/raw，
+    /// 否则 404 会被误读成"通道不通"）
+    pub fn any_blob(&self) -> Option<String> {
+        self.blobs.iter().next().cloned()
+    }
 }
 
 /// jsDelivr data API：整棵文件树（免 GitHub 额度；@sha 时结果不可变、@分支时按 CDN 缓存）
@@ -664,6 +1033,10 @@ async fn jsdelivr_tree(
     repo: &str,
     rev: &str,
 ) -> Option<(FileTree, Option<String>)> {
+    if !channel_available(CH_JSDELIVR) {
+        return None;
+    }
+    let t0 = Instant::now();
     let key = format!("jsd-tree:{owner}/{repo}@{rev}");
     if let Some(hit) = cache_get(&key, Duration::from_secs(600)) {
         // 缓存值 = default_branch 一行 + 路径行
@@ -672,11 +1045,12 @@ async fn jsdelivr_tree(
         let paths: Vec<String> = lines.map(|s| s.to_string()).collect();
         return Some((FileTree::from_paths(paths), default));
     }
-    let client = http_client().ok()?;
+    let client = probe_client();
     let url =
         format!("https://data.jsdelivr.com/v1/packages/gh/{owner}/{repo}@{rev}?structure=flat");
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
+        note_channel(CH_JSDELIVR, false);
         return None;
     }
     let json: serde_json::Value = resp.json().await.ok()?;
@@ -701,6 +1075,7 @@ async fn jsdelivr_tree(
         cached.push('\n');
         cached.push_str(p);
     }
+    note_channel_ms(CH_JSDELIVR, true, Some(t0.elapsed().as_millis() as u64));
     cache_put(&key, &cached);
     Some((FileTree::from_paths(paths), default))
 }
@@ -712,19 +1087,28 @@ async fn fetch_file(client: &reqwest::Client, owner: &str, repo: &str, rev: &str
         return Some(hit);
     }
     let path = path.trim_start_matches('/');
-    let cdn = format!("https://cdn.jsdelivr.net/gh/{owner}/{repo}@{rev}/{path}");
-    // jsDelivr 会对并发突发限流（返回 429/空体），退避后重试一次再换源
-    for attempt in 0..2 {
-        if attempt > 0 {
-            std::thread::sleep(Duration::from_millis(500));
+    // 熔断期间直接跳过不可用通道，别让每个文件都白等一个超时
+    if channel_available(CH_JSDELIVR) {
+        let cdn = format!("https://cdn.jsdelivr.net/gh/{owner}/{repo}@{rev}/{path}");
+        // jsDelivr 会对并发突发限流（返回 429/空体），退避后重试一次再换源
+        for attempt in 0..2 {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            if let Some(t) = get_text(client, &cdn, None, None).await {
+                note_channel(CH_JSDELIVR, true);
+                cache_put(&key, &t);
+                return Some(t);
+            }
         }
-        if let Some(t) = get_text(client, &cdn, None, None).await {
-            cache_put(&key, &t);
-            return Some(t);
-        }
+        note_channel(CH_JSDELIVR, false);
+    }
+    if !channel_available(CH_RAW) {
+        return None;
     }
     let raw = format!("https://raw.githubusercontent.com/{owner}/{repo}/{rev}/{path}");
     let t = get_text(client, &raw, None, None).await;
+    note_channel(CH_RAW, t.is_some());
     if let Some(t) = &t {
         cache_put(&key, t);
     }
@@ -1044,9 +1428,11 @@ pub async fn discover_refs(owner: &str, repo: &str, token: Option<&str>) -> Remo
             }
         }
     }
-    let Ok(client) = http_client() else {
-        return RemoteRefs::Unknown("初始化 HTTP 客户端失败".into());
-    };
+    if !channel_available(CH_REF) {
+        return RemoteRefs::Unknown("github.com 近期不可达（已临时跳过该通道）".into());
+    }
+    let t0 = Instant::now();
+    let client = refs_client();
     let url = format!("{}/info/refs?service=git-upload-pack", git_base(owner, repo));
     let mut req = client
         .get(&url)
@@ -1056,24 +1442,35 @@ pub async fn discover_refs(owner: &str, repo: &str, token: Option<&str>) -> Remo
     }
     let resp = match req.send().await {
         Ok(r) => r,
-        Err(e) => return RemoteRefs::Unknown(format!("访问 github.com 失败: {e}")),
+        Err(e) => {
+            note_channel(CH_REF, false);
+            return RemoteRefs::Unknown(format!("访问 github.com 失败: {e}"));
+        }
     };
     let status = resp.status().as_u16();
     if status == 401 || status == 403 || status == 404 {
+        // 能明确答复（要凭据/不存在）说明通道是通的
+        note_channel_ms(CH_REF, true, Some(t0.elapsed().as_millis() as u64));
         cache_put(&key, "401");
         return RemoteRefs::NotPublic;
     }
     if !(200..300).contains(&status) {
+        note_channel(CH_REF, false);
         return RemoteRefs::Unknown(format!("github.com 返回 {status}"));
     }
     let body = match resp.text().await {
         Ok(b) => b,
-        Err(e) => return RemoteRefs::Unknown(format!("读取 refs 失败: {e}")),
+        Err(e) => {
+            note_channel(CH_REF, false);
+            return RemoteRefs::Unknown(format!("读取 refs 失败: {e}"));
+        }
     };
     let refs = parse_upload_pack_refs(&body);
     if refs.is_empty() {
+        note_channel(CH_REF, false);
         return RemoteRefs::Unknown("refs 响应为空".into());
     }
+    note_channel_ms(CH_REF, true, Some(t0.elapsed().as_millis() as u64));
     cache_put(&key, &body);
     RemoteRefs::Refs(refs)
 }
@@ -1106,10 +1503,10 @@ pub fn ref_sha(refs: &[(String, String)], git_ref: Option<&str>) -> Option<Strin
 
 /// 查询 GitHub 仓库某 ref（缺省默认分支）的最新提交 SHA（不可匿名访问返回 None）。
 ///
-/// 通道顺序（都要快，任何一条都不该让调用方等超过 ~6s）：
-/// 1. 自实现 git 智能 HTTP 的 ref 发现（~0.5s，免额度，不依赖 git 二进制）；
-/// 2. `api.github.com/commits`（额度守卫，结果混用也会被 60s 缓存吸收）；
-/// 3. `git ls-remote`（6s 上限，仅当前两者都不可用时兜底）。
+/// 通道顺序是**自适应**的，因为这台机器到 github.com 间歇性挂起：
+/// - 带 token（额度 5000/小时）或额度仍充裕 → 先走 API（0.5s 级）；
+/// - 否则先走免额度的 git 智能 HTTP refs 发现（同样 0.5s 级，但不吃额度）；
+/// - 任一条被熔断（连续失败 2 次，5 分钟窗口）就跳过它，最后才是 6s 上限的 git 二进制兜底。
 pub async fn github_head_commit(
     owner: &str,
     repo: &str,
@@ -1125,47 +1522,74 @@ pub async fn github_head_commit(
     if let Some(hit) = cache_get(&key, Duration::from_secs(60)) {
         return Ok(if hit == "-" { None } else { Some(hit) });
     }
-    // ① 自实现 ref 发现
-    match discover_refs(owner, repo, token).await {
-        RemoteRefs::Refs(refs) => {
-            let sha = ref_sha(&refs, git_ref);
-            if let Some(s) = &sha {
-                cache_put(&key, s);
-                return Ok(Some(s.clone()));
-            }
-            // refs 拿到了但没有匹配的 ref（例如传了不存在的分支）
-            return Ok(None);
-        }
-        RemoteRefs::NotPublic => {
-            cache_put(&key, "-");
-            return Ok(None);
-        }
-        RemoteRefs::Unknown(_) => {}
+
+    let api_ready = !rate_limit().exhausted;
+    let refs_ready = channel_available(CH_REF);
+    let mut order: Vec<u8> = Vec::new();
+    if token.is_some() && api_ready {
+        order.push(2);
     }
-    // ② REST API
-    let api = match git_ref {
-        Some(r) => format!("https://api.github.com/repos/{owner}/{repo}/commits/{r}"),
-        None => format!("https://api.github.com/repos/{owner}/{repo}/commits?per_page=1"),
-    };
-    if let Ok((status, json)) = api_get_json(&api, token).await {
-        if status == 404 {
-            return Ok(None);
-        }
-        if (200..300).contains(&status) {
-            let sha = match &json {
-                serde_json::Value::Array(arr) => arr
-                    .first()
-                    .and_then(|c| c.get("sha"))
-                    .and_then(|v| v.as_str()),
-                obj => obj.get("sha").and_then(|v| v.as_str()),
+    if refs_ready {
+        order.push(1);
+    }
+    if api_ready && !order.contains(&2) {
+        order.push(2);
+    }
+    if order.is_empty() {
+        // 全被熔断：仍各试一次（熔断窗口到点会半开）
+        order = vec![1, 2];
+    }
+
+    let mut last_err: Option<String> = None;
+    for step in order {
+        if step == 1 {
+            match discover_refs(owner, repo, token).await {
+                RemoteRefs::Refs(refs) => {
+                    return match ref_sha(&refs, git_ref) {
+                        Some(s) => {
+                            cache_put(&key, &s);
+                            Ok(Some(s))
+                        }
+                        // refs 拿到了但没有匹配的 ref（例如传了不存在的分支）
+                        None => Ok(None),
+                    };
+                }
+                RemoteRefs::NotPublic => {
+                    cache_put(&key, "-");
+                    return Ok(None);
+                }
+                RemoteRefs::Unknown(e) => last_err = Some(e),
+            }
+        } else {
+            let api = match git_ref {
+                Some(r) => format!("https://api.github.com/repos/{owner}/{repo}/commits/{r}"),
+                None => format!("https://api.github.com/repos/{owner}/{repo}/commits?per_page=1"),
             };
-            if let Some(s) = sha {
-                cache_put(&key, s);
+            match api_get_json(&api, token).await {
+                Ok((404, _)) => {
+                    cache_put(&key, "-");
+                    return Ok(None);
+                }
+                Ok((status, json)) if (200..300).contains(&status) => {
+                    let sha = match &json {
+                        serde_json::Value::Array(arr) => arr
+                            .first()
+                            .and_then(|c| c.get("sha"))
+                            .and_then(|v| v.as_str()),
+                        obj => obj.get("sha").and_then(|v| v.as_str()),
+                    };
+                    if let Some(s) = sha {
+                        cache_put(&key, s);
+                    }
+                    return Ok(sha.map(String::from));
+                }
+                Ok((status, _)) => last_err = Some(format!("GitHub API 返回 {status}")),
+                Err(e) => last_err = Some(e),
             }
-            return Ok(sha.map(String::from));
         }
     }
-    // ③ git 二进制兜底（6s 上限）
+
+    // 兜底：git 二进制（6s 上限，见 git_remote_head 的注释）
     let url = format!("https://github.com/{owner}/{repo}.git");
     match crate::plugin::git_remote_head(&url, git_ref) {
         Ok(sha) => {
@@ -1177,7 +1601,9 @@ pub async fn github_head_commit(
             {
                 Ok(None)
             } else {
-                Err(format!("无法读取远端提交：{}", e.lines().next().unwrap_or("")))
+                Err(last_err.unwrap_or_else(|| {
+                    format!("无法读取远端提交：{}", e.lines().next().unwrap_or(""))
+                }))
             }
         }
     }
@@ -1314,75 +1740,92 @@ pub async fn fetch_github_repo(
     let (owner, repo) = (spec.owner.clone(), spec.repo.clone());
     let content = content_client();
 
-    // ── ① 解析 ref / HEAD sha（免额度） ──
-    let head = github_head_commit(&owner, &repo, spec.git_ref.as_deref(), token).await;
-    let (head_sha, head_known) = match head {
-        Ok(Some(s)) => (Some(s), true),
-        Ok(None) => (None, true),
-        Err(_) => (None, false),
-    };
-
-    // ── ② 文件树：jsDelivr(sha) → jsDelivr(ref) → API → contents ──
-    let mut probe = String::from("jsdelivr");
-    let mut default_branch: Option<String> = None;
-    let mut tree: Option<FileTree> = None;
-    // 先用用户指定的 ref 或 HEAD sha（两者都拿不到时再试 main / master）
-    for cand in [spec.git_ref.clone(), head_sha.clone()].into_iter().flatten() {
-        if let Some((t, d)) = jsdelivr_tree(&owner, &repo, &cand).await {
-            default_branch = d.or(default_branch);
-            tree = Some(t);
-            break;
-        }
-    }
-    if tree.is_none() {
-        // 默认分支名可以从 jsDelivr 探一次（它自己的元数据），拿不到就试 main / master
-        for cand in ["main", "master"] {
-            if let Some((t, d)) = jsdelivr_tree(&owner, &repo, cand).await {
-                default_branch = d.or(Some(cand.to_string()));
-                tree = Some(t);
-                break;
-            }
-        }
-    }
-    if tree.is_none() {
-        if let Some(sha) = &head_sha {
-            if let Some((t, d)) = jsdelivr_tree(&owner, &repo, sha).await {
-                default_branch = d.or(default_branch);
-                tree = Some(t);
-            }
-        }
-    }
-    if tree.is_none() {
-        probe = "api".into();
-        if let Some(t) = fetch_tree_api(&owner, &repo, spec.git_ref.as_deref(), token).await {
-            tree = Some(t);
-        }
-    }
-
-    // ── ③ 元数据（额度用尽即降级，不影响探测结果） ──
+    // ── ① 元数据（最先做：快、可缓存，还直接给出默认分支名） ──
+    //
+    // 顺序刻意如此：这台机器到 github.com 间歇性挂起，而 api.github.com 稳定在 0.5s 级。
+    // 把"解析 HEAD sha"放到关键路径最前面，会让一个探测白等一个 6s 超时才能开始取树；
+    // 先拿元数据既便宜（额度守卫 + ETag + 60s 缓存），又顺手拿到 default_branch，
+    // 树就能直接按分支名取（jsDelivr 的稳定路径）。
     let mut meta_degraded = false;
     let mut meta = serde_json::Value::Null;
+    let mut default_branch: Option<String> = None;
     match api_get_json(&format!("https://api.github.com/repos/{owner}/{repo}"), token).await {
         Ok((status, json)) if (200..300).contains(&status) => {
             meta = json;
-            if default_branch.is_none() {
-                default_branch = meta
-                    .get("default_branch")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-            }
+            default_branch = meta
+                .get("default_branch")
+                .and_then(|v| v.as_str())
+                .map(String::from);
         }
-        Ok(_) => meta_degraded = true,
-        Err(_) => meta_degraded = true,
+        _ => meta_degraded = true,
     }
-    let git_ref = spec.git_ref.clone().or_else(|| default_branch.clone());
-    // 内容/树读取用的 rev：**优先分支名或标签**——jsDelivr 对 branch/tag 是稳定路径
-    // （实测 0.5~2s），而 github.com 与 commit 解析在本机会间歇性不可达，
-    // 走 sha 会把每个文件都拖到慢速兜底源上（一个探测 30s+）。
-    let rev = git_ref
-        .clone()
-        .or_else(|| head_sha.clone())
-        .unwrap_or_else(|| "main".into());
+    // 拿不到默认分支（额度用尽/不可用）时，退回免额度的 refs 发现
+    let mut head_sha: Option<String> = None;
+    let git_ref_for_tree = spec.git_ref.clone();
+    if default_branch.is_none() {
+        match github_head_commit(&owner, &repo, None, None).await {
+            Ok(Some(sha)) => {
+                head_sha = Some(sha);
+            }
+            _ => {}
+        }
+    }
+    let mut default_branch = default_branch.unwrap_or_else(|| "main".into());
+
+    // ── ② 文件树：jsDelivr(用户 ref) → jsDelivr(默认分支) → sha → main/master → API → contents ──
+    let mut probe = String::from("jsdelivr");
+    let mut tree: Option<FileTree> = None;
+    let mut rev_candidates: Vec<String> = Vec::new();
+    if let Some(r) = &git_ref_for_tree {
+        rev_candidates.push(r.clone());
+    }
+    rev_candidates.push(default_branch.clone());
+    for c in ["main", "master"] {
+        if !rev_candidates.iter().any(|x| x == c) {
+            rev_candidates.push(c.to_string());
+        }
+    }
+    if let Some(sha) = &head_sha {
+        rev_candidates.push(sha.clone());
+    }
+    let api_ready = !rate_limit().exhausted;
+    for channel in tree_channel_order(api_ready) {
+        if tree.is_some() {
+            break;
+        }
+        match channel {
+            CH_JSDELIVR => {
+                for cand in &rev_candidates {
+                    if let Some((t, d)) = jsdelivr_tree(&owner, &repo, cand).await {
+                        default_branch = d.filter(|d| !d.is_empty()).unwrap_or(default_branch);
+                        tree = Some(t);
+                        break;
+                    }
+                }
+            }
+            CH_API => {
+                let t1 = Instant::now();
+                let ref_for_api = git_ref_for_tree.as_deref().or(Some(default_branch.as_str()));
+                if let Some((t, truncated)) = fetch_tree_api(&owner, &repo, ref_for_api, token).await {
+                    note_channel_ms(CH_API, true, Some(t1.elapsed().as_millis() as u64));
+                    probe = if truncated { "api-truncated".into() } else { "api".into() };
+                    tree = Some(t);
+                }
+            }
+            _ => {}
+        }
+    }
+    if tree.is_none() {
+        let ref_for_api = git_ref_for_tree.as_deref().or(Some(default_branch.as_str()));
+        if let Some((t, truncated)) = fetch_tree_api(&owner, &repo, ref_for_api, token).await {
+            probe = if truncated { "api-truncated".into() } else { "api".into() };
+            tree = Some(t);
+        }
+    }
+
+    let git_ref = spec.git_ref.clone().or_else(|| Some(default_branch.clone()));
+    // 内容读取用的 rev：优先分支名/标签（jsDelivr 的稳定路径）
+    let rev = git_ref.clone().unwrap_or_else(|| default_branch.clone());
 
     if tree.is_none() {
         // ── ④ 彻底降级：单目录 contents 探测 ──
@@ -1412,7 +1855,7 @@ pub async fn fetch_github_repo(
             plugin_path: Some(target),
             lib_ok: lib_ok,
             git_ref,
-            default_branch,
+            default_branch: Some(default_branch.clone()),
             is_monorepo: false,
             workspace_globs: Vec::new(),
             candidates: vec![cand],
@@ -1472,7 +1915,8 @@ pub async fn fetch_github_repo(
         .collect();
     let fetched = fetch_files_concurrent(&owner, &repo, &rev, pkg_paths).await;
 
-    let mut facts_pending = false;
+    // API 树被截断时，候选列表可能不全 —— 如实标记，别让用户以为"仓库里就这些"
+    let mut facts_pending = probe == "api-truncated";
     let mut candidates: Vec<PluginCandidate> = Vec::new();
     for (dir, ws) in take {
         let pkg_path = if dir.is_empty() {
@@ -1526,7 +1970,6 @@ pub async fn fetch_github_repo(
     } else {
         first.install_spec.clone()
     };
-    let _ = head_known;
 
     Ok(GitHubRepoInfo {
         full_name: meta
@@ -1555,7 +1998,7 @@ pub async fn fetch_github_repo(
         plugin_path: Some(first.path.clone()),
         lib_ok: if candidates.is_empty() { None } else { Some(first.lib_ok) },
         git_ref,
-        default_branch,
+        default_branch: Some(default_branch.clone()),
         is_monorepo,
         workspace_globs,
         candidates,
@@ -1657,13 +2100,17 @@ fn is_js_file(p: &str) -> bool {
     p.ends_with(".js") || p.ends_with(".cjs") || p.ends_with(".mjs")
 }
 
-/// 兜底通道：GitHub REST 的文件树（额度守卫；jsDelivr 不可用时才走）
+/// 兜底通道：GitHub REST 的文件树（额度守卫；jsDelivr 不可用时才走）。
+///
+/// 注意 `truncated`：大仓库的文件树会被 API 截断（本仓库实测只剩 5 个 package.json，
+/// 而 jsDelivr 给 10 个）。返回 (树, 是否被截断)，调用方要把截断如实透给用户，
+/// 否则"候选变少"会被误当成"仓库里就这么几个插件"。
 async fn fetch_tree_api(
     owner: &str,
     repo: &str,
     git_ref: Option<&str>,
     token: Option<&str>,
-) -> Option<FileTree> {
+) -> Option<(FileTree, bool)> {
     let reference = git_ref.unwrap_or("HEAD");
     let url = format!("https://api.github.com/repos/{owner}/{repo}/git/trees/{reference}?recursive=1");
     let (status, json) = api_get_json(&url, token).await.ok()?;
@@ -1680,7 +2127,11 @@ async fn fetch_tree_api(
     if files.is_empty() {
         return None;
     }
-    Some(FileTree::from_paths(files))
+    let truncated = json
+        .get("truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some((FileTree::from_paths(files), truncated))
 }
 
 /// 带可选 query / Accept 的文本 GET（非 2xx 返回 None）
@@ -1890,6 +2341,67 @@ async fn check_lib_dir(
 mod tests {
     use super::*;
 
+
+    /// 通道熔断：连续失败到阈值就临时跳过，成功即清零，窗口到期半开
+    #[test]
+    fn channel_breaker_skips_flaky_channel_then_recovers() {
+        let _guard = crate::util::NET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_channels();
+        assert!(channel_available(CH_REF));
+        // 单次失败还不熔断（避免偶发抖动就禁用）
+        note_channel(CH_REF, false);
+        assert!(channel_available(CH_REF));
+        // 第二次连续失败 → 熔断
+        note_channel(CH_REF, false);
+        assert!(!channel_available(CH_REF), "连续两次失败后应临时跳过");
+        // 其它通道不受影响
+        assert!(channel_available(CH_JSDELIVR));
+        // 任意一次成功清零
+        note_channel(CH_REF, true);
+        assert!(channel_available(CH_REF));
+        // 手动重置（自检按钮会调用）
+        note_channel(CH_API, false);
+        note_channel(CH_API, false);
+        assert!(!channel_available(CH_API));
+        reset_channels();
+        assert!(channel_available(CH_API));
+    }
+
+    /// 按实测延迟挑树通道（纯函数，不碰全局状态，因此不受其它用例影响）
+    #[test]
+    fn tree_channel_prefers_faster_channel_by_measured_latency() {
+        // 还没实测过 → 免额度优先
+        assert_eq!(choose_tree_order(true, true, None, None), vec![CH_JSDELIVR, CH_API]);
+        // api 明显更快（0.6s vs 8s，就是本机现状）→ 先问 api
+        assert_eq!(
+            choose_tree_order(true, true, Some(8000), Some(600)),
+            vec![CH_API, CH_JSDELIVR]
+        );
+        // 只差一倍以内 → 仍免额度优先，避免来回横跳
+        assert_eq!(
+            choose_tree_order(true, true, Some(900), Some(600)),
+            vec![CH_JSDELIVR, CH_API]
+        );
+        // api 额度用尽 → 只剩免额度通道
+        assert_eq!(choose_tree_order(true, false, Some(8000), None), vec![CH_JSDELIVR]);
+        // jsDelivr 被熔断 → 改用 api
+        assert_eq!(choose_tree_order(false, true, None, None), vec![CH_API]);
+    }
+
+    /// 自检返回四条通道且结构完整（外网不可达时只断言形状，不要求 ok）
+    #[test]
+    fn check_channels_reports_all_four() {
+        let _guard = crate::util::NET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let probes = tauri::async_runtime::block_on(check_channels(None));
+        let names: Vec<&str> = probes.iter().map(|p| p.name.as_str()).collect();
+        for want in [CH_REF, CH_JSDELIVR, CH_RAW, CH_API] {
+            assert!(names.contains(&want), "缺少通道 {want}: {names:?}");
+        }
+        assert!(probes.iter().all(|p| p.ms < 60_000), "耗时字段异常: {probes:?}");
+        // 自检会把熔断状态清空重建，因此至少有一条免额度通道给出确定结论
+        println!("通道自检: {probes:?}");
+    }
+
     #[test]
     fn private_repo_message_guides_manual_clone() {
         let m = private_repo_reject("Yinxe", "dsh-qqbot");
@@ -1904,6 +2416,7 @@ mod tests {
     /// 需要外网（jsDelivr）；网络不可达时跳过，不视为失败。
     #[test]
     fn probe_works_without_api_quota() {
+        let _guard = crate::util::NET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let rl = rate_limit();
         println!("额度状态: {rl:?}");
         let info = match tauri::async_runtime::block_on(fetch_github_repo(
@@ -1933,7 +2446,13 @@ mod tests {
         }
         assert!(!info.candidates.is_empty(), "额度耗尽也应探到候选包");
         assert!(info.candidates.iter().any(|c| c.path == "plugins/token-meter"), "应含 token-meter");
-        assert_eq!(info.probe, "jsdelivr", "应走免额度通道");
+        // 树走哪条通道是**按实测延迟自适应**的（api 快一倍以上就用 api），
+        // 因此只要求"用了一条已知通道"，重点在候选与降级标记
+        assert!(
+            matches!(info.probe.as_str(), "jsdelivr" | "api" | "api-truncated"),
+            "未知探测通道: {}",
+            info.probe
+        );
         // 元数据只依赖 GitHub API：额度已知耗尽时必须标记降级且照常出候选
         if rl.exhausted {
             assert!(info.meta_degraded, "额度耗尽时元数据应标记为降级");
@@ -1948,7 +2467,7 @@ mod tests {
                 None,
             ))
             .expect("额度耗尽后第二次探测仍应成功");
-            assert_eq!(info2.probe, "jsdelivr");
+            assert!(matches!(info2.probe.as_str(), "jsdelivr" | "api" | "api-truncated"));
             assert!(!info2.candidates.is_empty());
             assert_eq!(
                 rate_limit().remaining,
