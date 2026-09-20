@@ -982,6 +982,7 @@ fn pid_cmdline(pid: u32) -> Option<String> {
 /// 端口本身只说明「有人在服务」，不说明是谁。复制 profile 会把 `cordis.patch.yml`
 /// 连 webserver 端口一起抄走，于是**多个 profile 可能配置同一端口**——只看端口会
 /// 认错实例、甚至停错实例。因此对 dsh 进程再用它 cmdline 里的 `--profile` 二次确认。
+#[derive(Debug)]
 pub(crate) enum PortOwner {
     /// 就是本 profile 的实例（cmdline 没写 profile 时也保守归到本 profile）
     ThisProfile(u32),
@@ -1441,8 +1442,24 @@ time.sleep(120)
         // 否则端口被别人占着就会凭空冒出「profile 运行中」，还可能停错进程。
         let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = l.local_addr().unwrap().port();
-        let got = port_owner("127.0.0.1", port, "web");
-        match got {
+
+        // 端口探测是**真实 connect + 300ms 超时**：整套测试并发跑（尤其还有网络用例
+        // 占着 CPU/网络栈）时，单次探测偶尔会超时，从而把"正在监听"误判成"空闲"。
+        // 这里给它一个重试窗口，而不是拿一次结果下断言 —— 断言的是"最终能不能判对"。
+        let settle = |want_listening: bool| -> Option<PortOwner> {
+            let mut last = None;
+            for _ in 0..20 {
+                let got = port_owner("127.0.0.1", port, "web");
+                if got.is_some() == want_listening {
+                    return got;
+                }
+                last = got;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            last
+        };
+
+        match settle(true) {
             Some(PortOwner::OtherProcess(pid)) => assert_eq!(pid, std::process::id()),
             Some(PortOwner::ThisProfile(_)) | Some(PortOwner::OtherProfile { .. }) => {
                 panic!("非 dsh 的监听者不应被认成某个 profile 的实例")
@@ -1451,7 +1468,8 @@ time.sleep(120)
             None => panic!("已 bind 的端口不应判定为空闲"),
         }
         drop(l);
-        assert!(port_owner("127.0.0.1", port, "web").is_none(), "已释放的端口应判定为空闲");
+        let after = settle(false);
+        assert!(after.is_none(), "已释放的端口应判定为空闲（最后一次：{after:?}）");
     }
 
     #[test]
