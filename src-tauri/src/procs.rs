@@ -544,14 +544,16 @@ pub(crate) fn pid_is_dsh(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        // tasklist 快且原生；只校验存活与 node 映像（PID 复用为其他 node 进程的概率可忽略）
+        // tasklist 快且原生；只校验存活与 node 映像（PID 复用为其他 node 进程的概率可忽略）。
+        // 必须匹配映像名 node.exe —— 只写 .exe 会把「该 PID 存活的任意进程」误判为 dsh，
+        // 端口回退时就会 taskkill 掉无关程序。
         std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .output()
             .ok()
             .map(|o| {
-                let out = String::from_utf8_lossy(&o.stdout);
-                out.contains(&pid.to_string()) && out.to_ascii_lowercase().contains(".exe")
+                let out = String::from_utf8_lossy(&o.stdout).to_ascii_lowercase();
+                out.contains(&pid.to_string()) && out.contains("node.exe")
             })
             .unwrap_or(false)
     }
