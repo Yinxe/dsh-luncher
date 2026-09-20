@@ -336,7 +336,16 @@ pub fn post_mutation_checks(
             // 规格可能是 name@ver / github:o/r#ref&path:x / link:/path —— 只留包名部分
             let base = a.split('#').next().unwrap_or(a);
             let base = base.strip_prefix("github:").unwrap_or(base);
-            base.split('@').next().unwrap_or(base).to_string()
+            // scoped 包（@scope/name 或 @scope/name@ver）首个 '@' 属于包名，不能按 '@' 直接切；
+            // 否则 @dshp/foo@1.2.3 会退化成空串，让后续对账逻辑失效。
+            if let Some(rest) = base.strip_prefix('@') {
+                match rest.find('@') {
+                    Some(k) => format!("@{}", &rest[..k]),
+                    None => base.to_string(),
+                }
+            } else {
+                base.split('@').next().unwrap_or(base).to_string()
+            }
         })
         .collect();
 
