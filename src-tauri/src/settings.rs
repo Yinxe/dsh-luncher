@@ -36,6 +36,19 @@ pub struct Settings {
     /// 可选的 GitHub Token：只用于提高 api.github.com 额度（匿名 60/小时 → 5000/小时）。
     /// 探测与更新检测走免额度通道（jsDelivr / git），留空也能正常用。
     pub github_token: String,
+    /// GitHub 加速：用前缀代理加快 clone / 下载（只对 github 域名生效）
+    #[serde(default = "default_true")]
+    pub github_accel: bool,
+    /// 固定使用哪个代理前缀；留空 = 自动（测速最快的一个）
+    #[serde(default)]
+    pub github_proxy: String,
+    /// 额外候选前缀（逗号 / 换行分隔），与内置清单一起参与测速
+    #[serde(default)]
+    pub github_proxy_extra: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -55,6 +68,9 @@ impl Default for Settings {
             close_to_tray: true,
             launch_mode: "child".into(),
             github_token: String::new(),
+            github_accel: true,
+            github_proxy: String::new(),
+            github_proxy_extra: String::new(),
         }
     }
 }

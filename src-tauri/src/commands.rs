@@ -630,12 +630,12 @@ pub fn plugin_install(
     specs: Vec<String>,
     mode: Option<String>,
 ) -> Result<u64, String> {
-    let specs: Vec<String> = specs
+    let raw_specs: Vec<String> = specs
         .into_iter()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    if specs.is_empty() {
+    if raw_specs.is_empty() {
         return Err("安装规格为空".into());
     }
     // github:owner/repo（含去 sha 的升级规格）在任务里先做匿名可读预检：
@@ -647,6 +647,23 @@ pub fn plugin_install(
     };
     let settings = state.settings.lock().unwrap().clone();
     let upgrade = mode.as_deref() == Some("upgrade");
+    // GitHub 加速：目标若是 github 的 http 链接（releases 资产 / raw 等），直接换成代理链接；
+    // github:owner/repo 之类交给 pnpm 解析的规格改不了链接，但 git 部分仍吃 insteadOf 加速
+    let accel_pref = if settings.github_accel {
+        let p = settings.github_proxy.trim();
+        let pref = if p.is_empty() { None } else { Some(p.to_string()) };
+        let _ = crate::ghaccel::ensure_cached(crate::ghaccel::CACHE_TTL_SECS);
+        crate::ghaccel::current().and_then(|a| crate::ghaccel::pick_prefix(&a, pref.as_deref(), false))
+    } else {
+        None
+    };
+    let specs: Vec<String> = raw_specs
+        .into_iter()
+        .map(|s| match &accel_pref {
+            Some(p) if crate::ghaccel::is_github_url(&s) => crate::ghaccel::rewrite(&s, p),
+            _ => s,
+        })
+        .collect();
     let mut steps = vec![crate::plugin::Step::Note {
         text: format!(
             "{}：{}",
@@ -654,11 +671,20 @@ pub fn plugin_install(
             specs.join(" + ")
         ),
     }];
+    if let Some(p) = &accel_pref {
+        if specs.iter().any(|s| s.starts_with(p.as_str())) {
+            steps.push(crate::plugin::Step::Note {
+                text: format!("⚡ GitHub 加速：链接已改写为 {p}<原链接>"),
+            });
+        }
+    }
+
     for spec in &specs {
         if is_github(spec) {
+            // 只做「远端可匿名访问」的轻量预检（git ls-remote 级别，秒级、结果确定）。
+            // 不再扫文件树：jsDelivr 的索引是缓存快照，会给不全的候选与错误的 lib/ 判定，
+            // 反而把能装的包拦下来；能不能加载由装后校验负责。
             steps.push(crate::plugin::Step::ProbeRemote { url: spec.clone() });
-            // 直装不放行"没有 lib/ 构建产物"的包（dsh 加载不了）；克隆安装是另一条路
-            steps.push(crate::plugin::Step::ProbeGithubPackage { spec: spec.clone() });
         }
         steps.push(crate::plugin::Step::Dsh {
             args: vec!["add".into(), spec.clone()],
@@ -766,6 +792,8 @@ pub fn plugin_pull_update(
 ///
 /// 起任务前先做**匿名可读预检**：私有仓库 / 不存在的仓库直接拒绝（不在终端里弹登录、
 /// 也不产生注定失败的任务），指引用户手动 clone 后走 link 安装。
+///
+/// `accel`：本次任务是否走 GitHub 加速（缺省跟随设置）。
 #[tauri::command]
 pub fn plugin_clone_install(
     app: AppHandle,
@@ -773,8 +801,12 @@ pub fn plugin_clone_install(
     jobs: State<'_, crate::plugin::PluginJobState>,
     profile: String,
     input: crate::plugin::CloneInstallInput,
+    accel: Option<bool>,
 ) -> Result<u64, String> {
-    let settings = state.settings.lock().unwrap().clone();
+    let mut settings = state.settings.lock().unwrap().clone();
+    if let Some(a) = accel {
+        settings.github_accel = a;
+    }
     let (mut steps, root) = crate::plugin::steps_for_clone_install(&input)?;
     // 预检放任务第一步：点击后立刻出现任务与输出，不再让界面干等网络
     steps.insert(
@@ -798,6 +830,161 @@ pub fn plugin_clone_install(
             steps,
         },
     )
+}
+
+/// GitHub 加速状态（候选前缀 → 下载/git 两段测速 → 缓存）。
+///
+/// force=true 重新测速（设置页「重新测速」）；否则**有缓存就直接返回**（哪怕过期），
+/// 只有完全没有缓存时才现测——避免打开对话框就触发一轮真实浅克隆测速。
+#[tauri::command]
+pub async fn get_github_accel(
+    state: State<'_, AppState>,
+    force: Option<bool>,
+) -> Result<crate::ghaccel::GhAccel, String> {
+    let force = force.unwrap_or(false);
+    let extra = state.settings.lock().unwrap().github_proxy_extra.clone();
+    if !force {
+        if let Some(cached) = crate::ghaccel::ensure_cached(crate::ghaccel::CACHE_TTL_SECS) {
+            return Ok(cached);
+        }
+    }
+    crate::ghaccel::refresh(&extra, force).await
+}
+
+/// 探测一个 git 仓库里的插件包：**先真克隆（或同步）到 git-plugins，再本地扫描**。
+///
+/// 这是启动器唯一保留的「探测」——探测结果来自真实工作树（本地按 package.json /
+/// dsh.bundle / lib 判定），不依赖 jsDelivr 索引或 GitHub API 的文件树，因此不会
+/// 出现"候选少几个""明明有 lib 却说缺失"这类偏差。克隆结果同时就是安装要用的目录。
+#[tauri::command]
+pub async fn probe_clone_repo(
+    state: State<'_, AppState>,
+    url: String,
+    git_ref: Option<String>,
+    accel: Option<bool>,
+) -> Result<crate::plugin::CloneProbe, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("git 远端地址为空".into());
+    }
+    if !(url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("git@")
+        || url.starts_with("ssh://")
+        || url.starts_with("git://"))
+    {
+        return Err(format!("不支持的 git 远端地址：{url}"));
+    }
+    let want_accel = accel.unwrap_or(settings.github_accel);
+    let pref: Option<String> = {
+        let p = settings.github_proxy.trim();
+        if p.is_empty() { None } else { Some(p.to_string()) }
+    };
+    // 首次使用先测速（缓存 6 小时）；失败不拦克隆，只是没有加速
+    let mut accel_summary: Option<String> = None;
+    if want_accel {
+        let _ = crate::ghaccel::ensure_cached(crate::ghaccel::CACHE_TTL_SECS);
+        if let Err(e) = crate::ghaccel::refresh(&settings.github_proxy_extra, false).await {
+            eprintln!("[ghaccel] 加速不可用：{e}");
+        }
+        if let Some(a) = crate::ghaccel::current() {
+            if !a.is_empty() {
+                accel_summary = Some(crate::ghaccel::summary(&a, pref.as_deref(), true));
+            }
+        }
+    }
+
+    let dir_name = crate::plugin::clone_dir_for_url(&url);
+    let root = crate::plugin::git_plugins_dir().join(&dir_name);
+    let clone_url = url.clone();
+    let ref_clone = git_ref.clone().filter(|r| !r.is_empty());
+    let ref_for_scan = ref_clone.clone();
+    let root_clone = root.clone();
+    let accelerated = want_accel;
+
+    let output = tauri::async_runtime::spawn_blocking(move || -> Result<(bool, String), String> {
+        let git = std::path::PathBuf::from("git");
+        let mut envs = crate::plugin::git_no_prompt_env();
+        if accelerated {
+            if let Some(a) = crate::ghaccel::current() {
+                envs.extend(crate::ghaccel::git_env(&a, pref.as_deref()));
+            }
+        }
+        let existed = root_clone.join(".git").is_dir();
+        let timeout = std::time::Duration::from_secs(if existed { 180 } else { 300 });
+        if existed {
+            let dir = root_clone.to_string_lossy().into_owned();
+            let (ok, text) = util::run_captured_in(
+                &git,
+                &["-C".to_string(), dir.clone(), "fetch".to_string(), "--all".to_string(), "--prune".to_string()],
+                None,
+                &envs,
+                timeout,
+            )
+            .ok_or_else(|| "启动 git 失败（确认 git 在 PATH 中）".to_string())?;
+            if !ok {
+                return Ok((false, text));
+            }
+            match &ref_clone {
+                Some(r) => {
+                    let (ok2, text2) = util::run_captured_in(
+                        &git,
+                        &["-C".to_string(), dir, "checkout".to_string(), r.clone()],
+                        None,
+                        &envs,
+                        timeout,
+                    )
+                    .ok_or_else(|| "启动 git 失败".to_string())?;
+                    return Ok((ok2, text2));
+                }
+                None => {
+                    let (ok2, text2) = util::run_captured_in(
+                        &git,
+                        &["-C".to_string(), dir, "pull".to_string(), "--ff-only".to_string()],
+                        None,
+                        &envs,
+                        timeout,
+                    )
+                    .ok_or_else(|| "启动 git 失败".to_string())?;
+                    return Ok((ok2, text2));
+                }
+            }
+        }
+        let mut args: Vec<String> = vec!["clone".into(), "--depth".into(), "1".into()];
+        if let Some(r) = &ref_clone {
+            args.push("--branch".into());
+            args.push(r.clone());
+        }
+        args.push(clone_url.clone());
+        args.push(root_clone.to_string_lossy().into_owned());
+        let (ok, text) = util::run_captured_in(&git, &args, None, &envs, timeout)
+            .ok_or_else(|| "启动 git 失败（确认 git 在 PATH 中）".to_string())?;
+        Ok((ok, text))
+    })
+    .await
+    .map_err(|e| format!("克隆任务失败: {e}"))??;
+
+    let (ok, text) = output;
+    if !ok {
+        // 私有仓库 / 网络不通：把 git 的原话带回去，别让用户猜
+        if let Some(spec) = registry::parse_github_spec(&url) {
+            if crate::plugin::looks_like_auth_error(&text) {
+                return Err(registry::private_repo_reject(&spec.owner, &spec.repo));
+            }
+        }
+        return Err(format!("克隆失败：{}", text.lines().rev().take(4).collect::<Vec<_>>().join(" / ")));
+    }
+
+    let candidates = crate::registry::probe_local_plugins(&root)?;
+    Ok(crate::plugin::CloneProbe {
+        url: url.clone(),
+        root: root.to_string_lossy().into_owned(),
+        dir_name,
+        git_ref: ref_for_scan,
+        accel: accel_summary,
+        candidates,
+    })
 }
 
 #[tauri::command]
@@ -997,15 +1184,10 @@ pub async fn search_registry_packages(
     crate::registry::search_packages(&settings.registry, &query).await
 }
 
-#[tauri::command]
-pub async fn fetch_github_repo(
-    state: State<'_, AppState>,
-    repo: String,
-) -> Result<crate::registry::GitHubRepoInfo, String> {
-    let token = state.settings.lock().unwrap().github_token.clone();
-    let token = crate::registry::github_token(Some(&token));
-    crate::registry::fetch_github_repo(&repo, token.as_deref()).await
-}
+// 注：仓库文件树探测（fetch_github_repo）已随「GitHub 仓库」入口下线——
+// jsDelivr 的文件索引是缓存快照，会给不全的候选与错误的 lib/ 判定。
+// 现在唯一保留的探测是 probe_clone_repo（先克隆再本地扫描）。
+// registry::fetch_github_repo 仍在（自检与测试用），但没有命令入口。
 
 /// 通道自检：并发探测 github.com refs / jsDelivr / raw / api.github.com 四条通道的
 /// 可达性与延迟（这台机器到 github.com 是间歇性不可达，有了这个能一眼看出当时哪条通）

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, FolderOpen } from "lucide-react";
+import { Activity, FolderOpen, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Sheet, SheetClose, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle,
@@ -9,10 +9,14 @@ import {
 } from "@/components/ui/field";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { api } from "../api";
-import type { ChannelProbe, EnvironmentInfo, GitHubRateLimit, Settings } from "../types";
+import type { ChannelProbe, EnvironmentInfo, GhAccel, GitHubRateLimit, Settings } from "../types";
 
 interface Props {
   open: boolean;
@@ -46,6 +50,9 @@ function SwitchRow({
   );
 }
 
+/** Radix Select 不允许空字符串 value：用它代表「自动（最快）」 */
+const AUTO = "__auto__";
+
 /** 设置侧边抽屉：分区展示；ESC / 遮罩点击关闭 */
 /** 通道内部名 → 展示名 */
 const CHANNEL_LABEL: Record<string, string> = {
@@ -60,6 +67,9 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
   const [rate, setRate] = useState<GitHubRateLimit | null>(null);
   const [probes, setProbes] = useState<ChannelProbe[] | null>(null);
   const [checking, setChecking] = useState(false);
+  const [accel, setAccel] = useState<GhAccel | null>(null);
+  const [accelBusy, setAccelBusy] = useState(false);
+  const [accelErr, setAccelErr] = useState<string | null>(null);
 
   const runCheck = async () => {
     setChecking(true);
@@ -72,9 +82,23 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
     }
   };
 
+  /** 拉 GitHub520 hosts 并测速（force=true 绕过 6 小时缓存） */
+  const runAccel = async (force: boolean) => {
+    setAccelBusy(true);
+    setAccelErr(null);
+    try {
+      setAccel(await api.getGithubAccel(force));
+    } catch (e) {
+      setAccelErr(String(e));
+    } finally {
+      setAccelBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (!open) return;
     api.getGithubRateLimit().then(setRate).catch(() => setRate(null));
+    api.getGithubAccel(false).then(setAccel).catch(() => setAccel(null));
   }, [open]);
 
   // 每次打开时以当前设置重置草稿（取消即丢弃修改）
@@ -134,7 +158,7 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
               <FieldDescription>
                 只用于提高 api.github.com 额度：匿名 60 次/小时 → 带 token 5000 次/小时。
                 <span className="block">
-                  仓库探测与更新检测走 jsDelivr / git 免额度通道，<strong>不填也能正常用</strong>；
+                  插件安装与更新检测走 git / registry，<strong>不填也能正常用</strong>；
                   也可用 GITHUB_TOKEN / GH_TOKEN 环境变量代替。{rlText}
                 </span>
               </FieldDescription>
@@ -175,6 +199,90 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
                 探测与更新检测优先走<strong>免额度</strong>通道（github.com refs / jsDelivr），
                 连续失败的通道会被临时跳过 5 分钟，避免每次都白等一个超时；api 只用于元数据。
               </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel>GitHub 加速</FieldLabel>
+              <SwitchRow
+                id="set-ghaccel"
+                checked={draft.githubAccel}
+                onChange={(v) => set("githubAccel", v)}
+                label="把 github 链接拼到测速最快的代理前缀上"
+                hint="内置一组常用前缀代理（gh-proxy.com、gh.xxooo.cf、gh.dpik.top…）。首次使用会各测一次：下载测速用小文件 GET，git 能力用一次真实的浅克隆（有些代理只放行文件下载，clone 会 403，所以分开测），结果缓存 6 小时。用法就是「前缀 + 原 github 链接」；git 走 url.<前缀>.insteadOf，已有克隆的 git pull 也生效，releases / raw 直链在安装时直接改写。"
+              />
+              <div className="flex flex-wrap items-end gap-2">
+                <Field className="min-w-[240px] flex-1">
+                  <FieldLabel htmlFor="set-ghproxy">使用哪个前缀</FieldLabel>
+                  <Select value={draft.githubProxy || AUTO} onValueChange={(v) => set("githubProxy", v === AUTO ? "" : v)}>
+                    <SelectTrigger id="set-ghproxy" className="w-full font-mono text-xs">
+                      <SelectValue placeholder="自动（最快的一个）" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={AUTO} className="text-muted-foreground">自动（最快的一个）</SelectItem>
+                      {(accel?.nodes ?? []).map((n) => (
+                        <SelectItem key={n.prefix} value={n.prefix} className="font-mono text-xs">
+                          {n.prefix}（{n.ms}ms）
+                        </SelectItem>
+                      ))}
+                      {draft.githubProxy &&
+                        !(accel?.nodes ?? []).some((n) => n.prefix === draft.githubProxy) && (
+                          <SelectItem value={draft.githubProxy} className="font-mono text-xs">
+                            {draft.githubProxy}（未测速）
+                          </SelectItem>
+                        )}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-8"
+                  disabled={accelBusy}
+                  onClick={() => void runAccel(true)}
+                >
+                  <Zap /> {accelBusy ? "测速中…" : "重新测速"}
+                </Button>
+              </div>
+              <Field>
+                <FieldLabel htmlFor="set-ghproxy-extra">额外代理前缀（可选）</FieldLabel>
+                <Textarea
+                  id="set-ghproxy-extra"
+                  rows={2}
+                  className="min-h-14 font-mono text-xs"
+                  placeholder="自建/其它前缀，一行一个，如 https://gh.example.com/"
+                  value={draft.githubProxyExtra}
+                  onChange={(e) => set("githubProxyExtra", e.target.value)}
+                />
+                <FieldDescription>
+                  会与内置清单一起参与测速；用法就是「前缀 + 原 github 链接」。
+                </FieldDescription>
+              </Field>
+              {accelErr && (
+                <p className="text-[10.5px] leading-relaxed text-amber-600 dark:text-amber-400">{accelErr}</p>
+              )}
+              {accel && accel.nodes.length > 0 && (
+                <div className="mt-1.5 space-y-1">
+                  {accel.nodes.map((n) => (
+                    <div key={n.prefix} className="flex items-center gap-2 text-[11px]">
+                      <span className="min-w-0 flex-1 truncate font-mono">{n.prefix}</span>
+                      <Badge
+                        variant={n.prefix === (draft.githubProxy || accel.nodes[0].prefix) ? "success" : "outline"}
+                        className="font-mono text-[10px]"
+                      >
+                        下载 {n.ms}ms
+                      </Badge>
+                      <Badge variant={n.gitMs == null ? "warning" : "outline"} className="font-mono text-[10px]">
+                        {n.gitMs == null ? "不支持 git" : `git ${n.gitMs}ms`}
+                      </Badge>
+                    </div>
+                  ))}
+                  <p className="pt-0.5 text-[10.5px] text-muted-foreground">
+                    来源 {accel.source}
+                    {accel.updatedAt > 0 && ` · ${new Date(accel.updatedAt * 1000).toLocaleString()}`}
+                    {accel.cached && "（缓存）"}
+                  </p>
+                </div>
+              )}
             </Field>
             <Field>
               <FieldLabel htmlFor="set-mirror">Node 运行时镜像站</FieldLabel>

@@ -76,6 +76,46 @@ export interface Settings {
   launchMode: string;
   /** 可选 GitHub Token：只用于把 api.github.com 额度从 60/小时 提到 5000/小时 */
   githubToken: string;
+  /** GitHub 加速：把 github 链接拼到测速选出的前缀代理上（只对 github 域名生效） */
+  githubAccel: boolean;
+  /** 固定使用哪个代理前缀；留空 = 自动（最快的一个） */
+  githubProxy: string;
+  /** 额外候选前缀（逗号 / 换行分隔），与内置清单一起参与测速 */
+  githubProxyExtra: string;
+}
+
+/** 一个可用的前缀代理及其测速耗时 */
+export interface ProxyNode {
+  /** 形如 https://gh-proxy.com/ */
+  prefix: string;
+  /** 文件下载测速（GET 小文件）往返毫秒 */
+  ms: number;
+  /** git 测速（真克隆一个极小仓库）毫秒；null = 该前缀只放行文件下载，不能 git */
+  gitMs: number | null;
+}
+
+/** GitHub 加速状态（候选前缀 → 测速 → 缓存） */
+export interface GhAccel {
+  /** 秒级时间戳 */
+  updatedAt: number;
+  /** 按快慢排序，第一个 = 自动模式使用 */
+  nodes: ProxyNode[];
+  /** builtin | builtin+extra | cache */
+  source: string;
+  /** 是否来自磁盘缓存 */
+  cached: boolean;
+}
+
+/** clone 探测结果：真实克隆到本地后扫描出的插件包 */
+export interface CloneProbe {
+  url: string;
+  /** 克隆落点（~/.dsh-launcher/git-plugins/<owner>-<repo>） */
+  root: string;
+  dirName: string;
+  gitRef: string | null;
+  /** 本次探测的加速摘要（域名=IP (ms)），未启用为 null */
+  accel: string | null;
+  candidates: PluginCandidate[];
 }
 
 /** 一条免额度/受限通道的自检结果 */
@@ -284,37 +324,6 @@ export interface PluginCandidate {
   /** 可以直接作为插件安装（声明了 dsh.bundle） */
   ready: boolean;
   /** 交给 dsh plugin add 的安装规格 */
-  installSpec: string;
-}
-
-/** GitHub 插件来源预览（安装前全量探测插件包：仓库根 + monorepo 子包） */
-export interface GitHubRepoInfo {
-  fullName: string;
-  description: string | null;
-  stars: number;
-  pushedAt: string | null;
-  htmlUrl: string;
-  license: string | null;
-  /** 实际用于探测/安装的 ref（缺省 = 仓库默认分支） */
-  gitRef: string | null;
-  defaultBranch: string | null;
-  /** 仓库是否 monorepo（声明了 pnpm-workspace / workspaces） */
-  isMonorepo: boolean;
-  /** workspace 成员 glob（如 ["plugins/*"]） */
-  workspaceGlobs: string[];
-  /** 探测到的插件候选包 */
-  candidates: PluginCandidate[];
-  /** 探测方式：tree（全量扫描）| contents（限流降级）| tarball */
-  probe: string;
-  /** 有候选的 package.json 因超时未读取（名称/描述缺失，其余信息仍有效） */
-  factsPending: boolean;
-  /** 仓库元数据（stars/license/描述）因 GitHub API 额度不可用而缺失 */
-  metaDegraded: boolean;
-  /** 首个候选的路径（兼容字段） */
-  pluginPath: string | null;
-  /** lib/ 目录校验：true=已确认存在 false=确认缺失 null=未校验（打包产物直装） */
-  libOk: boolean | null;
-  /** 首个候选的安装规格（github:owner/repo#ref&path:xx 或打包产物 URL） */
   installSpec: string;
 }
 

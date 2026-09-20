@@ -1,5 +1,6 @@
 mod commands;
 mod credentials;
+mod ghaccel;
 mod installed;
 mod installer;
 mod launcher;
@@ -65,6 +66,8 @@ pub fn run() {
             commands::plugin_uninstall,
             commands::plugin_pull_update,
             commands::plugin_clone_install,
+            commands::probe_clone_repo,
+            commands::get_github_accel,
             commands::list_plugin_jobs,
             commands::cancel_plugin_job,
             commands::clear_plugin_jobs,
@@ -87,7 +90,6 @@ pub fn run() {
             commands::restore_deleted_profile,
             commands::purge_deleted_profile,
             commands::search_registry_packages,
-            commands::fetch_github_repo,
             commands::get_github_rate_limit,
             commands::check_channels,
             commands::check_plugin_updates,

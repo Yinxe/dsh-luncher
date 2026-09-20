@@ -17,7 +17,6 @@ import type {
   PackageSearchItem,
   PluginUpdateInfo,
   ChannelProbe,
-  GitHubRepoInfo,
   GitHubRateLimit,
   PluginCandidate,
   PluginJob,
@@ -25,6 +24,8 @@ import type {
   PluginLogEvent,
   ClonedPlugin,
   CloneInstallInput,
+  CloneProbe,
+  GhAccel,
   RegistryInfo,
   RuntimeFinishedEvent,
   RuntimeProgressEvent,
@@ -101,9 +102,18 @@ export const api = {
       subPath,
       build,
     }),
-  /** clone 仓库 + 本地 link 安装 */
-  pluginCloneInstall: (profile: string, input: CloneInstallInput) =>
-    invoke<number>("plugin_clone_install", { profile, input }),
+  /** clone 仓库 + 本地 link 安装（accel=false 时本次不走 GitHub 加速） */
+  pluginCloneInstall: (profile: string, input: CloneInstallInput, accel?: boolean) =>
+    invoke<number>("plugin_clone_install", { profile, input, accel: accel ?? null }),
+  /** 探测仓库里的插件包：先真克隆（或同步）到 git-plugins，再本地扫描 */
+  probeCloneRepo: (url: string, gitRef?: string | null, accel?: boolean) =>
+    invoke<CloneProbe>("probe_clone_repo", {
+      url,
+      gitRef: gitRef ?? null,
+      accel: accel ?? null,
+    }),
+  /** GitHub 加速状态：force=true 重新拉 hosts 并测速（否则用 6 小时内缓存） */
+  getGithubAccel: (force = false) => invoke<GhAccel>("get_github_accel", { force }),
   /** 当前会话的全部插件任务（含日志尾部，用于重挂载恢复） */
   listPluginJobs: () => invoke<PluginJob[]>("list_plugin_jobs"),
   cancelPluginJob: (jobId: number) => invoke<boolean>("cancel_plugin_job", { jobId }),
@@ -155,8 +165,6 @@ export const api = {
     invoke<PackageSearchItem[]>("search_registry_packages", { query }),
   checkPluginUpdates: (profile: string) =>
     invoke<PluginUpdateInfo[]>("check_plugin_updates", { profile }),
-  fetchGithubRepo: (repo: string) =>
-    invoke<GitHubRepoInfo>("fetch_github_repo", { repo }),
   /** 当前 GitHub API 额度（元数据增强用；探测与更新检测走免额度通道） */
   getGithubRateLimit: () => invoke<GitHubRateLimit>("get_github_rate_limit"),
   /** 通道自检：并发探测 refs / jsDelivr / raw / api 的可达性与延迟 */

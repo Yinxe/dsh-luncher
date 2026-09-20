@@ -18,7 +18,7 @@ interface Props {
 const rootLabel = (c: PluginCandidate) => (c.path === "" ? "仓库根目录" : c.path);
 
 /**
- * 插件候选列表（GitHub 仓库探测 / 本地目录探测共用）。
+ * 插件候选列表（clone 探测出的工作树、本地目录扫描共用）。
  *
  * 每行是一个 ToggleGroup 选项：徽标说明是否为 dsh 插件包、lib/ 构建产物是否齐备、
  * 是否命中 workspace 成员 glob；monorepo 下可多选一次装多个子包。

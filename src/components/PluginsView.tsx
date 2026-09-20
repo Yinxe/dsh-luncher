@@ -201,11 +201,14 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
     [profile, onToast]
   );
 
-  /** clone 仓库 + 本地 link 安装 */
+  /** clone 仓库 + 本地 link 安装（accel=false 时本次不走 GitHub 加速） */
   const cloneInstall = useCallback(
-    (input: { url: string; gitRef: string | null; subPath: string | null; build: boolean }) => {
+    (
+      input: { url: string; gitRef: string | null; subPath: string | null; build: boolean },
+      accel: boolean
+    ) => {
       api
-        .pluginCloneInstall(profile, input)
+        .pluginCloneInstall(profile, input, accel)
         .then(() => onToast("info", "已开始 clone + link 安装：进度见内置终端"))
         .catch((e) => onToast("err", String(e)));
     },
@@ -422,7 +425,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
             size="sm"
             disabled={busy}
             onClick={() => setInstallOpen(true)}
-            title="npm / GitHub 仓库 / 链接 / Clone 仓库 四种安装方式"
+            title="npm 包 / 链接直装 / Clone 仓库 三种安装方式"
           >
             <Plus /> 安装插件
           </Button>

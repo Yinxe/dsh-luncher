@@ -126,9 +126,6 @@ pub enum Step {
     Dsh { args: Vec<String> },
     /// 安装前预检远端可匿名访问（放任务里跑：点击立即有反馈，不必让 UI 等网络）
     ProbeRemote { url: String },
-    /// GitHub 直装前的把关：目标包必须声明 dsh.bundle 且**已带 lib/ 构建产物**
-    /// （GitHub 直装不构建，缺 lib 等于装个加载不了的东西；克隆安装会构建，是另一条路）
-    ProbeGithubPackage { spec: String },
     /// 内部步骤：删除目录（克隆出的本地仓库）
     RmDir { path: PathBuf },
     /// 内部步骤：只写一行提示
@@ -465,6 +462,24 @@ pub fn start_job<R: Runtime>(
     let (id, handle) = state.register(&req, &command);
     emit_job(&app, &handle);
 
+    // GitHub 加速：把 github 链接拼到检测出的前缀代理上（git 走 url.<prefix>.insteadOf，
+    // 因此已有克隆的 pull 也生效）。只对 github 域名生效，见 ghaccel 模块。
+    let accel_pref: Option<String> = {
+        let p = settings.github_proxy.trim();
+        if p.is_empty() { None } else { Some(p.to_string()) }
+    };
+    let accel_envs: Vec<(String, String)> = if settings.github_accel {
+        if crate::ghaccel::ensure_cached(crate::ghaccel::CACHE_TTL_SECS).is_none() {
+            // 首次使用：后台测速，本次任务先按普通网络跑
+            crate::ghaccel::spawn_refresh(settings.github_proxy_extra.clone(), false);
+        }
+        crate::ghaccel::current()
+            .map(|a| crate::ghaccel::git_env(&a, accel_pref.as_deref()))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     let state2 = state.clone();
     std::thread::spawn(move || {
         let mut ok = true;
@@ -472,6 +487,22 @@ pub fn start_job<R: Runtime>(
         let mut exit_code: Option<i32> = None;
         // 变更前的 profile 清单快照（安装后校验 / 卸载后对账用）
         let mut pre_snapshot: Option<crate::verify::ProfileSnapshot> = None;
+
+        if !accel_envs.is_empty() {
+            if let Some(accel) = crate::ghaccel::current() {
+                emit_line(
+                    &app,
+                    &handle,
+                    id,
+                    "info",
+                    &format!(
+                        "⚡ GitHub 加速：{}（{} 小时前测速，本次任务里的 github 链接都会拼上该前缀）",
+                        crate::ghaccel::summary(&accel, accel_pref.as_deref(), true),
+                        accel.age_secs() / 3600
+                    ),
+                );
+            }
+        }
 
         for step in &req.steps {
             if handle.cancelled.load(Ordering::SeqCst) {
@@ -512,81 +543,6 @@ pub fn start_job<R: Runtime>(
                         }
                     }
                 }
-                Step::ProbeGithubPackage { spec } => {
-                    let parsed = crate::registry::parse_github_spec(spec);
-                    match parsed {
-                        // 打包产物直链没有仓库树可查：跳过（装后校验会兜底）
-                        None => {}
-                        Some(sp) if sp.tarball_url.is_some() => {
-                            emit_line(
-                                &app,
-                                &handle,
-                                id,
-                                "info",
-                                "（打包产物直链：无法预先核对 lib/，装后校验会兜底）",
-                            );
-                        }
-                        Some(sp) => {
-                            emit_line(
-                                &app,
-                                &handle,
-                                id,
-                                "info",
-                                &format!(
-                                    "$ 核对 {} {} 的 dsh.bundle 与 lib/ 构建产物",
-                                    sp.owner, sp.repo
-                                ),
-                            );
-                            // 解释清楚"下一步会出现一个 codeload 链接"：pnpm 对 github: 规格
-                            // 一律下载**整仓 tarball**（即便带 #path: 子目录，也是整仓下完再取子目录），
-                            // 链接里的 40 位 sha 是它在解析阶段把 ref 钉到的提交。
-                            emit_line(
-                                &app,
-                                &handle,
-                                id,
-                                "info",
-                                "（说明：pnpm 安装 github: 规格时会去 codeload.github.com 下载**整仓 tar.gz**，\
-                                 即使带 #path: 子目录也是整仓下完再取子目录；链接里的 40 位 sha 是它把 ref 钉到的提交。\
-                                 网络慢时这一下载容易撞上 pnpm 单请求 60s 超时（日志里的 `error (23)`），\
-                                 启动器会自动用更长的超时重试一次；若经常超时，改用「Clone 仓库」安装可以完全绕开 codeload）",
-                            );
-                            let token = crate::registry::github_token(Some(&settings.github_token));
-                            // 任务线程是普通 std::thread，这里用 block_on 跑只读探测
-                            match tauri::async_runtime::block_on(crate::registry::fetch_github_repo(
-                                spec,
-                                token.as_deref(),
-                            )) {
-                                Ok(info) => {
-                                    match crate::registry::preflight_direct_install(
-                                        &info.candidates,
-                                        sp.plugin_path.as_deref(),
-                                    ) {
-                                        Ok(detail) => {
-                                            emit_line(&app, &handle, id, "info", &format!("✔ {detail}"));
-                                        }
-                                        Err(reason) => {
-                                            emit_line(&app, &handle, id, "stderr", &reason);
-                                            remember_hint(&handle, &reason);
-                                            ok = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    // 探测失败不该挡住安装（可能只是元数据/额度问题）：
-                                    // 装后校验仍然会拦下真正加载不了的包
-                                    emit_line(
-                                        &app,
-                                        &handle,
-                                        id,
-                                        "info",
-                                        &format!("⚠ 无法预先核对（{e}）：直接安装，装后校验会兜底"),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
                 Step::RmDir { path } => {
                     if !path.exists() {
                         // 幂等：重试一个"卸载并删克隆"的任务时，目录可能上次就删掉了
@@ -611,7 +567,7 @@ pub fn start_job<R: Runtime>(
                 }
                 Step::Cmd { program, args, cwd, label, soft } => {
                     emit_line(&app, &handle, id, "info", &format!("$ {label}"));
-                    match run_streamed(&app, &handle, id, program, args, cwd.as_deref(), &[], &settings) {
+                    match run_streamed(&app, &handle, id, program, args, cwd.as_deref(), &[], &settings, &accel_envs) {
                         Ok((code, out)) => {
                             // 重试时 `git clone` 的目标目录可能上次已经建好了：
                             // 这不是失败，改成"用已存在的仓库继续"
@@ -723,7 +679,7 @@ pub fn start_job<R: Runtime>(
                         ];
                         // 每个 --config.<key> 再以 PNPM_CONFIG_<KEY> 给一遍（pnpm 12 会忽略部分 CLI 覆盖）
                         envs.extend(crate::pnpm::config_env_for(argv));
-                        run_streamed(&app, &handle, id, &prog, &full, Some(&dir), &envs, &settings)
+                        run_streamed(&app, &handle, id, &prog, &full, Some(&dir), &envs, &settings, &accel_envs)
                     };
 
                     let base_argv = crate::pnpm::plugin_args_for(&dir, args);
@@ -1058,9 +1014,7 @@ fn describe_first_step(steps: &[Step]) -> String {
             Step::Cmd { label, .. } => return label.clone(),
             Step::Dsh { args } => return format!("dsh plugin {}", args.join(" ")),
             Step::RmDir { path } => return format!("rm -rf {}", path.display()),
-            Step::Note { .. }
-            | Step::ProbeRemote { .. }
-            | Step::ProbeGithubPackage { .. } => continue,
+            Step::Note { .. } | Step::ProbeRemote { .. } => continue,
         }
     }
     String::new()
@@ -1077,6 +1031,7 @@ fn run_streamed<R: Runtime>(
     cwd: Option<&Path>,
     envs: &[(String, String)],
     settings: &Settings,
+    accel_envs: &[(String, String)],
 ) -> Result<(i32, String), String> {
     use std::process::Command;
     let prog_path = PathBuf::from(program);
@@ -1085,6 +1040,11 @@ fn run_streamed<R: Runtime>(
         cmd.current_dir(d);
     }
     for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    // GitHub 加速：git 的 curloptResolve + 本机代理（只对 github 域名生效）。
+    // 放在显式 envs 之后：加速变量不该被调用方无意覆盖，但允许调用方先设好再被这里补上。
+    for (k, v) in accel_envs {
         cmd.env(k, v);
     }
     // 保留 pnpm 的真实过程输出（不设 CI / NO_COLOR 之类的静默开关）
@@ -1234,6 +1194,20 @@ pub struct CloneInstallInput {
     pub sub_path: Option<String>,
     /// 安装依赖并构建（仓库未提交 lib/ 时需要）
     pub build: bool,
+}
+
+/// 克隆探测结果：真实工作树 + 本地扫描出的插件包
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneProbe {
+    pub url: String,
+    /// 克隆落点（~/.dsh-launcher/git-plugins/<owner>-<repo>）
+    pub root: String,
+    pub dir_name: String,
+    pub git_ref: Option<String>,
+    /// 本次探测用的加速摘要（域名=IP (ms)），未启用为 null
+    pub accel: Option<String>,
+    pub candidates: Vec<crate::registry::PluginCandidate>,
 }
 
 /// 由远端 url 推导克隆目录名（优先解析 owner/repo）

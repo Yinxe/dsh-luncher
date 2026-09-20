@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Cable, ExternalLink, FolderGit2, GitBranch, Layers, Loader2, Plus, Search, TriangleAlert,
+  Cable, ExternalLink, FolderGit2, GitBranch, Layers, Loader2, Plus, Search, TriangleAlert, Zap,
 } from "lucide-react";
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
@@ -16,7 +16,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import PluginCandidateList from "@/components/PluginCandidateList";
 import { api } from "../api";
-import type { GitHubRepoInfo, PackageSearchItem, PluginCandidate } from "../types";
+import type { CloneProbe, GhAccel, PackageSearchItem } from "../types";
 
 interface Props {
   profile: string;
@@ -24,13 +24,16 @@ interface Props {
   onClose: () => void;
   /** 批量安装（一个终端任务里按顺序执行多条 dsh plugin add） */
   onInstallMany: (specs: string[], mode: "install" | "upgrade") => void;
-  /** clone 仓库 + 本地 link 安装 */
-  onCloneInstall: (input: {
-    url: string;
-    gitRef: string | null;
-    subPath: string | null;
-    build: boolean;
-  }) => void;
+  /** clone 仓库 + 本地 link 安装；accel=false 时本次不走 GitHub 加速 */
+  onCloneInstall: (
+    input: {
+      url: string;
+      gitRef: string | null;
+      subPath: string | null;
+      build: boolean;
+    },
+    accel: boolean,
+  ) => void;
 }
 
 /** 表单里的小号字段标题（统一的次级说明层级） */
@@ -42,13 +45,16 @@ const isTarballUrl = (s: string) =>
   /^https?:\/\//i.test(s.trim()) &&
   (/\.(tgz|tar\.gz|tar)$/i.test(s.trim()) || s.includes("/releases/download/"));
 
+const isLocalPath = (s: string) =>
+  /^(~\/|\/|\.{1,2}\/|[A-Za-z]:[\\/]|\\\\)/.test(s.trim());
+
 /** owner/repo → https://github.com/owner/repo（clone 用） */
 function normalizeGitUrl(input: string): string {
   const s = input.trim();
   if (!s) return s;
   if (/^(https?:\/\/|git@|ssh:\/\/|git:\/\/)/.test(s)) return s;
   if (s.startsWith("github:")) return `https://github.com/${s.slice("github:".length)}`;
-  if (/^[\w.-]+\/[\w.-]+$/.test(s)) return `https://github.com/${s}`;
+  if (/^[\w.-]+\/[\w.-]+/.test(s)) return `https://github.com/${s}`;
   return s;
 }
 
@@ -63,12 +69,95 @@ function refOf(input: string): string | null {
   return null;
 }
 
+/** GitHub 输入（owner/repo、仓库 URL、tree 链接、fragment）→ 规范化后的安装规格 */
+function githubSpec(raw: string): { spec: string; ref: string | null; path: string | null } | null {
+  const s = raw.trim();
+  if (!s || isTarballUrl(s)) return null;
+  const [main, fragment] = s.split("#");
+  let rest = main.trim().replace(/\/+$/, "");
+  rest = rest.replace(/^github:/i, "");
+  rest = rest.replace(/^git\+https:\/\/github\.com\//i, "");
+  rest = rest.replace(/^https?:\/\/github\.com\//i, "");
+  rest = rest.replace(/^git@github\.com:/i, "");
+  const seg = rest.split("/").filter(Boolean);
+  if (seg.length < 2) return null;
+  const owner = seg[0];
+  const repo = seg[1].replace(/\.git$/i, "");
+  const valid = (x: string) => /^[\w.-]+$/.test(x);
+  if (!valid(owner) || !valid(repo)) return null;
+  let ref: string | null = null;
+  let path: string | null = null;
+  const tail = seg.slice(2);
+  if (tail.length >= 2 && (tail[0] === "tree" || tail[0] === "blob")) {
+    ref = tail[1];
+    if (tail.length > 2) path = tail.slice(2).join("/");
+  } else if (tail.length === 1) {
+    ref = tail[0];
+  }
+  for (const part of (fragment ?? "").split("&")) {
+    const p = part.trim();
+    if (!p) continue;
+    if (p.startsWith("path:")) path = p.slice("path:".length).trim() || path;
+    else ref = p;
+  }
+  const spec = `github:${owner}/${repo}${ref ? `#${ref}` : ""}${
+    path ? `${ref ? "&" : "#"}path:${path}` : ""
+  }`;
+  return { spec, ref, path };
+}
+
+type LinkKind = "link" | "github" | "tgz" | "raw";
+
+/** 链接直装：本地 link / 仓库插件链接 / .tgz 直链 → dsh 安装规格 */
+function toInstallSpec(raw: string): { spec: string; kind: LinkKind; note: string } {
+  const s = raw.trim();
+  if (!s) return { spec: "", kind: "raw", note: "" };
+  if (s.startsWith("file://")) {
+    const p = s.slice("file://".length);
+    return { spec: `link:${p}`, kind: "link", note: "本地目录：软链安装，改源码即时生效" };
+  }
+  if (isLocalPath(s)) {
+    return { spec: `link:${s}`, kind: "link", note: "本地目录：软链安装，改源码即时生效" };
+  }
+  if (/^https?:\/\//i.test(s) && !/github\.com\//i.test(s)) {
+    return isTarballUrl(s)
+      ? { spec: s, kind: "tgz", note: "打包产物直链：装一次，没有版本渠道" }
+      : { spec: s, kind: "raw", note: "按原样交给 dsh plugin add" };
+  }
+  const gh = githubSpec(s);
+  if (gh) {
+    return {
+      spec: gh.spec,
+      kind: "github",
+      note: gh.path
+        ? `GitHub 仓库子包：${gh.path}（pnpm 会下整仓 tar.gz，慢就用「Clone 仓库」）`
+        : "GitHub 仓库根包（未填子路径；monorepo 建议改用「Clone 仓库」安装）",
+    };
+  }
+  if (isTarballUrl(s)) {
+    return { spec: s, kind: "tgz", note: "打包产物直链：装一次，没有版本渠道" };
+  }
+  return { spec: s, kind: "raw", note: "按原样交给 dsh plugin add（npm 规格等）" };
+}
+
+/** 加速摘要：前缀 + 耗时（clone 关心 git 一列） */
+function accelText(a: GhAccel | null): string {
+  if (!a || a.nodes.length === 0) return "";
+  const git = a.nodes.find((n) => n.gitMs != null);
+  const dl = a.nodes[0];
+  const parts = [`git → ${git ? `${git.prefix} ${git.gitMs}ms` : "无可用 git 代理"}`];
+  if (dl) parts.push(`下载 → ${dl.prefix} ${dl.ms}ms`);
+  return parts.join(" · ");
+}
+
 /**
- * 插件的四种安装方式（全部由后端走官方 `dsh plugin` 命令，输出进内置终端）：
+ * 插件的三种安装方式（全部由后端走官方 `dsh plugin` 命令，输出进内置终端）：
  * 1. NPM 包 —— registry 搜索 / 精确规格；版本号可检测更新
- * 2. GitHub 仓库 —— 探测插件包（monorepo 子包一并列出）后安装；提交可检测更新
- * 3. 链接安装 —— 本地 link 路径或 .tgz 直链；仅手动更新
- * 4. Clone 仓库 + 本地 link —— 克隆到启动器目录，可 git pull 更新
+ * 2. 链接直装 —— 本地 link 路径、仓库插件链接或 .tgz 直链；无版本渠道，仅手动重装
+ * 3. Clone 仓库 + 本地 link —— 克隆到启动器目录，可 git pull 更新
+ *
+ * 只有 Clone 保留「探测」：探测 = 先真克隆到本地再扫描工作树（不查 jsDelivr 索引、
+ * 不查 GitHub 文件树），因此候选与 lib/ 判定与实际安装的那份目录完全一致。
  */
 export default function InstallPluginDialog({
   profile, open, onClose, onInstallMany, onCloneInstall,
@@ -82,20 +171,8 @@ export default function InstallPluginDialog({
   const [results, setResults] = useState<PackageSearchItem[]>([]);
   const [manualSpec, setManualSpec] = useState("");
 
-  // ── github ──
-  const [ghInput, setGhInput] = useState("");
-  const [ghPath, setGhPath] = useState("");
-  const [ghLoading, setGhLoading] = useState(false);
-  const [ghErr, setGhErr] = useState<string | null>(null);
-  const [ghInfo, setGhInfo] = useState<GitHubRepoInfo | null>(null);
-  const [ghSel, setGhSel] = useState<string[]>([]);
-
-  // ── 链接 ──
+  // ── 链接直装 ──
   const [linkInput, setLinkInput] = useState("");
-  const [linkProbing, setLinkProbing] = useState(false);
-  const [linkErr, setLinkErr] = useState<string | null>(null);
-  const [linkCands, setLinkCands] = useState<PluginCandidate[] | null>(null);
-  const [linkSel, setLinkSel] = useState<string[]>([]);
 
   // ── clone ──
   const [cloneInput, setCloneInput] = useState("");
@@ -104,16 +181,24 @@ export default function InstallPluginDialog({
   const [cloneBuild, setCloneBuild] = useState(true);
   const [cloneProbing, setCloneProbing] = useState(false);
   const [cloneErr, setCloneErr] = useState<string | null>(null);
-  const [cloneCands, setCloneCands] = useState<PluginCandidate[] | null>(null);
+  const [cloneProbe, setCloneProbe] = useState<CloneProbe | null>(null);
+  const [accelOn, setAccelOn] = useState(true);
+  const [accelInfo, setAccelInfo] = useState<GhAccel | null>(null);
+  const [accelLoading, setAccelLoading] = useState(false);
+  const [accelErr, setAccelErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setTab("npm");
     setQuery(""); setSearchErr(null); setResults([]); setManualSpec("");
-    setGhInput(""); setGhPath(""); setGhErr(null); setGhInfo(null); setGhSel([]);
-    setLinkInput(""); setLinkErr(null); setLinkCands(null); setLinkSel([]);
+    setLinkInput("");
     setCloneInput(""); setCloneRef(""); setClonePath(""); setCloneBuild(true);
-    setCloneErr(null); setCloneCands(null);
+    setCloneErr(null); setCloneProbe(null);
+    setAccelErr(null);
+    // 加速开关的默认值跟着设置走（clone 页仍可临时改成本次不加速）
+    api.getSettings().then((s) => setAccelOn(s.githubAccel)).catch(() => undefined);
+    // 已缓存的测速结果先显示出来；没有缓存就等用户点「测速」或探测时自动跑
+    api.getGithubAccel(false).then(setAccelInfo).catch(() => undefined);
   }, [open]);
 
   // ── npm 搜索 ──
@@ -132,83 +217,48 @@ export default function InstallPluginDialog({
     }
   }, [query]);
 
-  // ── GitHub 探测 ──
-  const previewGithub = useCallback(async () => {
-    let s = ghInput.trim();
-    if (!s) return;
-    const p = ghPath.trim();
-    if (p && !isTarballUrl(s)) {
-      s = s.includes("#") ? `${s}&path:${p}` : `${s}#path:${p}`;
-    }
-    setGhLoading(true);
-    setGhErr(null);
-    setGhInfo(null);
-    setGhSel([]);
-    try {
-      const info = await api.fetchGithubRepo(s);
-      setGhInfo(info);
-      // 默认选中第一个「已就绪」的候选，用户可再调整
-      const first = info.candidates.find((c) => c.ready) ?? info.candidates[0];
-      if (first) setGhSel([first.installSpec]);
-    } catch (e) {
-      setGhErr(String(e));
-    } finally {
-      setGhLoading(false);
-    }
-  }, [ghInput, ghPath]);
+  const link = useMemo(() => toInstallSpec(linkInput), [linkInput]);
 
-  // ── 本地路径探测 ──
-  const probeLocal = useCallback(async () => {
-    const p = linkInput.trim();
-    if (!p) return;
-    setLinkProbing(true);
-    setLinkErr(null);
-    setLinkCands(null);
-    setLinkSel([]);
+  // ── GitHub 加速：手动测速 ──
+  const measureAccel = useCallback(async () => {
+    setAccelLoading(true);
+    setAccelErr(null);
     try {
-      const list = await api.probeLocalPlugins(p);
-      setLinkCands(list);
-      const first = list.find((c) => c.ready) ?? list[0];
-      if (first) setLinkSel([first.installSpec]);
+      setAccelInfo(await api.getGithubAccel(true));
     } catch (e) {
-      setLinkErr(String(e));
+      setAccelErr(String(e));
     } finally {
-      setLinkProbing(false);
+      setAccelLoading(false);
     }
-  }, [linkInput]);
+  }, []);
 
-  // ── clone 前先探测仓库（可选，用于选子包） ──
+  // ── Clone 探测：先克隆（或同步）到 git-plugins，再本地扫描 ──
   const probeForClone = useCallback(async () => {
     const s = cloneInput.trim();
     if (!s) return;
     setCloneProbing(true);
     setCloneErr(null);
-    setCloneCands(null);
+    setCloneProbe(null);
     try {
-      const info = await api.fetchGithubRepo(s);
-      setCloneCands(info.candidates);
-      if (!cloneRef && info.gitRef) setCloneRef(info.gitRef);
+      const probe = await api.probeCloneRepo(normalizeGitUrl(s), cloneRef.trim() || refOf(s), accelOn);
+      setCloneProbe(probe);
+      if (probe.accel) {
+        // 探测时若刚测过速，顺手把结果拿到界面上（走缓存，不会二次联网）
+        api.getGithubAccel(false).then(setAccelInfo).catch(() => undefined);
+      }
+      if (!clonePath.trim()) {
+        const ready = probe.candidates.filter((c) => c.ready);
+        const pick = ready.length === 1 ? ready[0] : probe.candidates.length === 1 ? probe.candidates[0] : null;
+        if (pick) setClonePath(pick.path);
+      }
     } catch (e) {
       setCloneErr(String(e));
     } finally {
       setCloneProbing(false);
     }
-  }, [cloneInput, cloneRef]);
+  }, [cloneInput, cloneRef, accelOn, clonePath]);
 
-  const ghTarball = ghInfo?.probe === "tarball";
-  const selectedGh = useMemo(
-    () => (ghInfo?.candidates ?? []).filter((c) => ghSel.includes(c.installSpec)),
-    [ghInfo, ghSel],
-  );
-  // 直装要求：声明 dsh.bundle 且已带 lib/ 构建产物（后端 ProbeGithubPackage 是权威闸门）
-  const blockedGh = selectedGh.filter((c) => !c.ready || !c.libOk);
-  const needsBuildHint = blockedGh.length > 0;
-
-  const installGh = () => {
-    if (ghSel.length === 0) return;
-    onInstallMany(ghSel, "install");
-    onClose();
-  };
+  const accelSummary = useMemo(() => accelText(accelInfo), [accelInfo]);
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -233,8 +283,7 @@ export default function InstallPluginDialog({
           <Tabs value={tab} onValueChange={setTab} className="gap-4">
             <TabsList className="w-full">
               <TabsTrigger value="npm" className="text-xs">NPM 包</TabsTrigger>
-              <TabsTrigger value="github" className="text-xs">GitHub 仓库</TabsTrigger>
-              <TabsTrigger value="link" className="text-xs">链接 / 本地</TabsTrigger>
+              <TabsTrigger value="link" className="text-xs">链接直装</TabsTrigger>
               <TabsTrigger value="clone" className="text-xs">Clone 仓库</TabsTrigger>
             </TabsList>
 
@@ -367,238 +416,72 @@ export default function InstallPluginDialog({
               </Field>
             </TabsContent>
 
-            {/* ── 2. GitHub 仓库 ────────────────────── */}
-            <TabsContent value="github" className="space-y-4">
-              <Field>
-                <FieldLabel htmlFor="gh-repo" className={labelCls}>仓库地址</FieldLabel>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="gh-repo"
-                    autoFocus
-                    className="h-8 min-w-0 flex-1 font-mono text-xs"
-                    placeholder="owner/repo、仓库 URL 或 .tgz 直链"
-                    value={ghInput}
-                    onChange={(e) => setGhInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && previewGithub()}
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-8 shrink-0"
-                    disabled={ghLoading || !ghInput.trim()}
-                    onClick={previewGithub}
-                  >
-                    {ghLoading ? <Loader2 className="animate-spin" /> : <GitBranch />} 探测
-                  </Button>
-                </div>
-                <FieldDescription className={descCls}>
-                  探测会扫描整棵文件树：仓库根的插件包 + monorepo（pnpm-workspace / workspaces）
-                  的子包插件都会列出来，可一次勾选多个安装。走 jsDelivr CDN + git，不消耗
-                  GitHub API 额度（60 次/小时 的匿名限制不会因此被磨光）。
-                </FieldDescription>
-              </Field>
-
-              <Field>
-                <FieldLabel htmlFor="gh-path" className={labelCls}>
-                  插件在仓库中的路径{isTarballUrl(ghInput) ? "" : "（可选，填了就只看这一个）"}
-                </FieldLabel>
-                <Input
-                  id="gh-path"
-                  className="h-8 font-mono text-xs"
-                  placeholder="如 plugins/mcwiki-search"
-                  value={ghPath}
-                  disabled={isTarballUrl(ghInput)}
-                  onChange={(e) => setGhPath(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && previewGithub()}
-                />
-              </Field>
-
-              {ghErr && (
-                <Alert variant="destructive" className="py-1.5">
-                  <TriangleAlert />
-                  <AlertDescription className="text-[11.5px] leading-relaxed break-words">
-                    {ghErr}
-                  </AlertDescription>
-                </Alert>
-              )}
-
-              {ghInfo && (
-                <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
-                  <div className="flex items-start gap-2">
-                    <GitBranch className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                    <div className="min-w-0 flex-1 space-y-1.5">
-                      <div className="truncate font-mono text-[12.5px] font-semibold" title={ghInfo.fullName}>
-                        {ghInfo.fullName}
-                      </div>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <Badge variant="outline" className="font-mono text-[10px]">★ {ghInfo.stars}</Badge>
-                        {ghInfo.license && <Badge variant="secondary" className="text-[10px]">{ghInfo.license}</Badge>}
-                        {ghInfo.gitRef && <Badge variant="info" className="font-mono text-[10px]">#{ghInfo.gitRef}</Badge>}
-                        {ghInfo.isMonorepo && (
-                          <Badge variant="success" className="text-[10px]">
-                            monorepo · {ghInfo.workspaceGlobs.join(" ")}
-                          </Badge>
-                        )}
-                        {ghInfo.metaDegraded && (
-                          <Badge
-                            variant="outline"
-                            className="text-[10px]"
-                            title="探测与更新走 jsDelivr / git 免额度通道，不受影响；stars/license 需要 GitHub API，额度用尽时暂缺。可在设置里填 GitHub Token 提高额度。"
-                          >
-                            元数据受限
-                          </Badge>
-                        )}
-                        {ghInfo.probe === "contents" && (
-                          <Badge variant="warning" className="text-[10px]">已降级为单目录探测</Badge>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <p className="line-clamp-3 text-[11px] leading-relaxed text-muted-foreground">
-                    {ghInfo.description || "（无描述）"}
-                  </p>
-
-                  {ghTarball ? (
-                    <div className="space-y-2 border-t border-border pt-3">
-                      <div className="flex items-start gap-2 text-[10.5px]">
-                        <span className="shrink-0 pt-0.5 text-muted-foreground">直装链接</span>
-                        <span className="min-w-0 flex-1 break-all rounded-md bg-background/80 px-1.5 py-0.5 font-mono">
-                          {ghInfo.installSpec}
-                        </span>
-                      </div>
-                      <Button
-                        size="sm"
-                        className="w-full"
-                        onClick={() => {
-                          onInstallMany([ghInfo.installSpec], "install");
-                          onClose();
-                        }}
-                      >
-                        <Plus /> 安装该打包产物
-                      </Button>
-                      <p className={descCls}>
-                        打包产物直链没有版本渠道，之后只能手动重新安装同一链接来更新。
-                      </p>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="flex items-center gap-2 border-t border-border pt-3">
-                        <span className="text-[11.5px] font-semibold">
-                          探测到 {ghInfo.candidates.length} 个候选包
-                        </span>
-                        <span className="flex-1" />
-                        {ghInfo.factsPending && (
-                          <Badge variant="warning" className="text-[10px]">部分元数据读取超时</Badge>
-                        )}
-                      </div>
-                      <PluginCandidateList
-                        candidates={ghInfo.candidates}
-                        selected={ghSel}
-                        onChange={setGhSel}
-                        emptyText="这个仓库里没有找到含 package.json 的插件包"
-                      />
-                      {needsBuildHint && (
-                        <p className="text-[10.5px] leading-relaxed text-amber-600 dark:text-amber-400">
-                          只有<strong>声明了 dsh.bundle 且已提交 lib/ 构建产物</strong>的子包才能直装；
-                          没提交 lib/ 的请改用「Clone 仓库」方式安装（会先装依赖并构建）。
-                        </p>
-                      )}
-                    </>
-                  )}
-                </div>
-              )}
-
-              {!ghInfo && !ghErr && (
-                <p className="py-2 text-center text-[11.5px] leading-relaxed text-muted-foreground">
-                  输入仓库后先探测：GitHub 仓库安装按提交哈希检测更新
-                </p>
-              )}
-            </TabsContent>
-
-            {/* ── 3. 链接 / 本地 ────────────────────── */}
+            {/* ── 2. 链接直装 ───────────────────────── */}
             <TabsContent value="link" className="space-y-4">
               <Field>
-                <FieldLabel htmlFor="link-target" className={labelCls}>本地路径或打包产物链接</FieldLabel>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="link-target"
-                    autoFocus
-                    className="h-8 min-w-0 flex-1 font-mono text-xs"
-                    placeholder="/path/to/plugin 或 https://…/pkg.tgz"
-                    value={linkInput}
-                    onChange={(e) => setLinkInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && !isTarballUrl(linkInput) && probeLocal()}
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-8 shrink-0"
-                    disabled={linkProbing || !linkInput.trim() || isTarballUrl(linkInput)}
-                    onClick={probeLocal}
-                    title="本地目录：探测目录与 monorepo 子包"
-                  >
-                    {linkProbing ? <Loader2 className="animate-spin" /> : <Cable />} 探测
-                  </Button>
-                </div>
+                <FieldLabel htmlFor="link-target" className={labelCls}>
+                  本地路径 / 仓库插件链接 / .tgz 直链
+                </FieldLabel>
+                <Input
+                  id="link-target"
+                  autoFocus
+                  className="h-8 font-mono text-xs"
+                  placeholder="~/code/my-plugin、https://github.com/owner/repo/tree/main/plugins/x，或 https://…/pkg.tgz"
+                  value={linkInput}
+                  onChange={(e) => setLinkInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && link.spec) {
+                      onInstallMany([link.spec], "install");
+                      onClose();
+                    }
+                  }}
+                />
                 <FieldDescription className={descCls}>
-                  本地目录会用 <span className="font-mono">link:</span> 软链安装（改源码即时生效，无版本更新渠道）；
-                  也可以直接粘贴 <span className="font-mono">.tgz</span> / releases 资产链接安装。
+                  直接装，<strong>不做任何远端探测</strong>。这三类都没有版本渠道：装完只能手动重装同一来源更新；
+                  需要 <span className="font-mono">git pull</span> 式更新请用「Clone 仓库」。
                 </FieldDescription>
               </Field>
 
-              {isTarballUrl(linkInput) && (
+              {link.spec && (
                 <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge
+                      variant={link.kind === "link" ? "secondary" : link.kind === "github" ? "info" : "outline"}
+                      className="text-[10px]"
+                    >
+                      {link.kind === "link" ? "本地 link" : link.kind === "github" ? "GitHub 仓库" : link.kind === "tgz" ? "打包产物" : "原样规格"}
+                    </Badge>
+                    <span className="text-[10.5px] text-muted-foreground">{link.note}</span>
+                  </div>
                   <div className="flex items-start gap-2 text-[10.5px]">
                     <span className="shrink-0 pt-0.5 text-muted-foreground">安装规格</span>
                     <span className="min-w-0 flex-1 break-all rounded-md bg-background/80 px-1.5 py-0.5 font-mono">
-                      {linkInput.trim()}
+                      {link.spec}
                     </span>
                   </div>
                   <Button
                     size="sm"
                     className="w-full"
                     onClick={() => {
-                      onInstallMany([linkInput.trim()], "install");
+                      onInstallMany([link.spec], "install");
                       onClose();
                     }}
                   >
-                    <Plus /> 安装该打包产物
+                    <Plus /> 安装
                   </Button>
                 </div>
               )}
 
-              {linkErr && (
-                <Alert variant="destructive" className="py-1.5">
-                  <TriangleAlert />
-                  <AlertDescription className="text-[11.5px] leading-relaxed break-words">
-                    {linkErr}
-                  </AlertDescription>
-                </Alert>
-              )}
-
-              {linkCands && (
-                <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
-                  <div className="text-[11.5px] font-semibold">
-                    探测到 {linkCands.length} 个候选包
-                  </div>
-                  <PluginCandidateList
-                    candidates={linkCands}
-                    selected={linkSel}
-                    onChange={setLinkSel}
-                    emptyText="该目录下没有找到插件包（缺 package.json / lib）"
-                  />
-                </div>
-              )}
-
-              {!linkCands && !linkErr && !isTarballUrl(linkInput) && (
+              {!link.spec && (
                 <p className="py-2 text-center text-[11.5px] leading-relaxed text-muted-foreground">
-                  本地 link 与打包直链都属于「仅手动更新」：链接安装无法自动检测新版本
+                  支持：<span className="font-mono">/path/to/plugin</span>、
+                  <span className="font-mono">owner/repo#main&amp;path:plugins/x</span>、
+                  <span className="font-mono">https://…/pkg.tgz</span> 或任意 dsh 规格
                 </p>
               )}
             </TabsContent>
 
-            {/* ── 4. Clone 仓库 ─────────────────────── */}
+            {/* ── 3. Clone 仓库 ─────────────────────── */}
             <TabsContent value="clone" className="space-y-4">
               <Field>
                 <FieldLabel htmlFor="clone-url" className={labelCls}>git 远端地址</FieldLabel>
@@ -617,7 +500,7 @@ export default function InstallPluginDialog({
                     className="h-8 shrink-0"
                     disabled={cloneProbing || !cloneInput.trim()}
                     onClick={probeForClone}
-                    title="探测仓库内的插件子包（可选）"
+                    title="先克隆到本地，再扫描工作树里的插件包"
                   >
                     {cloneProbing ? <Loader2 className="animate-spin" /> : <GitBranch />} 探测
                   </Button>
@@ -625,9 +508,52 @@ export default function InstallPluginDialog({
                 <FieldDescription className={descCls}>
                   克隆到 <span className="font-mono">~/.dsh-launcher/git-plugins/&lt;owner&gt;-&lt;repo&gt;</span>，
                   再以 <span className="font-mono">link:</span> 安装。更新方式 = 在该目录 <span className="font-mono">git pull</span>
-                  （插件页「本地克隆仓库」里一键执行）。
+                  （插件页「本地克隆仓库」里一键执行）。<strong>探测 = 先克隆再本地扫描</strong>：慢一点，
+                  但候选与 <span className="font-mono">lib/</span> 判定就是安装用的那份工作树（不再查 jsDelivr 索引）。
                 </FieldDescription>
               </Field>
+
+              <div className="space-y-2 rounded-lg border border-border bg-background/50 px-3 py-2.5">
+                <div className="flex items-start gap-2.5">
+                  <Switch
+                    id="clone-accel"
+                    checked={accelOn}
+                    onCheckedChange={setAccelOn}
+                    className="mt-0.5"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <label htmlFor="clone-accel" className="flex items-center gap-1.5 text-[11.5px] font-medium">
+                      <Zap className="h-3.5 w-3.5 text-amber-500" /> GitHub 加速（本次 clone）
+                    </label>
+                    <p className={descCls}>
+                      把 github 链接拼到测速最快的<strong>前缀代理</strong>上（如
+                      <span className="font-mono"> https://gh-proxy.com/https://github.com/…</span>）：
+                      clone / fetch / pull 与 releases 资产下载都会走它，非 github 域名一律不动。
+                      结果缓存 6 小时，可直接在设置里固定用哪个前缀或补充自建代理。
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 shrink-0 px-2 text-[11px]"
+                    disabled={accelLoading}
+                    onClick={measureAccel}
+                    title="重新拉取 GitHub520 hosts 并测速"
+                  >
+                    {accelLoading ? <Loader2 className="animate-spin" /> : <Zap />} 测速
+                  </Button>
+                </div>
+                {accelSummary && (
+                  <p className="border-t border-border pt-2 font-mono text-[10px] text-muted-foreground">
+                    {accelInfo?.cached ? "缓存" : "本次测速"}：{accelSummary}
+                  </p>
+                )}
+                {accelErr && (
+                  <p className="border-t border-border pt-2 text-[10.5px] text-amber-600 dark:text-amber-400">
+                    测速失败（不挡安装，clone 走普通网络）：{accelErr}
+                  </p>
+                )}
+              </div>
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field>
@@ -670,6 +596,12 @@ export default function InstallPluginDialog({
                 </div>
               </div>
 
+              {cloneProbing && (
+                <p className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+                  正在克隆 / 同步仓库并扫描工作树…（首次会顺带测速，仓库大时请稍等）
+                </p>
+              )}
+
               {cloneErr && (
                 <Alert variant="destructive" className="py-1.5">
                   <TriangleAlert />
@@ -679,19 +611,34 @@ export default function InstallPluginDialog({
                 </Alert>
               )}
 
-              {cloneCands && (
+              {cloneProbe && (
                 <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
-                  <div className="text-[11.5px] font-semibold">
-                    仓库内 {cloneCands.length} 个候选包（点「填入」设定子路径）
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11.5px] font-semibold">
+                      扫描到 {cloneProbe.candidates.length} 个候选包
+                    </span>
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      {cloneProbe.dirName}
+                    </Badge>
+                    {cloneProbe.gitRef && (
+                      <Badge variant="info" className="font-mono text-[10px]">#{cloneProbe.gitRef}</Badge>
+                    )}
+                    {cloneProbe.accel && (
+                      <Badge variant="success" className="text-[10px]" title={cloneProbe.accel}>
+                        <Zap /> 已加速
+                      </Badge>
+                    )}
                   </div>
+                  <p className="break-all font-mono text-[10px] text-muted-foreground">{cloneProbe.root}</p>
                   <PluginCandidateList
-                    candidates={cloneCands}
-                    selected={clonePath ? [cloneCands.find((c) => c.path === clonePath)?.installSpec ?? ""].filter(Boolean) : []}
+                    candidates={cloneProbe.candidates}
+                    selected={clonePath ? [cloneProbe.candidates.find((c) => c.path === clonePath)?.installSpec ?? ""].filter(Boolean) : []}
                     onChange={(specs) => {
-                      const hit = cloneCands.find((c) => c.installSpec === specs[specs.length - 1]);
+                      const hit = cloneProbe.candidates.find((c) => c.installSpec === specs[specs.length - 1]);
                       setClonePath(hit?.path ?? "");
                     }}
                     multiple={false}
+                    emptyText="工作树里没有找到插件包（缺 package.json / dsh.bundle）"
                   />
                 </div>
               )}
@@ -701,26 +648,16 @@ export default function InstallPluginDialog({
 
         {/* 固定脚注：主操作按当前标签页变化 */}
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border bg-muted/30 px-5 py-2.5">
-          {tab === "github" && ghInfo && !ghTarball && (
-            <Button size="sm" disabled={ghSel.length === 0 || blockedGh.length > 0} onClick={installGh}>
-              <Plus /> 安装选中的 {ghSel.length} 个插件
-            </Button>
-          )}
-          {tab === "github" && blockedGh.length > 0 && (
-            <span className="text-[10.5px] leading-relaxed text-amber-600 dark:text-amber-400">
-              选中的 {blockedGh.length} 个包没有 lib/ 构建产物（或未声明 dsh.bundle），不能直装 —— 请改用「Clone 仓库」标签页安装
-            </span>
-          )}
-          {tab === "link" && linkCands && (
+          {tab === "link" && (
             <Button
               size="sm"
-              disabled={linkSel.length === 0}
+              disabled={!link.spec}
               onClick={() => {
-                onInstallMany(linkSel, "install");
+                onInstallMany([link.spec], "install");
                 onClose();
               }}
             >
-              <Plus /> link 安装选中的 {linkSel.length} 个
+              <Cable /> 直装 {link.kind === "link" ? "本地 link" : link.kind === "github" ? "仓库链接" : link.kind === "tgz" ? "打包产物" : "该规格"}
             </Button>
           )}
           {tab === "clone" && (
@@ -728,12 +665,15 @@ export default function InstallPluginDialog({
               size="sm"
               disabled={!cloneInput.trim()}
               onClick={() => {
-                onCloneInstall({
-                  url: normalizeGitUrl(cloneInput),
-                  gitRef: cloneRef.trim() || refOf(cloneInput),
-                  subPath: clonePath.trim() || null,
-                  build: cloneBuild,
-                });
+                onCloneInstall(
+                  {
+                    url: normalizeGitUrl(cloneInput),
+                    gitRef: cloneRef.trim() || refOf(cloneInput),
+                    subPath: clonePath.trim() || null,
+                    build: cloneBuild,
+                  },
+                  accelOn,
+                );
                 onClose();
               }}
             >
