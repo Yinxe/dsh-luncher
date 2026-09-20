@@ -101,6 +101,7 @@ jobs:
           releaseBody: '跨平台安装包，请从下方 Assets 下载：Linux（.deb / .rpm / .AppImage）、Windows（NSIS .exe 安装包 / .msi）、macOS（universal .dmg）。'
           releaseDraft: true
           prerelease: false
-          # 生成 updater 清单 latest.json 并上传到同一个 Release —— 应用内自动更新的数据源
-          includeUpdaterJson: true
+          # 生成 updater 清单 latest.json 并上传到同一个 Release —— 应用内自动更新的数据源。
+          # 注意输入名：v1 是 uploadUpdaterJson（v0 那版叫 includeUpdaterJson，写错会被静默忽略）
+          uploadUpdaterJson: true
           args: ${{ matrix.args }} ${{ steps.ver.outputs.config_arg }}
