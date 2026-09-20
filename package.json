@@ -1,7 +1,7 @@
 {
   "name": "dsh-launcher",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Cross-platform launcher for @deepseek-ai/dsh",
   "type": "module",
   "scripts": {
@@ -13,7 +13,10 @@
     "app": "tauri dev",
     "build:debug": "tauri build --debug --no-bundle",
     "build:release": "tauri build",
-    "release": "npm run build:release"
+    "release": "npm run build:release",
+    "notes": "node scripts/release-notes.mjs",
+    "notes:check": "node scripts/release-notes.mjs --check",
+    "notes:archive": "node scripts/release-notes.mjs --all --write"
   },
   "dependencies": {
     "@codemirror/lang-yaml": "^6.1.3",

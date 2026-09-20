@@ -1,13 +1,17 @@
 name: 发布
 
 # 官方模板：https://v2.tauri.app/distribute/pipelines/github
-# 只改了三处，都在代码里标了 ★：
+# 在原模板上改了四处，代码里都标了 ★：
 #   ★1 触发方式：push 到 main（平时在 dev 开发，合进 main 即发版）+ 手动触发
 #   ★2 注入签名密钥：否则产物没有 .sig、也不会生成 latest.json
-#   ★3 末尾加一个 4 行作业：把官方模板停在 Draft 的 release 自动转正式
+#   ★3 发布说明取自 CHANGELOG.md：本版本段落缺失 / 三处版本号不一致就直接失败；
+#      正文会由 tauri-action 写进 latest.json 的 notes → 客户端「发现新版本」直接展示
+#   ★4 末尾一个作业：把停在 Draft 的 release 转正式，发布前再按 CHANGELOG 刷一遍正文
 #
-# 发版流程：改 src-tauri/tauri.conf.json 与 src-tauri/Cargo.toml 的 version
-# （两处要一致）→ 合进 main → 完事。版本号没改就推 main 也不会白跑，会跳过。
+# 发版流程：CHANGELOG.md 加 ## [新版本号] - 日期 段落（写清用户可见变化）
+# → 三处版本号一起改（src-tauri/tauri.conf.json、src-tauri/Cargo.toml、package.json）
+# → npm run notes:archive 生成归档快照 → 合进 main → 完事。
+# 版本号没改就推 main 也不会白跑：门禁会跳过，不会重复发版。
 on:
   push:
     branches: [main]
@@ -57,6 +61,27 @@ jobs:
         with:
           node-version: lts/*
 
+      # ★3 发布说明门禁 + 提取。CHANGELOG.md 是唯一来源：
+      # - 三处版本号不一致 → 失败
+      # - 本版本在 CHANGELOG 里没有段落 / 段落里没有任何「- 」条目 → 失败
+      # 这样就不会再发出去「Windows：.exe / .msi」这种没有信息量的说明。
+      - name: 读取本版本发布说明（CHANGELOG.md）
+        id: notes
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: |
+          node scripts/release-notes.mjs --check > release-notes.md
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            cat release-notes.md
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### 本版本发布说明"
+            echo
+            cat release-notes.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: install Rust stable
         if: steps.gate.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@stable
@@ -84,23 +109,64 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: 'DSH Launcher v__VERSION__'
-          releaseBody: 'Windows：.exe / .msi　Linux：.deb / .rpm / .AppImage　macOS：universal .dmg'
+          # ★3 真正的更新说明：与 latest.json 的 notes 同源，客户端直接展示
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
 
-  # ★3 官方模板到这里就结束了 —— release 停在 Draft，等你去网页点 Publish。
+  # 规范门禁：不碰 Rust/WebKit，几十秒出结果，而且**版本号没变时也会跑**。
+  # 作用是把「忘了写 CHANGELOG / 三处版本号不同步 / 前端类型挂了」挡在发版之前，
+  # 而不是等 7 分钟的打包跑完才发现。
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+
+      - name: install frontend dependencies
+        run: npm ci
+
+      - name: 前端类型检查 + 构建
+        run: npm run build
+
+      - name: CHANGELOG 与本版本发布说明
+        run: npm run notes:check
+
+  # ★4 官方模板到这里就结束了 —— release 停在 Draft，等你去网页点 Publish。
   # 但 releases/latest 只认「非草稿 + 非预发布」，停在草稿或误勾 pre-release
   # 都会让客户端一直「检查不到更新」，所以这里自动转正式。
   # 之所以必须先草稿：三个平台是并发跑的，直接发布会让先跑完的那个把
   # release 发出去，另外两个找不到草稿就去创建 → 422 already_exists，
   # 结果整个平台的产物都缺失。
   publish:
-    needs: publish-tauri
+    needs: [publish-tauri, check]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
+      # 发布前统一按 CHANGELOG 刷一遍正文：草稿可能由任一平台先创建，
+      # 这样 Release 页面与客户端看到的说明一定一致。
+      - name: 用 CHANGELOG 刷新 Release 正文
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RID=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '[.[] | select(.draft)][0].id // empty')
+          if [ -z "$RID" ]; then
+            echo "没有草稿（版本号未变时就是这样），结束"
+            exit 0
+          fi
+          node scripts/release-notes.mjs --check > release-notes.md
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RID" \
+            -F body="$(cat release-notes.md)" \
+            --jq '"正文已按 CHANGELOG 刷新：\(.tag_name)"'
+
       - name: 把草稿发布为正式 release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
