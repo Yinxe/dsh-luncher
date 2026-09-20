@@ -20,6 +20,13 @@ pub fn compare(a: &str, b: &str) -> std::cmp::Ordering {
 
 fn split_version(v: &str) -> (Vec<u64>, String) {
     let v = v.trim().trim_start_matches('v');
+    // 先剥掉 build metadata（semver 里 '+' 之后、与预发布无关且比较时忽略）：
+    // 否则 "1.0.0+build.2" 的 "0+build" 段解析失败退成 0、"2" 变成第 4 个数字段，
+    // 会被误判成比 "1.0.0" 更新。
+    let v = match v.split_once('+') {
+        Some((base, _)) => base,
+        None => v,
+    };
     let (core, pre) = match v.split_once('-') {
         Some((c, p)) => (c, p),
         None => (v, ""),
@@ -84,5 +91,10 @@ mod tests {
         assert_eq!(compare("0.1.5-rc.2", "0.1.5-alpha.2"), Greater);
         assert_eq!(compare("1.0.0", "0.9.9"), Greater);
         assert_eq!(compare("0.1.5-rc.2", "0.1.5-rc.2"), Equal);
+        // build metadata（'+' 之后）比较时忽略：不得让版本看起来更新
+        assert_eq!(compare("1.0.0+build.2", "1.0.0"), Equal);
+        assert_eq!(compare("1.0.0", "1.0.0+build.2"), Equal);
+        assert_eq!(compare("1.0.0-rc.1+build.5", "1.0.0-rc.1"), Equal);
+        assert_eq!(compare("1.0.1+build.2", "1.0.0"), Greater);
     }
 }
