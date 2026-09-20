@@ -563,11 +563,13 @@ pub fn purge_deleted_profile(dir_name: String) -> Result<(), String> {
 /// 从随附模板新建，再把端口等快捷配置写进它自己的 cordis.patch.yml）。
 /// 只在用户显式点击并确认后调用，启动器不会自动创建。
 #[tauri::command]
-pub fn create_recovery_profile(
+pub async fn create_recovery_profile(
     state: State<'_, AppState>,
 ) -> Result<crate::profile_cfg::RecoveryCreated, String> {
     let settings = state.settings.lock().unwrap().clone();
-    crate::profile_cfg::create_recovery_profile(&settings)
+    tauri::async_runtime::spawn_blocking(move || crate::profile_cfg::create_recovery_profile(&settings))
+        .await
+        .map_err(|e| format!("创建恢复模式失败: {e}"))?
 }
 
 /// 把运行日志导出到 ~/.dsh-launcher/logs/
@@ -592,12 +594,14 @@ pub fn export_proc_log(
 // ── 插件管理与配置文件 ──────────────────────
 
 #[tauri::command]
-pub fn get_profile_detail(
+pub async fn get_profile_detail(
     state: State<'_, AppState>,
     profile: String,
 ) -> Result<crate::profile_cfg::ProfileDetail, String> {
     let settings = state.settings.lock().unwrap().clone();
-    crate::profile_cfg::read_detail(&settings, &profile)
+    tauri::async_runtime::spawn_blocking(move || crate::profile_cfg::read_detail(&settings, &profile))
+        .await
+        .map_err(|e| format!("读取配置详情失败: {e}"))?
 }
 
 #[tauri::command]
@@ -606,14 +610,18 @@ pub fn get_patch_reload(profile: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn set_bundle_enabled(
+pub async fn set_bundle_enabled(
     state: State<'_, AppState>,
     profile: String,
     name: String,
     enabled: bool,
 ) -> Result<(), String> {
     let settings = state.settings.lock().unwrap().clone();
-    crate::profile_cfg::set_bundle_enabled(&settings, &profile, &name, enabled)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::profile_cfg::set_bundle_enabled(&settings, &profile, &name, enabled)
+    })
+    .await
+    .map_err(|e| format!("切换插件包状态失败: {e}"))?
 }
 
 // ── 插件管理（全部走官方 dsh plugin 命令，输出实时进内置终端） ──────
