@@ -213,7 +213,11 @@ export default function CredentialsView({ onToast }: Props) {
               <span className="eyebrow">refs · 命名凭据</span>
               <Badge variant="secondary">{refs.length}</Badge>
               <span className="flex-1" />
-              <Button size="sm" variant="outline" onClick={() => setAddOpen(true)}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => { setAddName(""); setAddValue(""); setAddOpen(true); }}
+              >
                 <Plus /> 添加凭据
               </Button>
             </div>
