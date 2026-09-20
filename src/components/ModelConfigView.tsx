@@ -443,14 +443,13 @@ export default function ModelConfigView({ onToast }: Props) {
     const id = pendingDelete;
     setPendingDelete(null);
     setProvs((ps) => ps.filter((p) => p.id !== id));
-    setDm((cur) => {
-      if (cur && cur.provider === id) {
-        onToast("info", "默认模型指向的 Provider 已删除，默认模型一并清除");
-        return null;
-      }
-      return cur;
-    });
-  }, [pendingDelete, onToast]);
+    // 不在 setDm 的 updater 里调 onToast：StrictMode 下 updater 跑两次会重复弹提示，
+    // 且属于渲染阶段副作用。直接用当前 dm 判断，命中才清默认并提示（同 deleteModel）。
+    if (dm && dm.provider === id) {
+      setDm(null);
+      onToast("info", "默认模型指向的 Provider 已删除，默认模型一并清除");
+    }
+  }, [pendingDelete, dm, onToast]);
 
   // ── 默认模型联动 ────────────────────────────
   const dmProvider = useMemo(
