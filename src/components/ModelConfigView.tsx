@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot, Check, ChevronDown, KeyRound, Loader2, Plus, RefreshCw, RotateCcw, Save, Star, Trash2, TriangleAlert,
 } from "lucide-react";
@@ -13,6 +13,9 @@ import {
 } from "@/components/ui/command";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
+import {
+  InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput,
+} from "@/components/ui/input-group";
 import { Label } from "@/components/ui/label";
 import {
   Popover, PopoverAnchor, PopoverContent,
@@ -26,6 +29,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { cn } from "@/lib/utils";
 import { api } from "../api";
 import type { ModelConfigInfo, ModelConfigInput, ModelEntryInput, RemoteModelInfo } from "../types";
 
@@ -104,81 +108,146 @@ const deriveKeyName = (id: string): string => {
   return t ? `${t}_API_KEY` : "CUSTOM_API_KEY";
 };
 
-/** 上下文窗口等数字的短格式提示（1000000 → 1M，128000 → 128K） */
-const fmtShort = (v: string): string | null => {
-  const n = Number(v);
-  if (v.trim() === "" || !Number.isFinite(n) || n <= 0) return null;
+interface ComboOption {
+  value: string;
+  /** 右侧灰色说明（如 1M → 1,000,000） */
+  hint?: string;
+}
+
+/** 解析 token 数量：支持纯数字、千分位/下划线分隔，以及 K/M 后缀（如 128000、128K、1M、1.5M） */
+const parseTokenCount = (raw: string): number | null => {
+  const v = raw.trim().replace(/[_,\s]/g, "");
+  const m = /^(\d+(?:\.\d+)?)([kKmM]?)$/.exec(v);
+  if (!m) return null;
+  const unit = m[2].toLowerCase();
+  const n = Number(m[1]) * (unit === "m" ? 1_000_000 : unit === "k" ? 1_000 : 1);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(n);
+};
+
+/** 数字 → 紧凑写法（1000000 → 1M，128000 → 128K） */
+const fmtCompact = (n: number): string => {
   const trim = (x: number) => String(Math.round(x * 10) / 10);
   if (n >= 1_000_000) return `${trim(n / 1_000_000)}M`;
   if (n >= 1_000) return `${trim(n / 1_000)}K`;
   return String(n);
 };
 
-/** 密钥引用名输入框：可直接输入，也可从已有凭据下拉选择（Popover + Command 组合） */
-function CredCombobox({
-  id, value, onChange, options, placeholder,
+/** 输入内容的紧凑提示：仅当写法与输入不同才返回（128000 → 128K；128K → null） */
+const fmtShort = (v: string): string | null => {
+  const n = parseTokenCount(v);
+  if (n == null) return null;
+  const c = fmtCompact(n);
+  const normalized = v.trim().replace(/[_,\s]/g, "").toLowerCase();
+  return c.toLowerCase() === normalized ? null : c;
+};
+
+/** 常用上下文窗口 / 最大输出预设 */
+const CONTEXT_OPTIONS: ComboOption[] = ["32K", "64K", "128K", "200K", "256K", "384K", "512K", "1M"]
+  .map((v) => ({ value: v, hint: parseTokenCount(v)?.toLocaleString("en-US") }));
+const MAX_TOKEN_OPTIONS: ComboOption[] = ["4K", "8K", "16K", "32K", "64K", "128K"]
+  .map((v) => ({ value: v, hint: parseTokenCount(v)?.toLocaleString("en-US") }));
+
+/** 可输入 + 可选的下拉输入框（Popover + Command 组合）：既能手输任意值，也能从列表选择 */
+function EditableCombobox({
+  id, value, onChange, options, placeholder, filter = false, mono = true, emptyText,
 }: {
   id: string;
   value: string;
   onChange: (v: string) => void;
-  options: string[];
+  options: ComboOption[];
   placeholder: string;
+  /** true = 选项随输入内容过滤（凭据名）；false = 始终展示全部预设 */
+  filter?: boolean;
+  mono?: boolean;
+  emptyText?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLDivElement>(null);
   const q = value.trim().toLowerCase();
-  const list = q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
+  const list = filter && q ? options.filter((o) => o.value.toLowerCase().includes(q)) : options;
+
+  /** 点在输入框/下拉按钮上时阻止关闭——否则刚获得焦点弹出的列表会被判为「外部交互」而收起 */
+  const keepOpenInside = useCallback(
+    (e: { target: EventTarget | null; preventDefault: () => void }) => {
+      const t = e.target;
+      if (t instanceof Node && anchorRef.current?.contains(t)) e.preventDefault();
+    },
+    [],
+  );
+
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverAnchor asChild>
-        <div className="relative">
-          <Input
-            id={id}
-            role="combobox"
-            aria-expanded={open}
-            autoComplete="off"
-            className="pr-8 font-mono text-xs"
-            placeholder={placeholder}
-            value={value}
-            onChange={(e) => {
-              onChange(e.target.value);
-              setOpen(true);
-            }}
-            onFocus={() => setOpen(true)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") setOpen(false);
-            }}
-          />
-          <ChevronDown
-            className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
-          />
+        <div ref={anchorRef} className="w-full">
+          <InputGroup className="h-8">
+            <InputGroupInput
+              id={id}
+              role="combobox"
+              aria-expanded={open}
+              aria-autocomplete="list"
+              autoComplete="off"
+              className={cn("text-xs", mono && "font-mono")}
+              placeholder={placeholder}
+              value={value}
+              onChange={(e) => {
+                onChange(e.target.value);
+                setOpen(true);
+              }}
+              onFocus={() => setOpen(true)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setOpen(false);
+                else if (e.key === "ArrowDown") setOpen(true);
+              }}
+            />
+            <InputGroupAddon align="inline-end">
+              <InputGroupButton
+                size="icon-xs"
+                aria-label={open ? "收起可选值" : "展开可选值"}
+                onClick={() => {
+                  const next = !open;
+                  setOpen(next);
+                  if (next) anchorRef.current?.querySelector("input")?.focus();
+                }}
+              >
+                <ChevronDown className={cn("transition-transform", open && "rotate-180")} />
+              </InputGroupButton>
+            </InputGroupAddon>
+          </InputGroup>
         </div>
       </PopoverAnchor>
       <PopoverContent
         className="w-[var(--radix-popover-anchor-width)] p-0"
         align="start"
         onOpenAutoFocus={(e) => e.preventDefault()}
+        onInteractOutside={keepOpenInside}
+        onPointerDownOutside={keepOpenInside}
+        onFocusOutside={keepOpenInside}
       >
         <Command shouldFilter={false}>
           <CommandList>
             {list.length > 0 ? (
               <CommandGroup>
-                {list.map((n) => (
+                {list.map((o) => (
                   <CommandItem
-                    key={n}
-                    value={n}
+                    key={o.value}
+                    value={o.value}
                     onSelect={() => {
-                      onChange(n);
+                      onChange(o.value);
                       setOpen(false);
                     }}
-                    className="font-mono text-xs"
+                    className={cn("text-xs", mono && "font-mono")}
                   >
-                    <Check className={n === value ? "opacity-100" : "opacity-0"} />
-                    {n}
+                    <Check className={cn("h-3.5 w-3.5", o.value === value ? "opacity-100" : "opacity-0")} />
+                    <span>{o.value}</span>
+                    {o.hint && (
+                      <span className="ml-auto text-[10.5px] font-normal text-muted-foreground">{o.hint}</span>
+                    )}
                   </CommandItem>
                 ))}
               </CommandGroup>
             ) : (
-              <CommandEmpty>无匹配凭据——直接按输入的名称创建新凭据</CommandEmpty>
+              <CommandEmpty>{emptyText ?? "无匹配选项——可直接输入自定义值"}</CommandEmpty>
             )}
           </CommandList>
         </Command>
@@ -295,8 +364,8 @@ export default function ModelConfigView({ onToast }: Props) {
         else if (mids.has(mid)) list.push(`Provider「${id}」模型 ID 重复: ${mid}`);
         mids.add(mid);
         for (const f of ["contextWindow", "maxTokens"] as const) {
-          if (m[f].trim() !== "" && !/^\d+$/.test(m[f].trim())) {
-            list.push(`Provider「${id}」模型「${mid}」的 ${f} 需为非负整数`);
+          if (m[f].trim() !== "" && parseTokenCount(m[f]) == null) {
+            list.push(`Provider「${id}」模型「${mid}」的 ${f} 需为数字或带 K/M 单位的数量（如 128K、1M）`);
           }
         }
       }
@@ -497,8 +566,8 @@ export default function ModelConfigView({ onToast }: Props) {
           models: p.models.map((m): ModelEntryInput => ({
             id: m.id.trim(),
             name: m.name.trim() || null,
-            contextWindow: m.contextWindow.trim() === "" ? null : Number(m.contextWindow.trim()),
-            maxTokens: m.maxTokens.trim() === "" ? null : Number(m.maxTokens.trim()),
+            contextWindow: parseTokenCount(m.contextWindow),
+            maxTokens: parseTokenCount(m.maxTokens),
             input: m.input,
             reasoningEfforts: kvToObj(m.reasoningEfforts),
             extra: m.extra,
@@ -562,6 +631,7 @@ export default function ModelConfigView({ onToast }: Props) {
         <span className="font-mono text-foreground"> agent-default-model</span>
         （默认模型），保存只重写这两节，其余内容与节外注释逐字节保留，写前自动备份。
         API 密钥可选择已有凭据或手动输入——手动输入的密钥保存时回存到「凭据管理」；
+        上下文窗口 / 最大输出可直接填数字，也可用 128K、1M 这类写法；
         模型的思考等级不填则不写入（保持 dsh 默认）。
       </div>
 
@@ -739,12 +809,14 @@ export default function ModelConfigView({ onToast }: Props) {
                   <Label className="flex items-center gap-1.5 text-xs">
                     <KeyRound className="h-3 w-3" /> API 密钥
                   </Label>
-                  <CredCombobox
+                  <EditableCombobox
                     id={`key-${p.id}`}
                     value={p.keyName}
                     onChange={(v) => patchProvider(pIdx, { keyName: v })}
-                    options={credNames}
+                    options={credNames.map((n) => ({ value: n }))}
                     placeholder={`选择已有凭据或输入名称（如 ${deriveKeyName(p.id)}）`}
+                    filter
+                    emptyText="无匹配凭据——直接按输入的名称创建新凭据"
                   />
                   {keyName === "" ? (
                     <p className="text-[11px] text-muted-foreground">
@@ -912,13 +984,12 @@ export default function ModelConfigView({ onToast }: Props) {
                                   </span>
                                 )}
                               </Label>
-                              <Input
-                                type="number"
-                                min={0}
-                                className="h-8 font-mono text-xs"
-                                placeholder="如 1000000"
+                              <EditableCombobox
+                                id={`ctx-${p.id}-${mIdx}`}
                                 value={m.contextWindow}
-                                onChange={(e) => patchModel(pIdx, mIdx, { contextWindow: e.target.value })}
+                                onChange={(v) => patchModel(pIdx, mIdx, { contextWindow: v })}
+                                options={CONTEXT_OPTIONS}
+                                placeholder="如 128K 或 1000000"
                               />
                             </div>
                             <div className="space-y-1.5">
@@ -930,13 +1001,12 @@ export default function ModelConfigView({ onToast }: Props) {
                                   </span>
                                 )}
                               </Label>
-                              <Input
-                                type="number"
-                                min={0}
-                                className="h-8 font-mono text-xs"
-                                placeholder="如 128000"
+                              <EditableCombobox
+                                id={`max-${p.id}-${mIdx}`}
                                 value={m.maxTokens}
-                                onChange={(e) => patchModel(pIdx, mIdx, { maxTokens: e.target.value })}
+                                onChange={(v) => patchModel(pIdx, mIdx, { maxTokens: v })}
+                                options={MAX_TOKEN_OPTIONS}
+                                placeholder="如 32K 或 32000"
                               />
                             </div>
                             <div className="space-y-1.5 sm:col-span-2">
@@ -1005,6 +1075,16 @@ export default function ModelConfigView({ onToast }: Props) {
                       </div>
                     );
                   })}
+                  {p.models.length > 0 && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="w-full border-dashed text-muted-foreground hover:text-foreground"
+                      onClick={() => addModel(pIdx)}
+                    >
+                      <Plus /> 添加模型
+                    </Button>
+                  )}
                   {p.models.length === 0 && (
                     <div className="rounded-lg border border-dashed px-4 py-6 text-center text-xs text-muted-foreground">
                       暂无模型——「获取可用模型」从服务方拉取，或「添加模型」手动新建
