@@ -266,8 +266,10 @@ export default function App() {
     }));
     track(events.onLauncherUpdate?.((s) => {
       setUpdate(s);
-      // 静默自动更新：后端已经在下载了，这里把进度条顶起来
-      if (s.available && settingsRef.current?.autoInstallUpdate && s.mode === "builtin") {
+      // 静默自动更新：后端已经在下载了，这里把进度条顶起来。
+      // 必须和后端 emit_startup_checks 的门禁一致（builtin + autoInstall + 不需要提权），
+      // 否则 deb/rpm 需要管理员授权时后端不会自动装，这里却把按钮卡在「下载安装中…」再也点不动。
+      if (s.available && settingsRef.current?.autoInstallUpdate && s.mode === "builtin" && !s.needsElevation) {
         setUpdateApplying(true);
         setUpdateProgress({ received: 0, total: 0 });
       }

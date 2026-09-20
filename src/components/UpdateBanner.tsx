@@ -108,7 +108,11 @@ export default function UpdateBanner({
           {downloadable && (
             <Button size="sm" onClick={() => onOpenUrl(status.url!)}>前往下载</Button>
           )}
-          <Button size="sm" variant="ghost" onClick={onDismiss}>稍后</Button>
+          {/* 内置更新一旦开始下载就会在安装成功后直接重启进程，无法取消；
+              这时再给「稍后」会让人误以为能取消，故隐藏。 */}
+          {!(applying && installable) && (
+            <Button size="sm" variant="ghost" onClick={onDismiss}>稍后</Button>
+          )}
         </AlertAction>
       </Alert>
 
