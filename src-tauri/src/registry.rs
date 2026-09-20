@@ -1139,6 +1139,13 @@ pub fn parse_github_spec(input: &str) -> Option<GitHubPluginSpec> {
         }
         plugin_path = Some(clean.to_string());
     }
+    // git_ref 会被拼进 api.github.com / jsDelivr / raw 的 URL 以及 git 参数，
+    // 必须限制字符集，防止 `#../..`、`?`、`@` 等改写请求路径或注入凭据。
+    if let Some(r) = &git_ref {
+        if !is_safe_git_ref(r) {
+            return None;
+        }
+    }
     Some(GitHubPluginSpec {
         owner: owner.into(),
         repo: repo.into(),
@@ -1146,6 +1153,20 @@ pub fn parse_github_spec(input: &str) -> Option<GitHubPluginSpec> {
         plugin_path,
         tarball_url: None,
     })
+}
+
+/// git 分支/标签/提交名是否可安全用于 URL 拼接与 git 命令行。
+/// 允许 git ref 常见字符（字母数字与 `. / - _`），禁止空、超长、含 `..`、以 `/` 起止。
+pub fn is_safe_git_ref(r: &str) -> bool {
+    let r = r.trim();
+    !r.is_empty()
+        && r.len() <= 200
+        && !r.contains("..")
+        && !r.starts_with('/')
+        && !r.ends_with('/')
+        && r
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '-' | '_'))
 }
 
 /// 由原始 git 规格构造「升级规格」：保留分支/标签（非 sha）与 `path:` 插件路径，
@@ -1231,7 +1252,11 @@ pub fn parse_upload_pack_refs(body: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i + 4 <= bytes.len() {
-        let Ok(len) = usize::from_str_radix(&body[i..i + 4], 16) else {
+        // pkt-line 长度头是 4 字节 ASCII 十六进制；用字节切片避免 str 索引落在多字节字符中间 panic
+        let Ok(header) = std::str::from_utf8(&bytes[i..i + 4]) else {
+            break;
+        };
+        let Ok(len) = usize::from_str_radix(header, 16) else {
             break;
         };
         if len == 0 {
@@ -1242,7 +1267,8 @@ pub fn parse_upload_pack_refs(body: &str) -> Vec<(String, String)> {
             break;
         }
         let end = (i + len).min(bytes.len());
-        let line = body[i + 4..end].trim_end_matches('\n');
+        let line = String::from_utf8_lossy(&bytes[i + 4..end]);
+        let line = line.trim_end_matches('\n');
         if let Some((sha, name)) = line.split_once(' ') {
             let name = name.split('\0').next().unwrap_or(name).trim();
             if sha.len() == 40
@@ -1436,9 +1462,15 @@ pub async fn github_head_commit(
         }
     }
 
-    // 兜底：git 二进制（6s 上限，见 git_remote_head 的注释）
+    // 兜底：git 二进制（6s 上限，见 git_remote_head 的注释）——阻塞子进程，放到 spawn_blocking
     let url = format!("https://github.com/{owner}/{repo}.git");
-    match crate::plugin::git_remote_head(&url, git_ref) {
+    let git_ref_owned = git_ref.map(|s| s.to_string());
+    let head = tauri::async_runtime::spawn_blocking(move || {
+        crate::plugin::git_remote_head(&url, git_ref_owned.as_deref())
+    })
+    .await
+    .map_err(|e| format!("git 兜底查询任务失败: {e}"))?;
+    match head {
         Ok(sha) => {
             cache_put(&key, &sha);
             Ok(Some(sha))
