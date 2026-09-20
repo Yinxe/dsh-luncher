@@ -68,7 +68,7 @@ export default function ConfigView({ onToast }: Props) {
         <Card className="p-10 text-center text-muted-foreground">
           配置文件不存在——dsh 首次运行后会自动创建。
           <div className="mt-3">
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => { setDraft("# dsh 全局配置\n"); setMissing(false); }}>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => { setDraft("# dsh 全局配置\n"); setDirty(true); setMissing(false); }}>
               创建初始内容
             </Button>
           </div>
