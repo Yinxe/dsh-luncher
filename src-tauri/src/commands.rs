@@ -1297,8 +1297,9 @@ pub async fn install_runtime(
 }
 
 /// 启动器启动时推送一次自动检查结果给前端。
-/// 清单地址为空时回落到内置 Tauri updater（能直接下载安装）；
-/// 开了 autoInstallUpdate 且更新源支持应用内安装时，不等用户点确认直接静默升级。
+/// 清单地址为空时回落到内置 Tauri updater（能直接下载安装）。
+/// 默认只提示、由用户决定是否升级；开了 autoInstallUpdate 且安装不需要提权
+/// （AppImage / Windows / macOS）时才静默自动升级 —— deb/rpm 必然弹密码框，不静默。
 pub fn emit_startup_checks(app: &AppHandle) {
     let settings = settings::load_settings();
     if !settings.auto_check_update {
@@ -1310,7 +1311,7 @@ pub fn emit_startup_checks(app: &AppHandle) {
         if !status.available {
             return;
         }
-        if settings.auto_install_update && status.mode == "builtin" {
+        if settings.auto_install_update && status.mode == "builtin" && !status.needs_elevation {
             let _ = app2.emit("launcher-update", status);
             if let Err(e) = update_check::install_builtin(&app2).await {
                 let _ = app2.emit("toast", format!("自动更新失败：{e}"));

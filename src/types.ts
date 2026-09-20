@@ -160,6 +160,8 @@ export interface LauncherUpdateStatus {
   url: string | null;
   /** builtin = 内置 updater，可在应用内直接安装；其余模式只能跳转下载页 */
   mode: "manifest" | "builtin" | "unconfigured" | "unsupported" | "error";
+  /** 安装时需要管理员授权（deb / rpm：pkexec + dpkg / rpm -U，会弹系统密码框） */
+  needsElevation: boolean;
   message: string | null;
 }
 

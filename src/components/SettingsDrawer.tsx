@@ -373,7 +373,7 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
               checked={draft.autoInstallUpdate}
               onChange={(v) => set("autoInstallUpdate", v)}
               label="发现新版本后自动下载安装并重启"
-              hint="仅内置 updater 模式生效；Linux 上需要 AppImage 形态"
+              hint="默认关闭：只提示、由你决定是否升级。开启后仅在安装无需提权的形态生效（AppImage / Windows / macOS）；deb、rpm 必然弹系统密码框，因此仍只提示"
             />
           </Section>
 

@@ -43,7 +43,9 @@ export default function UpdateBanner({
       <AlertTitle>
         启动器新版本 <b>v{status.latest}</b> 已发布（当前 v{status.current}）
       </AlertTitle>
-      {status.notes && <AlertDescription className="line-clamp-2">{status.notes}</AlertDescription>}
+      {status.mode === "unsupported"
+        ? <AlertDescription className="line-clamp-2">{status.message}</AlertDescription>
+        : status.notes && <AlertDescription className="line-clamp-2">{status.notes}</AlertDescription>}
       {applying && status.mode === "builtin" && (
         <div className="mt-1 flex items-center gap-2">
           <Progress
@@ -52,7 +54,10 @@ export default function UpdateBanner({
           />
           <span className="text-[11px] tabular-nums text-muted-foreground">
             {progress && progress.total > 0
-              ? `${(progress.received / 1048576).toFixed(1)} / ${(progress.total / 1048576).toFixed(1)} MB`
+              ? progress.received >= progress.total && status.needsElevation
+                // deb/rpm：下载完由 pkexec 接管，此时正在等用户输密码
+                ? "等待管理员授权…"
+                : `${(progress.received / 1048576).toFixed(1)} / ${(progress.total / 1048576).toFixed(1)} MB`
               : "正在连接更新源…"}
           </span>
         </div>
@@ -60,7 +65,9 @@ export default function UpdateBanner({
       <AlertAction className="flex gap-1.5">
         {status.mode === "builtin" && (
           <Button size="sm" disabled={applying} onClick={onApply}>
-            {applying ? "下载安装中…" : "下载并安装"}
+            {applying
+              ? "下载安装中…"
+              : status.needsElevation ? "下载并安装（需管理员授权）" : "下载并安装"}
           </Button>
         )}
         {status.mode === "manifest" && status.url && (
