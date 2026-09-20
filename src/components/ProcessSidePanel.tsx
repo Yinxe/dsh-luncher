@@ -52,9 +52,11 @@ export default function ProcessSidePanel({
   const [fileLog, setFileLog] = useState<InstanceLog | null>(null);
 
   useEffect(() => {
+    // 只在抽屉打开时驱动「运行时长」每秒刷新；关闭后无需每秒重渲染整个面板
+    if (!open) return;
     const t = setInterval(() => tick((n) => n + 1), 1000);
     return () => clearInterval(t);
-  }, []);
+  }, [open]);
 
   const active = procs.find((p) => p.id === activeId) ?? null;
   const running = procs.filter((p) => !p.exited).length;

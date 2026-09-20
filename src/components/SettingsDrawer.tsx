@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Activity, FolderOpen, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -70,6 +70,8 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
   const [accel, setAccel] = useState<GhAccel | null>(null);
   const [accelBusy, setAccelBusy] = useState(false);
   const [accelErr, setAccelErr] = useState<string | null>(null);
+  // 测速请求序号：open 时的缓存读取与手动「重新测速」会并发，慢的那个不能覆盖快的结果
+  const accelSeq = useRef(0);
 
   const runCheck = async () => {
     setChecking(true);
@@ -84,21 +86,43 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
 
   /** 拉 GitHub520 hosts 并测速（force=true 绕过 6 小时缓存） */
   const runAccel = async (force: boolean) => {
+    const my = ++accelSeq.current;
     setAccelBusy(true);
     setAccelErr(null);
     try {
-      setAccel(await api.getGithubAccel(force));
+      const r = await api.getGithubAccel(force);
+      if (accelSeq.current === my) setAccel(r);
     } catch (e) {
-      setAccelErr(String(e));
+      if (accelSeq.current === my) setAccelErr(String(e));
     } finally {
-      setAccelBusy(false);
+      if (accelSeq.current === my) setAccelBusy(false);
     }
   };
 
   useEffect(() => {
     if (!open) return;
-    api.getGithubRateLimit().then(setRate).catch(() => setRate(null));
-    api.getGithubAccel(false).then(setAccel).catch(() => setAccel(null));
+    let alive = true;
+    const my = ++accelSeq.current;
+    api
+      .getGithubRateLimit()
+      .then((r) => {
+        if (alive) setRate(r);
+      })
+      .catch(() => {
+        if (alive) setRate(null);
+      });
+    api
+      .getGithubAccel(false)
+      .then((a) => {
+        // 抽屉关闭、或期间用户点了「重新测速」（序号被顶掉）时丢弃这次缓存结果
+        if (alive && accelSeq.current === my) setAccel(a);
+      })
+      .catch(() => {
+        if (alive && accelSeq.current === my) setAccel(null);
+      });
+    return () => {
+      alive = false;
+    };
   }, [open]);
 
   // 每次打开时以当前设置重置草稿（取消即丢弃修改）

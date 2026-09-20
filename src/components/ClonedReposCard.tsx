@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   FolderGit2, FolderOpen, GitPullRequest, Loader2, PackagePlus, RefreshCw, Trash2,
 } from "lucide-react";
@@ -32,6 +32,9 @@ export default function ClonedReposCard({ profile, busy, onToast, onPull, onLink
   const [repos, setRepos] = useState<ClonedPlugin[]>([]);
   const [loading, setLoading] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<ClonedPlugin | null>(null);
+  // 删除 + 重新加载在途守卫：避免并发删除时旧的 load() 把已删的行又填回来
+  const deletingRef = useRef(false);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -59,12 +62,18 @@ export default function ClonedReposCard({ profile, busy, onToast, onPull, onLink
 
   const doDelete = useCallback(
     async (repo: ClonedPlugin) => {
+      if (deletingRef.current) return;
+      deletingRef.current = true;
+      setDeleting(true);
       try {
         await api.deleteClonedPlugin(repo.dirName);
         onToast("ok", `已删除本地克隆 ${repo.dirName}`);
         await load();
       } catch (e) {
         onToast("err", String(e));
+      } finally {
+        deletingRef.current = false;
+        setDeleting(false);
       }
     },
     [load, onToast],
@@ -107,7 +116,7 @@ export default function ClonedReposCard({ profile, busy, onToast, onPull, onLink
                   size="sm"
                   variant="outline"
                   className="h-6 px-2 text-[11px]"
-                  disabled={busy}
+                  disabled={busy || deleting}
                   title="git pull --ff-only 后重新 link 安装"
                   onClick={() => onPull(r, plugin?.path || null, !(plugin?.libOk ?? true))}
                 >
@@ -117,6 +126,7 @@ export default function ClonedReposCard({ profile, busy, onToast, onPull, onLink
                   size="sm"
                   variant="ghost"
                   className="h-6 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  disabled={busy || deleting}
                   onClick={() => setPendingDelete(r)}
                   title="删除本地克隆目录（不影响已安装依赖）"
                 >
@@ -140,7 +150,7 @@ export default function ClonedReposCard({ profile, busy, onToast, onPull, onLink
                       {!c.ready && <Badge variant="warning" className="text-[9px]">非插件包</Badge>}
                       <button
                         className="text-[10px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-                        disabled={busy}
+                        disabled={busy || deleting}
                         title={`dsh plugin --profile ${profile} add ${c.installSpec}（装进 ${profile}）`}
                         onClick={() => onLinkInstall(c.installSpec)}
                       >
