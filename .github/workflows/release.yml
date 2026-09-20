@@ -136,7 +136,21 @@ jobs:
           API="repos/$GITHUB_REPOSITORY"
           echo "目标 Release: $TAG"
 
-          RID=$(gh api "$API/releases/tags/$TAG" --jq .id)
+          # 草稿 release 还没有创建 git tag，releases/tags/<tag> 一定 404，
+          # 只能从列表里按 tag_name 找（tauri-action 找草稿也是这么找的）。
+          gh api "$API/releases?per_page=100" > /tmp/rels.json
+          RID=$(python3 -c "
+          import json
+          rs = json.load(open('/tmp/rels.json'))
+          hit = [r for r in rs if r['tag_name'] == '$TAG']
+          print(hit[0]['id'] if hit else '')
+          ")
+          if [ -z "$RID" ]; then
+            echo "::error::找不到 tag $TAG 的 release"
+            exit 1
+          fi
+          echo "release id = $RID"
+
           gh api "$API/releases/$RID/assets?per_page=100" \
             --jq '.[] | "\(.id)\t\(.name)"' > /tmp/assets.tsv
           LID=$(awk -F'\t' '$2=="latest.json"{print $1}' /tmp/assets.tsv)
@@ -145,8 +159,19 @@ jobs:
             exit 1
           fi
 
-          gh api "$API/releases/assets/$LID" \
-            -H "Accept: application/octet-stream" > /tmp/latest.json
+          # 资产要经 CDN 下载，偶尔 TLS 抖动，带重试
+          rm -f /tmp/latest.json
+          for i in 1 2 3 4 5; do
+            if gh api "$API/releases/assets/$LID" \
+                 -H "Accept: application/octet-stream" > /tmp/latest.json 2>/dev/null \
+               && [ -s /tmp/latest.json ]; then
+              echo "latest.json 下载成功（第 $i 次尝试）"
+              break
+            fi
+            echo "第 $i 次下载失败，重试…"
+            sleep 5
+          done
+          [ -s /tmp/latest.json ] || { echo "::error::latest.json 下载失败"; exit 1; }
 
           python3 - "$GITHUB_REPOSITORY" "$TAG" <<'PY'
           import json, sys
@@ -173,9 +198,31 @@ jobs:
           print(f"改写了 {n} 条平台地址")
           PY
 
-          # --clobber：同名资产先删后传，避免中途失败把 latest.json 弄丢
-          gh release upload "$TAG" /tmp/latest.json --clobber
-          echo "完成，latest.json 现在是 canonical 地址"
+          # --clobber 是「先删后传」：文件为空时 gh 会传成 400 Bad Content-Length，
+          # 而旧资产已经被删掉 —— 所以上面下载处才要重试 + 判空。
+          gh release upload "$TAG" /tmp/latest.json --clobber --repo "$GITHUB_REPOSITORY"
+
+          # 回读校验：一定要已经没有 /releases/assets/ 形式的地址才算成功
+          LID2=$(gh api "$API/releases/$RID/assets?per_page=100" \
+                 --jq '.[] | select(.name=="latest.json") | .id')
+          rm -f /tmp/verify.json
+          for i in 1 2 3 4 5; do
+            if gh api "$API/releases/assets/$LID2" \
+                 -H "Accept: application/octet-stream" > /tmp/verify.json 2>/dev/null \
+               && [ -s /tmp/verify.json ]; then break; fi
+            sleep 5
+          done
+          if grep -q "/releases/assets/" /tmp/verify.json; then
+            echo "::error::latest.json 里仍有 api.github.com 形式的地址，改写没生效"
+            exit 1
+          fi
+          python3 -c "
+          import json
+          j = json.load(open('/tmp/verify.json'))
+          print('version =', j['version'], '| 平台条目 =', len(j['platforms']))
+          assert 'linux-x86_64' in j['platforms'], '缺少 linux 条目'
+          "
+          echo "完成，latest.json 现在是 canonical 地址且含 linux 条目"
 
   # 上一个作业跑完（latest.json 已规范化）再把草稿转成正式 release。
   # 这样既避开了多平台并发创建 release 的竞态，又不需要人工去点 Publish，
@@ -196,8 +243,25 @@ jobs:
           set -euo pipefail
           VERSION="${INPUT_VERSION:-$(node -p "require('./src-tauri/tauri.conf.json').version")}"
           TAG="v$VERSION"
-          gh release edit "$TAG" \
-            --draft=false --prerelease=false --repo "$GITHUB_REPOSITORY"
-          echo "已发布 $TAG，当前状态："
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --json tagName,isDraft,isPrerelease,url
+          API="repos/$GITHUB_REPOSITORY"
+
+          # 同上：草稿按 tag 查不到，从列表里按 tag_name 找 id，
+          # 再用 PATCH 改成 draft=false（这一步才会真正创建 git tag）。
+          gh api "$API/releases?per_page=100" > /tmp/rels2.json
+          RID=$(python3 -c "
+          import json
+          rs = json.load(open('/tmp/rels2.json'))
+          hit = [r for r in rs if r['tag_name'] == '$TAG']
+          print(hit[0]['id'] if hit else '')
+          ")
+          if [ -z "$RID" ]; then echo "::error::找不到 tag $TAG 的 release"; exit 1; fi
+
+          gh api -X PATCH "$API/releases/$RID" \
+            -F draft=false -F prerelease=false > /tmp/pub.json
+          python3 -c "
+          import json
+          j = json.load(open('/tmp/pub.json'))
+          print('已发布:', j['tag_name'], '| draft =', j['draft'], '| prerelease =', j['prerelease'])
+          print(j['html_url'])
+          assert not j['draft'] and not j['prerelease'], '状态不对：latest 会 404'
+          "
