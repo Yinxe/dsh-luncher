@@ -898,7 +898,14 @@ pub async fn probe_clone_repo(
     let dir_name = crate::plugin::clone_dir_for_url(&url);
     let root = crate::plugin::git_plugins_dir().join(&dir_name);
     let clone_url = url.clone();
-    let ref_clone = git_ref.clone().filter(|r| !r.is_empty());
+    let ref_clone = git_ref.clone().filter(|r| !r.trim().is_empty());
+    // git_ref 会直接进 `git checkout <ref>` / `git clone --branch <ref>`，必须先校验，
+    // 否则以 - 开头的值会被当成 git 选项（参数注入），含 / .. 的可越界。
+    if let Some(r) = &ref_clone {
+        if !crate::registry::is_safe_git_ref(r) {
+            return Err(format!("非法的分支 / 标签名：{r}"));
+        }
+    }
     let ref_for_scan = ref_clone.clone();
     let root_clone = root.clone();
     let accelerated = want_accel;

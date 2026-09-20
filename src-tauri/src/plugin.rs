@@ -1227,11 +1227,20 @@ pub fn clone_dir_for_url(url: &str) -> String {
     clone_dir_name("git", tail)
 }
 
+/// 由克隆根拼出插件子目录（monorepo 子包）。用户可传的 `sub_path` 会被逐段清洗：
+/// 丢掉 `.` / `..` / 空段与绝对路径前缀，保证结果始终落在 `clone_root` 之内，
+/// 不会被 `dsh plugin add link:<path>` 指到仓库之外的目录。
 fn sub_dir_of(clone_root: &Path, sub_path: Option<&str>) -> PathBuf {
-    match sub_path.map(|s| s.trim().trim_matches('/')).filter(|s| !s.is_empty()) {
-        Some(s) => clone_root.join(s),
-        None => clone_root.to_path_buf(),
+    let mut p = clone_root.to_path_buf();
+    if let Some(s) = sub_path {
+        for seg in s.split(['/', '\\']).map(|g| g.trim()) {
+            if seg.is_empty() || seg == "." || seg == ".." {
+                continue;
+            }
+            p.push(seg);
+        }
     }
+    p
 }
 
 /// 仓库可能没提交构建产物：安装依赖并构建（两步都设为「失败不中断」，
@@ -1280,7 +1289,15 @@ pub fn steps_for_clone_install(
     let root = git_plugins_dir().join(&dir_name);
     let plugin_dir = sub_dir_of(&root, input.sub_path.as_deref());
     let existed = root.join(".git").is_dir();
-    let git_ref = input.git_ref.clone().filter(|r| !r.is_empty());
+    let git_ref = match input.git_ref.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        Some(r) => {
+            if !crate::registry::is_safe_git_ref(r) {
+                return Err(format!("非法的分支 / 标签名：{r}"));
+            }
+            Some(r.to_string())
+        }
+        None => None,
+    };
     let mut steps: Vec<Step> = Vec::new();
 
     if existed {
@@ -2014,6 +2031,25 @@ mod tests {
 
         std::env::remove_var("DSH_LAUNCHER_HOME");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 路径穿越与危险 ref 必须在拼命令前被挡住
+    #[test]
+    fn clone_install_rejects_traversal_and_bad_ref() {
+        let root = PathBuf::from("/repo");
+        // sub_path 里的 .. 段被丢弃，绝不落到 clone_root 之外
+        assert_eq!(sub_dir_of(&root, Some("../../etc/passwd")), root.join("etc").join("passwd"));
+        assert_eq!(sub_dir_of(&root, Some("a/../b")), root.join("a").join("b"));
+        assert_eq!(sub_dir_of(&root, Some("/abs")), root.join("abs"));
+        assert_eq!(sub_dir_of(&root, None), root);
+
+        let evil_ref = CloneInstallInput {
+            url: "https://github.com/o/r.git".into(),
+            git_ref: Some("--upload-pack=touch /tmp/pwn".into()),
+            sub_path: None,
+            build: false,
+        };
+        assert!(steps_for_clone_install(&evil_ref).is_err());
     }
 
     /// clone 目录已存在的判定（重试才需要）

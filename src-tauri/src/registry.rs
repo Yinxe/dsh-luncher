@@ -41,6 +41,30 @@ fn derive_channel(version: &str) -> &'static str {
     }
 }
 
+/// 抹掉 URL 里的凭据（userinfo），用于把地址写进给用户看的错误信息 / 日志时不泄露 token。
+/// https://user:tok@host/path → https://***@host/path；无 userinfo 时原样返回。
+pub fn scrub_url(s: &str) -> String {
+    let Some(sc) = s.find("://") else {
+        return s.to_string();
+    };
+    let after = sc + 3;
+    let auth_end = s[after..]
+        .find(['/', '?', '#'])
+        .map(|i| after + i)
+        .unwrap_or(s.len());
+    let auth = &s[after..auth_end];
+    match auth.rfind('@') {
+        Some(at) => {
+            let mut out = String::from(&s[..after]);
+            out.push_str("***");
+            out.push_str(&auth[at..]);
+            out.push_str(&s[auth_end..]);
+            out
+        }
+        None => s.to_string(),
+    }
+}
+
 /// 从 npm registry 拉取 @deepseek-ai/dsh 的完整 packument 并提取版本信息
 pub async fn fetch_registry(registry_base: &str) -> Result<RegistryInfo, String> {
     let base = registry_base.trim().trim_end_matches('/');
@@ -60,11 +84,11 @@ pub async fn fetch_registry(registry_base: &str) -> Result<RegistryInfo, String>
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| format!("请求 registry 失败（{url}）: {e}"))?;
+        .map_err(|e| format!("请求 registry 失败（{}）: {e}", scrub_url(&url)))?;
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("registry 返回 {status}（{url}）"));
+        return Err(format!("registry 返回 {status}（{}）", scrub_url(&url)));
     }
     let pack: serde_json::Value = resp
         .json()
@@ -1047,7 +1071,7 @@ pub async fn search_packages(
         .map_err(|e| format!("搜索请求失败: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("registry 搜索返回 {status}（{base}）"));
+        return Err(format!("registry 搜索返回 {status}（{}）", scrub_url(base)));
     }
     let pack: serde_json::Value = resp
         .json()
@@ -1156,13 +1180,15 @@ pub fn parse_github_spec(input: &str) -> Option<GitHubPluginSpec> {
 }
 
 /// git 分支/标签/提交名是否可安全用于 URL 拼接与 git 命令行。
-/// 允许 git ref 常见字符（字母数字与 `. / - _`），禁止空、超长、含 `..`、以 `/` 起止。
+/// 允许 git ref 常见字符（字母数字与 `. / - _`）；禁止空、超长、含 `..`、以 `/` 起止，
+/// 以及以 `-` 开头（会被 git checkout / clone --branch 当成命令行选项 → 参数注入）。
 pub fn is_safe_git_ref(r: &str) -> bool {
     let r = r.trim();
     !r.is_empty()
         && r.len() <= 200
         && !r.contains("..")
         && !r.starts_with('/')
+        && !r.starts_with('-')
         && !r.ends_with('/')
         && r
             .chars()
@@ -1882,6 +1908,40 @@ mod tests {
         ] {
             assert!(parse_github_spec(bad).is_none(), "bad={bad}");
         }
+    }
+
+    /// 危险的 git_ref（路径穿越 / 查询串 / 凭据字符）应让整条规格判为不可解析
+    #[test]
+    fn parse_github_spec_rejects_unsafe_ref() {
+        for bad in [
+            "github:owner/repo#../../evil",
+            "github:owner/repo#a?b",
+            "github:owner/repo#a:b",
+            "github:owner/repo#a@b",
+            "https://github.com/owner/repo/tree/..%2F..%2Fuser",
+        ] {
+            assert!(parse_github_spec(bad).is_none(), "bad={bad}");
+        }
+        // 合法 ref 仍通过（含分支里的 / 与 .）
+        assert!(is_safe_git_ref("feature/foo.bar-1_2"));
+        assert!(!is_safe_git_ref("refs/../x"));
+        assert!(!is_safe_git_ref("/lead"));
+    }
+
+    #[test]
+    fn scrub_url_strips_credentials() {
+        assert_eq!(
+            scrub_url("https://user:tok@registry.example.com/a/b"),
+            "https://***@registry.example.com/a/b"
+        );
+        assert_eq!(
+            scrub_url("https://registry.example.com/a/b"),
+            "https://registry.example.com/a/b"
+        );
+        assert_eq!(
+            scrub_url("http://u@host"),
+            "http://***@host"
+        );
     }
 
     /// 本地探测：monorepo 的 pnpm-workspace 子包插件应被逐个发现并按「已就绪」排序
