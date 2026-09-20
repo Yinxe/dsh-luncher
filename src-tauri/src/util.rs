@@ -347,9 +347,84 @@ pub fn shell_quote(s: &str) -> String {
     }
 }
 
+/// 把用户在一行里输入的启动参数切成 argv：按空白分组，但尊重单 / 双引号，
+/// 让带空格的参数值（如 `--title "a b"`）能作为**单个**参数交给 dsh，而不是被
+/// `split_whitespace` 拆成 `"a` / `b"` 两段并把引号原样带进去。
+///
+/// 与真正的 shell 不同：不做变量 / 命令 / 通配展开，只是「引号保护的空白切分」。
+/// 未闭合的引号按已输入内容宽容处理（不报错），以免误伤手打漏一个引号的用户。
+pub fn split_args(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    // 是否已经开始一个 token（用引号括出的空串 `""` 也算一个空参数）
+    let mut started = false;
+    // None = 引号外；Some('\'') / Some('"') = 处于对应引号内
+    let mut quote: Option<char> = None;
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if c == '\'' {
+                    quote = None;
+                } else {
+                    cur.push(c); // 单引号内一切字面量，反斜杠也不例外
+                }
+            }
+            Some('"') => {
+                if c == '"' {
+                    quote = None;
+                } else if c == '\\' {
+                    match chars.peek() {
+                        // 双引号内只把 \" 与 \\ 当转义，其余反斜杠原样保留
+                        Some(n) if *n == '"' || *n == '\\' => {
+                            cur.push(*n);
+                            chars.next();
+                        }
+                        _ => cur.push('\\'),
+                    }
+                } else {
+                    cur.push(c);
+                }
+            }
+            // 只可能是 None（quote 只会被置为 '\'' / '"' 或清空）；用 `_` 覆盖，
+            // 编译器无法据 char 取值证明穷尽
+            _ => {
+                if c.is_whitespace() {
+                    if started {
+                        out.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                } else if c == '\'' || c == '"' {
+                    quote = Some(c);
+                    started = true;
+                } else if c == '\\' {
+                    // 引号外的反斜杠转义下一个字符
+                    match chars.next() {
+                        Some(n) => {
+                            cur.push(n);
+                            started = true;
+                        }
+                        None => {
+                            cur.push('\\');
+                            started = true;
+                        }
+                    }
+                } else {
+                    cur.push(c);
+                    started = true;
+                }
+            }
+        }
+    }
+    if started {
+        out.push(cur);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_version, shell_quote};
+    use super::{is_safe_version, shell_quote, split_args};
 
     #[test]
     fn safe_versions() {
@@ -364,5 +439,28 @@ mod tests {
         assert_eq!(shell_quote(""), "''");
         assert_eq!(shell_quote("a/b-1.2"), "a/b-1.2");
         assert_eq!(shell_quote("it's"), r#"'it'\''s'"#);
+    }
+
+    #[test]
+    fn split_args_respects_quotes_and_escapes() {
+        // 双引号内的空格并入同一个参数
+        assert_eq!(
+            split_args(r#"--profile web --title "a b""#),
+            vec!["--profile", "web", "--title", "a b"]
+        );
+        // 单引号同理，且内部字面量
+        assert_eq!(split_args("--msg 'hello world'"), vec!["--msg", "hello world"]);
+        // 多空格折叠、首尾空白忽略
+        assert_eq!(split_args("   a    b   "), vec!["a", "b"]);
+        // 引号外反斜杠转义空格
+        assert_eq!(split_args(r#"x\ y"#), vec!["x y"]);
+        // 相邻无空白的片段拼成一个 token
+        assert_eq!(split_args(r#"a"b c"d"#), vec!["ab cd"]);
+        // 空引号 → 一个空参数（与 shell 一致）
+        assert_eq!(split_args(r#"--flag """#), vec!["--flag", ""]);
+        // 未闭合引号宽容吞掉剩余内容，不 panic
+        assert_eq!(split_args(r#"--x "y z"#), vec!["--x", "y z"]);
+        // 空输入 → 无参数
+        assert!(split_args("   ").is_empty());
     }
 }

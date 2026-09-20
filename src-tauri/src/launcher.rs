@@ -40,9 +40,9 @@ pub fn build_inner_command(
         arg_str.push_str("--profile ");
         arg_str.push_str(&util::shell_quote(prof));
     }
-    for a in args.trim().split_whitespace() {
+    for a in util::split_args(args) {
         arg_str.push(' ');
-        arg_str.push_str(&util::shell_quote(a));
+        arg_str.push_str(&util::shell_quote(&a));
     }
     let arg_part = if arg_str.is_empty() {
         String::new()

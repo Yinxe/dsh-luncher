@@ -98,7 +98,7 @@ pub fn spawn_embedded(
     if !prof.is_empty() {
         cmd.arg("--profile").arg(prof);
     }
-    for a in args.trim().split_whitespace() {
+    for a in util::split_args(args) {
         cmd.arg(a);
     }
     // 非 shell 启动：node 目录放进 PATH 供 dsh 的子进程使用
@@ -190,7 +190,7 @@ pub fn spawn_detached(
     if !prof.is_empty() {
         cmd.arg("--profile").arg(prof);
     }
-    for a in args.trim().split_whitespace() {
+    for a in util::split_args(args) {
         cmd.arg(a);
     }
     util::with_node_on_path(&mut cmd, Some(&node));
