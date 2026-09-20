@@ -227,6 +227,22 @@ pub fn spawn_detached(
 
     let mut child = cmd.spawn().map_err(|e| format!("启动 dsh 失败: {e}"))?;
     let id = child.id();
+
+    // 先登记注册表、再放手交给收尸线程：登记失败时（磁盘满 / 权限等）macOS/Windows 没有
+    // /proc 兜底，会留下界面既看不见也停不掉的独立进程。宁可立刻终止刚拉起的 dsh 并如实
+    // 报错，也不假装启动成功、把孤儿留给用户。
+    if let Err(e) = append_detached_record(&DetachedRecord {
+        pid: id,
+        profile: prof.to_string(),
+        version: target.version.clone(),
+        started_at: now_millis(),
+        log_file: log_path.to_string_lossy().into_owned(),
+    }) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("记录独立进程失败，已终止刚启动的 dsh（PID {id}）：{e}"));
+    }
+
     // 后台收尸线程防僵尸；启动器先退出时由 init 接管收尸
     std::thread::Builder::new()
         .name("dsh-detached-reap".into())
@@ -234,15 +250,6 @@ pub fn spawn_detached(
             let _ = child.wait();
         })
         .ok();
-
-    // 登记注册表（跨平台扫描依据；best-effort，Linux 另有 /proc 兜底）
-    let _ = append_detached_record(&DetachedRecord {
-        pid: id,
-        profile: prof.to_string(),
-        version: target.version.clone(),
-        started_at: now_millis(),
-        log_file: log_path.to_string_lossy().into_owned(),
-    });
 
     Ok(ProcInfo {
         id,
