@@ -420,15 +420,20 @@ fn ensure_profile_free(
 /// 这样界面上任何被发现的实例都有统一的「停止」入口（内嵌实例带日志管道，
 /// 独立/外部实例没有，只能按 PID 结束）。
 #[tauri::command]
-pub fn stop_process(
+pub async fn stop_process(
     app: AppHandle,
     procs: State<'_, crate::procs::ProcState>,
     id: u32,
 ) -> Result<bool, String> {
-    if crate::procs::stop(&app, &procs, id) {
-        return Ok(true);
-    }
-    crate::procs::stop_external_pid(id)
+    let procs = procs.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if crate::procs::stop(&app, &procs, id) {
+            return Ok(true);
+        }
+        crate::procs::stop_external_pid(id)
+    })
+    .await
+    .map_err(|e| format!("停止失败: {e}"))?
 }
 
 #[tauri::command]
@@ -440,20 +445,28 @@ pub fn list_processes(
 
 /// 各 profile 实例状态（含终端/外部启动的）
 #[tauri::command]
-pub fn list_profile_instances(
+pub async fn list_profile_instances(
     procs: State<'_, crate::procs::ProcState>,
 ) -> Result<Vec<crate::procs::ProfileInstance>, String> {
-    Ok(crate::procs::profile_instances(&procs))
+    // profile_instances 会扫盘 / 逐个校验 detached 存活（ps/PowerShell）/ 真实 TCP
+    // 端口探测，Windows 上可达 1 秒；且被前端每 3 秒轮询，必须离开主线程执行。
+    let procs = procs.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(crate::procs::profile_instances(&procs)))
+        .await
+        .map_err(|e| format!("枚举实例失败: {e}"))?
 }
 
 /// 停止某个 profile 的实例（内嵌或外部）
 #[tauri::command]
-pub fn stop_profile_instance(
+pub async fn stop_profile_instance(
     app: AppHandle,
     procs: State<'_, crate::procs::ProcState>,
     profile: String,
 ) -> Result<bool, String> {
-    crate::procs::stop_profile(&app, &procs, &profile)
+    let procs = procs.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || crate::procs::stop_profile(&app, &procs, &profile))
+        .await
+        .map_err(|e| format!("停止失败: {e}"))?
 }
 
 #[derive(Clone, Serialize)]
