@@ -36,6 +36,9 @@ fn derive_channel(version: &str) -> &'static str {
         "beta"
     } else if pre.starts_with("rc") {
         "rc"
+    } else if !pre.is_empty() {
+        // 其它预发布后缀（next / canary / nightly …）不能算正式版，否则会被误标成 stable
+        "pre"
     } else {
         "stable"
     }
@@ -1764,6 +1767,18 @@ fn lib_dir_ok(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 版本 → 渠道判定：alpha/beta/rc 各自归类，其它预发布后缀算 pre，无后缀才算 stable
+    #[test]
+    fn derive_channel_labels_prerelease() {
+        assert_eq!(derive_channel("0.1.5"), "stable");
+        assert_eq!(derive_channel("0.1.5-rc.2"), "rc");
+        assert_eq!(derive_channel("0.1.5-alpha.1"), "alpha");
+        assert_eq!(derive_channel("0.1.5-beta.3"), "beta");
+        // 关键：非 alpha/beta/rc 的预发布不再被误标成 stable
+        assert_eq!(derive_channel("0.1.6-next.1"), "pre");
+        assert_eq!(derive_channel("0.1.6-canary.2"), "pre");
+    }
 
 
     /// 通道熔断：连续失败到阈值就临时跳过，成功即清零，窗口到期半开

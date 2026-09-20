@@ -607,8 +607,8 @@ export default function App() {
     () =>
       rows.filter((r) => {
         if (verScope === "installed" && !r.installed) return false;
-        // RC 属于正式版；仅 alpha/beta 视为预发布
-        const isPre = r.channel === "alpha" || r.channel === "beta";
+        // RC 属于正式版；alpha/beta 及其它预发布后缀（next/canary/…→"pre"）视为预发布
+        const isPre = r.channel === "alpha" || r.channel === "beta" || r.channel === "pre";
         if (verType === "stable" && isPre) return false;
         if (verType === "pre" && !isPre) return false;
         return true;
@@ -1570,6 +1570,7 @@ function deriveChannel(v: string): string {
   if (pre.startsWith("alpha")) return "alpha";
   if (pre.startsWith("beta")) return "beta";
   if (pre.startsWith("rc")) return "rc";
+  if (pre) return "pre";
   return "stable";
 }
 
