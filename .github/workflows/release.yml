@@ -1,8 +1,9 @@
 name: Release 打包
 
 # 基于 Tauri 官方模板：https://v2.tauri.app/distribute/pipelines/github
-# 构建与发布全部交给 tauri-apps/tauri-action@v1 —— 它自己读 tauri.conf.json 的
-# version、替换 __VERSION__、创建 Draft Release 并上传产物，无需任何自定义脚本。
+# 构建与发布交给 tauri-apps/tauri-action@v1 —— 它自己读 tauri.conf.json 的
+# version、替换 __VERSION__、创建 Draft Release 并上传产物；末尾再补一个
+# normalize-updater-json 作业把 latest.json 的下载地址改写成 canonical 形式。
 on:
   workflow_dispatch:
     inputs:
@@ -105,3 +106,68 @@ jobs:
           # 注意输入名：v1 是 uploadUpdaterJson（v0 那版叫 includeUpdaterJson，写错会被静默忽略）
           uploadUpdaterJson: true
           args: ${{ matrix.args }} ${{ steps.ver.outputs.config_arg }}
+
+  # tauri-action 写进 latest.json 的下载地址是
+  # `https://api.github.com/repos/<owner>/<repo>/releases/assets/<id>` —— 这种形式
+  # 只有部分 GitHub 加速前端认（实测 gh-proxy 可以，ghfast.top 直接 403）。
+  # 这里统一改写成 `https://github.com/<repo>/releases/download/<tag>/<asset>`，
+  # 所有代理都支持，而且点开就是浏览器能直接下载的地址。
+  normalize-updater-json:
+    needs: publish-tauri
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 把 latest.json 的下载地址改写成 canonical 形式
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-$(node -p "require('./src-tauri/tauri.conf.json').version")}"
+          TAG="v$VERSION"
+          API="repos/$GITHUB_REPOSITORY"
+          echo "目标 Release: $TAG"
+
+          RID=$(gh api "$API/releases/tags/$TAG" --jq .id)
+          gh api "$API/releases/$RID/assets?per_page=100" \
+            --jq '.[] | "\(.id)\t\(.name)"' > /tmp/assets.tsv
+          LID=$(awk -F'\t' '$2=="latest.json"{print $1}' /tmp/assets.tsv)
+          if [ -z "$LID" ]; then
+            echo "::error::Release $TAG 里没有 latest.json，无法改写"
+            exit 1
+          fi
+
+          gh api "$API/releases/assets/$LID" \
+            -H "Accept: application/octet-stream" > /tmp/latest.json
+
+          python3 - "$GITHUB_REPOSITORY" "$TAG" <<'PY'
+          import json, sys
+          repo, tag = sys.argv[1], sys.argv[2]
+          assets = {}
+          for line in open("/tmp/assets.tsv"):
+              line = line.rstrip("\n")
+              if not line:
+                  continue
+              aid, _, name = line.partition("\t")
+              assets[aid] = name
+          with open("/tmp/latest.json") as f:
+              j = json.load(f)
+          n = 0
+          for p in j.get("platforms", {}).values():
+              url = p.get("url", "")
+              if "/releases/assets/" in url:
+                  aid = url.rsplit("/releases/assets/", 1)[1]
+                  if aid in assets:
+                      p["url"] = f"https://github.com/{repo}/releases/download/{tag}/{assets[aid]}"
+                      n += 1
+          with open("/tmp/latest.json", "w") as f:
+              json.dump(j, f, ensure_ascii=False, indent=2)
+          print(f"改写了 {n} 条平台地址")
+          PY
+
+          # --clobber：同名资产先删后传，避免中途失败把 latest.json 弄丢
+          gh release upload "$TAG" /tmp/latest.json --clobber
+          echo "完成，latest.json 现在是 canonical 地址"

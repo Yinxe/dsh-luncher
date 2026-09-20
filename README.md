@@ -42,6 +42,8 @@
     | macOS .app | 替换整个 .app bundle | 一般不需要 | ✅ |
 
   - 开发构建（`npm run app` / 未打包的二进制）没有格式标记，**不会**放开应用内安装——否则 updater 会把安装包字节写到开发二进制上；这种形态只提示有新版。
+  - **可以走 GitHub 加速**：检查更新（拉 latest.json）和下载安装包都套用设置里的加速前缀，与 clone / 插件下载共用同一份测速结果（`githubAccel` 开关 + `githubProxy` 指定前缀）。代理不支持某个地址（如 ghfast.top 对 `api.github.com` 会 403）或中途断流时，会自动回退直连重试。安装包有签名校验，所以**经第三方代理也无法投毒**——代理改一个字节就验签失败。
+  - CI 里有一个 `normalize-updater-json` 作业，会在打包完成后把 latest.json 的下载地址从 `api.github.com/.../releases/assets/<id>` 改写成 `github.com/<repo>/releases/download/<tag>/<asset>`：前者只有部分代理认，后者所有代理都认，而且点开就是浏览器能直接下的地址。
 
 ## 自动更新是怎么工作的
 
@@ -167,7 +169,15 @@ npm run release        # 同上（别名）
 1. 改 `src-tauri/tauri.conf.json` 的 `version` 和 `src-tauri/Cargo.toml` 的 `version`（两者保持一致）；
 2. 触发 `.github/workflows/release.yml`：手动 `workflow_dispatch`（可填版本号覆盖）或 push 到 `release` 分支；
 3. CI 产出三端安装包 + `.sig` 签名 + `latest.json`，全部挂到一个 **Draft Release**；
-4. **把 Draft Release 点「Publish release」**——`releases/latest/download/...` 只能访问已发布的 Release，草稿状态下所有客户端的自动更新都会 404，这是最常见的「配好了却检查不到更新」的原因。
+4. **把 Draft Release 点「Publish release」，并且不要勾「Set as a pre-release」**。两个都会让 `releases/latest/download/latest.json` 直接 404，而客户端只会表现为「检查不到更新」：
+   - **Draft（草稿）**：匿名访问不到，必须 Publish；
+   - **Pre-release（预发布）**：GitHub 的 `releases/latest` **会跳过预发布**。实测过：一个只标了 pre-release 的 v0.1.0 会让 `https://github.com/<你>/<仓库>/releases/latest/download/latest.json` 返回 404，`gh api repos/<你>/<仓库>/releases/latest` 也是 `Not Found`。想发测试版就用单独的 tag + 单独的 endpoints，不要动正式通道的这个 release。
+
+   发布后用这两条命令自查（第二条应能打印出版本号）：
+   ```bash
+   gh api repos/<你的账号>/<仓库名>/releases/latest --jq .tag_name
+   curl -sL https://github.com/<你的账号>/<仓库名>/releases/latest/download/latest.json | head -c 80
+   ```
 
 本地打包（不走 CI）则 `npm run build:release`，前提是当前 shell 里有 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
 

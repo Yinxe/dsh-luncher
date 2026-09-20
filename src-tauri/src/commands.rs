@@ -1272,8 +1272,12 @@ pub async fn check_launcher_update(
 /// 下载并安装启动器新版本（内置 updater 模式）。
 /// 非 Windows 平台上本调用不会返回：安装成功后直接重启应用。
 #[tauri::command]
-pub async fn install_launcher_update(app: AppHandle) -> Result<String, String> {
-    update_check::install_builtin(&app).await
+pub async fn install_launcher_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    update_check::install_builtin(&app, &settings).await
 }
 
 #[tauri::command]
@@ -1313,7 +1317,7 @@ pub fn emit_startup_checks(app: &AppHandle) {
         }
         if settings.auto_install_update && status.mode == "builtin" && !status.needs_elevation {
             let _ = app2.emit("launcher-update", status);
-            if let Err(e) = update_check::install_builtin(&app2).await {
+            if let Err(e) = update_check::install_builtin(&app2, &settings).await {
                 let _ = app2.emit("toast", format!("自动更新失败：{e}"));
             }
             return;
