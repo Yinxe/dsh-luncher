@@ -27,6 +27,16 @@ pub fn run() {
     let settings = settings::load_settings();
 
     let app = tauri::Builder::default()
+        // 单实例守卫：必须是第一个注册的插件，才能在其它插件 setup / 窗口创建之前
+        // 就把「已经有一个实例在跑」拦下来。
+        // 行为：重复启动的那个进程只把这次启动转交给已运行实例，然后自己退出，
+        // 因此不会出现第二个主窗口 / 第二个托盘图标 / 两份后台轮询线程。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // 已运行实例收到回调：把主窗口唤回前台（可能因「关闭到托盘」而隐藏着）
+            #[cfg(target_os = "macos")]
+            let _ = app.show();
+            crate::tray::show_main_window(app);
+        }))
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())

@@ -18,6 +18,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+# 单实例守卫：重复启动（再次双击图标/快捷方式）不再起第二个启动器进程与托盘图标，
+# 而是把「有人又点了一次」转交给已运行实例，新进程随即退出
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-opener = "2"

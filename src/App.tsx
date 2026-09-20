@@ -106,6 +106,12 @@ export default function App() {
   const [expandedProfiles, setExpandedProfiles] = useState<Record<string, boolean>>({});
   /** 正在重启的 profile（停止→等待消失→再拉起） */
   const [restartingProfile, setRestartingProfile] = useState<string | null>(null);
+  /** 启动请求在途的 profile：按钮转圈并禁用，避免连点重复启动 */
+  const [startingProfile, setStartingProfile] = useState<string | null>(null);
+  /** 启动/重启在途的 profile 集合（ref 版）：连点时 state 还没重渲染，
+   *  只靠 state 判断会放第二次请求过去 */
+  const startingProfilesRef = useRef<Set<string>>(new Set());
+  const restartingRef = useRef(false);
   /** 复制实例对话框的源 profile；null = 关闭 */
   const [copySource, setCopySource] = useState<string | null>(null);
   /** 重命名对话框的目标 profile；null = 关闭 */
@@ -494,6 +500,12 @@ export default function App() {
   }, [addToast]);
 
   const doStartProfile = useCallback(async (profile: string) => {
+    // 连点/重复触发守卫：同一 profile 的启动请求还在途时直接忽略。
+    // 后端 ensure_profile_free 依赖进程枚举（外部实例还有扫描/缓存延迟），
+    // 挡不住同一瞬间挤进来的两次请求 —— 那样会起两个 dsh 抢同一个 web 端口。
+    if (startingProfilesRef.current.has(profile)) return;
+    startingProfilesRef.current.add(profile);
+    setStartingProfile(profile);
     const detached = settingsRef.current?.launchMode === "detached";
     try {
       const info = await api.startEmbedded(null, profile, undefined, detached);
@@ -521,11 +533,16 @@ export default function App() {
       }
       refreshInstances(); // 立即感知新实例，让「切换版本」锁定尽快生效（否则要等 3s 轮询）
     } catch (e) { addToast("err", `启动失败: ${e}`); }
+    finally {
+      startingProfilesRef.current.delete(profile);
+      setStartingProfile(null);
+    }
   }, [addToast, refreshInstances]);
 
   const doRestartProfile = useCallback(
     async (profile: string) => {
-      if (restartingProfile) return;
+      if (restartingRef.current || startingProfilesRef.current.has(profile)) return;
+      restartingRef.current = true;
       setRestartingProfile(profile);
       try {
         if (instancesRef.current.some((i) => i.profile === profile)) {
@@ -544,10 +561,11 @@ export default function App() {
       } catch (e) {
         addToast("err", `重启失败: ${e}`);
       } finally {
+        restartingRef.current = false;
         setRestartingProfile(null);
       }
     },
-    [restartingProfile, addToast, doStartProfile]
+    [addToast, doStartProfile]
   );
 
   /** 统一停止入口：已知 PID 就按 PID 停（内嵌/独立/外部都走这一条），
@@ -1245,7 +1263,7 @@ export default function App() {
                             <Button
                               size="sm"
                               variant="outline"
-                              disabled={installed.length === 0 || !canStart || restartingProfile === row.profile}
+                              disabled={installed.length === 0 || !canStart || restartingProfile === row.profile || startingProfile === row.profile}
                               title={installed.length === 0
                                 ? "请先在「版本与安装」页安装 dsh"
                                 : !canStart
@@ -1255,7 +1273,12 @@ export default function App() {
                                 : `基于当前版本（${settings.activeVersion}）启动 ${row.profile}`}
                               onClick={() => doStartProfile(row.profile)}
                             >
-                              <Play /> 启动
+                              {startingProfile === row.profile ? (
+                                <Loader2 className="animate-spin" />
+                              ) : (
+                                <Play />
+                              )}{" "}
+                              启动
                             </Button>
                           )}
                           {row.logFile && (

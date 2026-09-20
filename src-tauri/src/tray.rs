@@ -10,7 +10,9 @@ const TRAY_ID: &str = "main-tray";
 #[derive(Default)]
 pub struct MenuState(Mutex<Option<String>>);
 
-fn show_main_window(app: &AppHandle) {
+/// 唤起主窗口并聚焦。托盘「打开主界面」、二次启动转交都走这里，
+/// 保证隐藏到托盘后再次启动启动器时窗口一定能回到前台。
+pub fn show_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
