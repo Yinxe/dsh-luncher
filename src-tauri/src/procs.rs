@@ -473,6 +473,34 @@ fn remove_detached_record(pid: u32) {
     }
 }
 
+/// 改名后同步独立进程登记表里的 profile 名。
+/// 不同步的话，实例列表会残留「旧名 + 有 PID + profiles 目录里找不到」的幽灵条目。
+pub fn rename_detached_profile(old: &str, new: &str) {
+    let _g = registry_lock().lock().unwrap();
+    let mut records = read_detached_registry();
+    let mut changed = false;
+    for r in records.iter_mut() {
+        if r.profile == old {
+            r.profile = new.to_string();
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = write_detached_registry(&records);
+    }
+}
+
+/// 删除 profile 时清掉它的独立进程登记（正常情况下「运行中拒绝删除」已先拦住）
+pub fn drop_detached_profile(name: &str) {
+    let _g = registry_lock().lock().unwrap();
+    let mut records = read_detached_registry();
+    let before = records.len();
+    records.retain(|r| r.profile != name);
+    if records.len() != before {
+        let _ = write_detached_registry(&records);
+    }
+}
+
 /// cmdline 是否为 dsh 进程。两种形态都要认：
 /// - 包内入口（启动器自己就是这么起的）：`.../@deepseek-ai/dsh/...bin.js`；
 /// - npm 安装痕迹：argv 里出现 `.../node_modules/.bin/dsh`（Windows 是 `.bin\dsh.cmd`
@@ -1351,6 +1379,43 @@ time.sleep(120)
             parse_web_url("boot…\ndsh web:   https://a.b:1/?t=1\n"),
             Some("https://a.b:1/?t=1".to_string())
         );
+    }
+
+    /// 改名/删除 profile 时，独立进程登记表必须同步，否则实例列表会残留旧名幽灵条目
+    #[test]
+    fn detached_registry_follows_rename_and_delete() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-regsync-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+
+        // 注意 pid 必须不同：append 会按 pid 去重覆盖
+        let rec = |pid: u32, profile: &str| DetachedRecord {
+            pid,
+            profile: profile.into(),
+            version: "0.0.0".into(),
+            started_at: 1,
+            log_file: "/tmp/x.log".into(),
+        };
+        append_detached_record(&rec(424242, "old-name")).unwrap();
+        append_detached_record(&rec(424243, "keep")).unwrap();
+
+        rename_detached_profile("old-name", "new-name");
+        let after = read_detached_registry();
+        assert!(
+            after.iter().any(|r| r.profile == "new-name"),
+            "改名应同步登记表"
+        );
+        assert!(!after.iter().any(|r| r.profile == "old-name"));
+        assert!(after.iter().any(|r| r.profile == "keep"), "其它记录不受影响");
+
+        drop_detached_profile("new-name");
+        let after = read_detached_registry();
+        assert!(!after.iter().any(|r| r.profile == "new-name"), "删除应清掉登记");
+        assert!(after.iter().any(|r| r.profile == "keep"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::remove_var("DSH_LAUNCHER_HOME");
     }
 
     #[test]

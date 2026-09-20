@@ -511,6 +511,8 @@ pub fn rename_profile(
     ensure_profile_idle(&procs, &old)?;
     crate::profile_cfg::rename_profile(&old, &new_name)?;
     let new = new_name.trim().to_string();
+    // 独立进程登记表里也记着 profile 名，不同步会在实例列表里留下旧名的幽灵条目
+    crate::procs::rename_detached_profile(&old, &new);
     let mut s = state.settings.lock().unwrap();
     if s.default_profile == old {
         s.default_profile = new.clone();
@@ -530,12 +532,31 @@ pub fn delete_profile(
     let name = name.trim().to_string();
     ensure_profile_idle(&procs, &name)?;
     let trash = crate::profile_cfg::delete_profile(&name)?;
+    crate::procs::drop_detached_profile(&name);
     let mut s = state.settings.lock().unwrap();
     if s.default_profile == name {
         s.default_profile = String::new();
         let _ = settings::save_settings(&s);
     }
     Ok(trash)
+}
+
+/// 回收站列表（删除的 profile 只是被移入这里，可还原或彻底删除）
+#[tauri::command]
+pub fn list_deleted_profiles() -> Vec<crate::profile_cfg::DeletedProfile> {
+    crate::profile_cfg::list_deleted_profiles()
+}
+
+/// 把回收站条目还原回 profiles 目录
+#[tauri::command]
+pub fn restore_deleted_profile(dir_name: String) -> Result<String, String> {
+    crate::profile_cfg::restore_deleted_profile(&dir_name)
+}
+
+/// 从回收站彻底删除（不可恢复）
+#[tauri::command]
+pub fn purge_deleted_profile(dir_name: String) -> Result<(), String> {
+    crate::profile_cfg::purge_deleted_profile(&dir_name)
 }
 
 /// 生成「恢复模式」profile（基于官方 web 复制、只留官方插件、换邻近空闲端口）。
@@ -644,9 +665,12 @@ pub fn set_web_quick_config(
     crate::profile_cfg::set_web_quick_config(&profile, &config)
 }
 
+/// 复制 profile。复制后**自动错开 web 端口**（复用恢复模式那套「邻近空闲端口」逻辑），
+/// 否则两个实例配置同一个端口、无法并行启动。返回新端口（null = 该 profile 没有 webserver 配置）。
 #[tauri::command]
-pub fn copy_profile(source: String, new_name: String) -> Result<(), String> {
-    crate::profile_cfg::copy_profile(&source, &new_name)
+pub fn copy_profile(source: String, new_name: String) -> Result<Option<u16>, String> {
+    crate::profile_cfg::copy_profile(&source, &new_name)?;
+    crate::profile_cfg::assign_free_web_port(new_name.trim())
 }
 
 #[tauri::command]

@@ -27,6 +27,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import ProfileConfigPanel from "./components/ProfileConfigPanel";
 import CopyProfileDialog from "./components/CopyProfileDialog";
 import RenameProfileDialog from "./components/RenameProfileDialog";
+import TrashDialog from "./components/TrashDialog";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
@@ -112,6 +113,8 @@ export default function App() {
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   /** 删除确认的目标 profile；null = 关闭 */
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  /** 回收站（删除的 profile 可还原 / 彻底删除） */
+  const [trashOpen, setTrashOpen] = useState(false);
   /** 恢复模式创建确认 */
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
@@ -1080,6 +1083,14 @@ export default function App() {
                   不同 profile 可并行，同一 profile 同时只能运行一个
                 </span>
                 <span className="flex-1" />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setTrashOpen(true)}
+                  title="回收站：删除的 profile 会移到这里，可还原或彻底删除"
+                >
+                  <Trash2 /> 回收站
+                </Button>
                 <Button size="sm" variant="outline" onClick={refreshProfiles} title="重新扫描 $DSH_HOME/profiles">
                   <RefreshCw /> 重扫目录
                 </Button>
@@ -1390,6 +1401,14 @@ export default function App() {
         onClose={() => setCopySource(null)}
         onToast={addToast}
         onCopied={() => refreshProfiles()}
+      />
+
+      {/* 回收站 */}
+      <TrashDialog
+        open={trashOpen}
+        onClose={() => setTrashOpen(false)}
+        onToast={addToast}
+        onChanged={() => { refreshProfiles(); refreshInstances(); }}
       />
 
       {/* 重命名 profile */}

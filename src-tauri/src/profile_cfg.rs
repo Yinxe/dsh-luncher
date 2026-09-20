@@ -1296,7 +1296,8 @@ fn prune_to_official_bundles(dir: &Path) -> Result<(), String> {
 }
 
 /// 在 base 之上找一个「邻近、当前空闲、也没被别的 profile 配置占用」的端口
-fn pick_recovery_port(host: &str, base: u16) -> Result<u16, String> {
+/// （复制实例、恢复模式共用同一套错开逻辑）
+fn pick_free_nearby_port(host: &str, base: u16) -> Result<u16, String> {
     let used: Vec<u16> = profiles::scan_profiles()
         .iter()
         .filter_map(|p| web_addr(&p.name).map(|(_, port)| port))
@@ -1313,6 +1314,28 @@ fn pick_recovery_port(host: &str, base: u16) -> Result<u16, String> {
     Err(format!(
         "{base} 附近 200 个端口都被占用，请创建后到「快捷配置」手动指定端口"
     ))
+}
+
+/// 给某个 web profile 换一个邻近的空闲端口（原端口已被占用/与其它 profile 冲突时）。
+/// 返回 `Ok(None)` = 该 profile 没有 webserver 配置（如 headless），无需处理。
+/// 用于「复制实例后自动错开端口」，避免用户复制完两个实例抢同一个端口。
+pub fn assign_free_web_port(profile: &str) -> Result<Option<u16>, String> {
+    let Some((host, base)) = web_addr(profile) else {
+        return Ok(None);
+    };
+    let cfg = get_web_quick_config(profile).unwrap_or_default();
+    let port = pick_free_nearby_port(&host, base)?;
+    set_web_quick_config(
+        profile,
+        &WebQuickConfigInput {
+            host,
+            port: port as u64,
+            open_browser: cfg.open_browser.unwrap_or(true),
+            surface_context: cfg.surface_context.unwrap_or(true),
+            cookie_max_age_days: cfg.cookie_max_age_days.unwrap_or(36500),
+        },
+    )?;
+    Ok(Some(port))
 }
 
 /// 恢复模式 profile 名：目前只支持以官方 `web` 为模板（web-Recovery）
@@ -1338,28 +1361,144 @@ pub fn create_recovery_profile() -> Result<RecoveryCreated, String> {
     if !root.join("web").is_dir() {
         return Err("找不到官方 web profile，无法生成恢复模式".into());
     }
-    let Some((host, base_port)) = web_addr("web") else {
+    if web_addr("web").is_none() {
         return Err("官方 web profile 没有配置 webserver 端口，无法生成恢复模式".into());
-    };
-    let web_cfg = get_web_quick_config("web").unwrap_or_default();
-    // 端口先算好再复制，避免中途失败留下一个半成品 profile
-    let port = pick_recovery_port(&host, base_port)?;
+    }
     copy_profile("web", RECOVERY_PROFILE)?;
-    prune_to_official_bundles(&root.join(RECOVERY_PROFILE))?;
-    set_web_quick_config(
-        RECOVERY_PROFILE,
-        &WebQuickConfigInput {
-            host,
-            port: port as u64,
-            open_browser: web_cfg.open_browser.unwrap_or(true),
-            surface_context: web_cfg.surface_context.unwrap_or(true),
-            cookie_max_age_days: web_cfg.cookie_max_age_days.unwrap_or(36500),
-        },
-    )?;
-    Ok(RecoveryCreated {
-        name: RECOVERY_PROFILE.to_string(),
-        port,
-    })
+    // 后面任何一步失败都回滚，避免留下一个「只复制了一半」的 profile
+    let built = (|| -> Result<u16, String> {
+        prune_to_official_bundles(&root.join(RECOVERY_PROFILE))?;
+        assign_free_web_port(RECOVERY_PROFILE)?
+            .ok_or_else(|| "恢复模式没能取到可用的 web 端口".to_string())
+    })();
+    match built {
+        Ok(port) => Ok(RecoveryCreated {
+            name: RECOVERY_PROFILE.to_string(),
+            port,
+        }),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(root.join(RECOVERY_PROFILE));
+            Err(e)
+        }
+    }
+}
+
+// ── 回收站（删除的 profile）─────────────────────────
+
+/// 回收站条目：删除的 profile 只是被移动到这里，可还原或彻底删除
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedProfile {
+    /// 回收站里的目录/文件名（还原、彻底删除用它定位）
+    pub dir_name: String,
+    /// 解析出的原 profile 名
+    pub name: String,
+    pub path: String,
+    /// 删除时间（毫秒时间戳；从条目名解析，解析不到为 0）
+    pub deleted_at: u64,
+    pub is_dir: bool,
+}
+
+fn trash_dir() -> PathBuf {
+    crate::settings::launcher_home().join("deleted-profiles")
+}
+
+/// 回收站条目名是否合法（挡住路径穿越）
+fn validate_trash_entry(dir_name: &str) -> Result<(), String> {
+    if dir_name.trim().is_empty()
+        || dir_name.contains('/')
+        || dir_name.contains('\\')
+        || dir_name.contains("..")
+    {
+        return Err("非法回收站条目".into());
+    }
+    Ok(())
+}
+
+/// 解析回收站条目名：`<name>-<毫秒时间戳>[.yaml|yml|json]` → (原名, 时间戳, 扩展名)
+fn parse_trash_entry(dir_name: &str) -> (String, u64, Option<String>) {
+    let (base, ext) = match dir_name.rsplit_once('.') {
+        Some((b, e)) if matches!(e, "yaml" | "yml" | "json") => (b, Some(e.to_string())),
+        _ => (dir_name, None),
+    };
+    match base.rsplit_once('-') {
+        Some((name, ts))
+            if !name.is_empty() && !ts.is_empty() && ts.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            (name.to_string(), ts.parse().unwrap_or(0), ext)
+        }
+        _ => (base.to_string(), 0, ext),
+    }
+}
+
+/// 从回收站条目名解析「原 profile 名」
+fn parse_trash_name(dir_name: &str) -> String {
+    parse_trash_entry(dir_name).0
+}
+
+/// 列出回收站里的 profile（按删除时间倒序）
+pub fn list_deleted_profiles() -> Vec<DeletedProfile> {
+    let dir = trash_dir();
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<DeletedProfile> = rd
+        .flatten()
+        .filter_map(|e| {
+            let dir_name = e.file_name().to_string_lossy().into_owned();
+            let path = e.path();
+            let is_dir = path.is_dir();
+            let (name, deleted_at, _ext) = parse_trash_entry(&dir_name);
+            Some(DeletedProfile {
+                name,
+                dir_name,
+                path: path.to_string_lossy().into_owned(),
+                deleted_at,
+                is_dir,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
+    out
+}
+
+/// 把回收站条目还原回 profiles 目录；同名 profile 已存在时拒绝（避免覆盖）
+pub fn restore_deleted_profile(dir_name: &str) -> Result<String, String> {
+    validate_trash_entry(dir_name)?;
+    let src = trash_dir().join(dir_name);
+    if !src.exists() {
+        return Err("回收站里找不到该条目".into());
+    }
+    let name = parse_trash_name(dir_name);
+    validate_profile_name(&name)?;
+    if existing_profile_path(&name).is_some() {
+        return Err(format!(
+            "已存在同名 profile「{name}」——请先改名或删除它，再还原"
+        ));
+    }
+    let root = profiles::profiles_dir();
+    let dst = if src.is_dir() {
+        root.join(&name)
+    } else {
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("yaml");
+        root.join(format!("{name}.{ext}"))
+    };
+    move_path(&src, &dst)?;
+    Ok(dst.to_string_lossy().into_owned())
+}
+
+/// 从回收站彻底删除（不可恢复）
+pub fn purge_deleted_profile(dir_name: &str) -> Result<(), String> {
+    validate_trash_entry(dir_name)?;
+    let path = trash_dir().join(dir_name);
+    if !path.exists() {
+        return Err("回收站里找不到该条目".into());
+    }
+    if path.is_dir() {
+        std::fs::remove_dir_all(&path).map_err(|e| format!("彻底删除失败: {e}"))
+    } else {
+        std::fs::remove_file(&path).map_err(|e| format!("彻底删除失败: {e}"))
+    }
 }
 
 // ── 插件更新检测 ─────────────────────────
@@ -2107,6 +2246,52 @@ mod tests {
             .contains("third-party"));
         // 已存在时二次创建应拒绝
         assert!(create_recovery_profile().is_err());
+
+        // 4) 复制实例：web 类副本必须自动错开端口，否则两个实例抢同一个端口
+        copy_profile("web", "web-copy").unwrap();
+        let copied = assign_free_web_port("web-copy")
+            .unwrap()
+            .expect("web 类副本应有 webserver 端口");
+        assert!(copied > 3080, "副本端口应错开原端口，实际 {copied}");
+        assert_eq!(
+            get_web_quick_config("web-copy").unwrap().port,
+            Some(copied as u64)
+        );
+        // 没有 webserver 配置的 profile 无需处理
+        std::fs::create_dir_all(profiles.join("plain")).unwrap();
+        assert_eq!(assign_free_web_port("plain").unwrap(), None);
+
+        // 5) 回收站：列出 → 还原 → 再删 → 彻底删除
+        std::fs::create_dir_all(profiles.join("trashed")).unwrap();
+        delete_profile("trashed").unwrap();
+        let items = list_deleted_profiles();
+        let hit = items
+            .iter()
+            .find(|d| d.name == "trashed")
+            .expect("回收站应列出刚删除的 profile");
+        assert!(hit.deleted_at > 0, "应从条目名解析出删除时间戳");
+        assert_eq!(hit.is_dir, true);
+        restore_deleted_profile(&hit.dir_name).unwrap();
+        assert!(profiles.join("trashed").is_dir(), "还原后应回到 profiles 目录");
+        let trash = delete_profile("trashed").unwrap();
+        let entry = std::path::Path::new(&trash)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(list_deleted_profiles().iter().any(|d| d.dir_name == entry));
+        purge_deleted_profile(&entry).unwrap();
+        assert!(!std::path::Path::new(&trash).exists(), "彻底删除后不应还留在回收站");
+        // 还原目标已存在时必须拒绝，避免覆盖
+        std::fs::create_dir_all(profiles.join("dup")).unwrap();
+        delete_profile("dup").unwrap();
+        let dup = list_deleted_profiles()
+            .into_iter()
+            .find(|d| d.name == "dup")
+            .unwrap();
+        std::fs::create_dir_all(profiles.join("dup")).unwrap();
+        assert!(restore_deleted_profile(&dup.dir_name).is_err());
+        assert!(purge_deleted_profile("../evil").is_err(), "回收站条目名要挡路径穿越");
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");

@@ -26,6 +26,7 @@ import type {
   WebQuickConfigInput,
   CredentialFile,
   CredentialRef,
+  DeletedProfile,
   ModelConfigInfo,
   ModelConfigInput,
   RemoteModelInfo,
@@ -79,14 +80,21 @@ export const api = {
     invoke<WebQuickConfig>("get_web_quick_config", { profile }),
   setWebQuickConfig: (profile: string, config: WebQuickConfigInput) =>
     invoke<void>("set_web_quick_config", { profile, config }),
+  /** 复制 profile；返回自动错开后的 web 端口（null = 该 profile 没有 webserver 配置） */
   copyProfile: (source: string, newName: string) =>
-    invoke<void>("copy_profile", { source, newName }),
+    invoke<number | null>("copy_profile", { source, newName }),
   /** 重命名 profile（dsh 内置保留 profile 会被后端拒绝）；返回新名字 */
   renameProfile: (name: string, newName: string) =>
     invoke<string>("rename_profile", { name, newName }),
   /** 删除 profile（移入 ~/.dsh-launcher/deleted-profiles/ 可找回）；返回回收站路径 */
   deleteProfile: (name: string) =>
     invoke<string>("delete_profile", { name }),
+  /** 回收站：删除的 profile 可列出 / 还原 / 彻底删除 */
+  listDeletedProfiles: () => invoke<DeletedProfile[]>("list_deleted_profiles"),
+  restoreDeletedProfile: (dirName: string) =>
+    invoke<string>("restore_deleted_profile", { dirName }),
+  purgeDeletedProfile: (dirName: string) =>
+    invoke<void>("purge_deleted_profile", { dirName }),
   /** 生成恢复模式 profile：基于官方 web 复制，只留官方插件，换成邻近空闲端口 */
   createRecoveryProfile: () =>
     invoke<{ name: string; port: number }>("create_recovery_profile"),

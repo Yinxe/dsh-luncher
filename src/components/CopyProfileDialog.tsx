@@ -35,8 +35,13 @@ export default function CopyProfileDialog({ source, existing, onClose, onToast, 
     if (!source || !canSubmit) return;
     setBusy(true);
     try {
-      await api.copyProfile(source, trimmed);
-      onToast("ok", `已复制为「${trimmed}」（node_modules / cache 不复制，首次启动自动重装依赖）`);
+      const port = await api.copyProfile(source, trimmed);
+      onToast(
+        "ok",
+        port != null
+          ? `已复制为「${trimmed}」，web 端口已自动错开为 ${port}（node_modules / cache 不复制，首次启动自动重装依赖）`
+          : `已复制为「${trimmed}」（node_modules / cache 不复制，首次启动自动重装依赖）`
+      );
       onCopied(trimmed);
       onClose();
     } catch (e) {
@@ -56,7 +61,7 @@ export default function CopyProfileDialog({ source, existing, onClose, onToast, 
           <DialogDescription>
             把该 profile 的配置目录整份拷贝为新实例。实例名需手动输入；
             node_modules / cache 等可重建产物不复制，首次启动自动重装依赖。
-            若两个实例需要并行运行，请记得修改端口等冲突配置。
+            若源实例配置了 web 端口，副本会自动换一个邻近的空闲端口，可直接并行运行。
           </DialogDescription>
         </DialogHeader>
         <Input

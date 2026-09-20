@@ -146,6 +146,18 @@ export interface ProcEntry {
   port?: number | null;
 }
 
+/** 回收站条目（删除的 profile 只是被移入这里，可还原或彻底删除） */
+export interface DeletedProfile {
+  /** 回收站里的目录/文件名（还原、彻底删除用它定位） */
+  dirName: string;
+  /** 解析出的原 profile 名 */
+  name: string;
+  path: string;
+  /** 删除时间（毫秒时间戳） */
+  deletedAt: number;
+  isDir: boolean;
+}
+
 /** 独立进程的日志读取结果（read_instance_log） */
 export interface InstanceLog {
   path: string;
