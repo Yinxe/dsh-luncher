@@ -145,7 +145,15 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
         &format!("下载完成 {:.1} MB，正在解压…", received as f64 / 1024.0 / 1024.0),
     );
 
-    extract(&app, &archive_path)?;
+    // 解压是重阻塞操作（powershell / tar .output() 对几十 MB 的归档要跑好几秒），
+    // 挪到 spawn_blocking，避免卡住 async 命令所在的执行器线程（AGENTS.md 硬性要求）。
+    {
+        let app_h = app.clone();
+        let archive_for_extract = archive_path.clone();
+        tauri::async_runtime::spawn_blocking(move || extract(&app_h, &archive_for_extract))
+            .await
+            .map_err(|e| format!("解压任务失败: {e}"))??;
+    }
     let _ = std::fs::remove_file(&archive_path);
 
     // 归档顶层目录是 node-vVER-<plat>，统一改名成 node-vVER
