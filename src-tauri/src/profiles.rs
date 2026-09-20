@@ -134,7 +134,12 @@ pub fn scan_profiles_in(dir: &Path) -> Vec<ProfileInfo> {
         if name.starts_with('.') || name == "node_modules" {
             continue;
         }
-        if ft.is_dir() {
+        // DirEntry::file_type() 不跟随符号链接：软链到目录 / yaml 的 profile 若不解析目标，
+        // 既不是 dir 也不是 file 会被整个跳过，而 dsh 其实能透过软链运行它。这里解析后再判定；
+        // 指向不存在目标的坏软链 is_dir / is_file 都为 false，会自然跳过。
+        let is_dir = ft.is_dir() || (ft.is_symlink() && path.is_dir());
+        let is_file = ft.is_file() || (ft.is_symlink() && path.is_file());
+        if is_dir {
             let reserved = is_reserved_profile(&name);
             out.push(ProfileInfo {
                 name: name.into_owned(),
@@ -143,7 +148,7 @@ pub fn scan_profiles_in(dir: &Path) -> Vec<ProfileInfo> {
                 target: detect_target(&path),
                 reserved,
             });
-        } else if ft.is_file() {
+        } else if is_file {
             let ext = path
                 .extension()
                 .and_then(|e| e.to_str())
@@ -172,6 +177,35 @@ pub fn scan_profiles_in(dir: &Path) -> Vec<ProfileInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_lists_symlinked_profile_dir_skips_broken_link() {
+        let base = std::env::temp_dir().join(format!("dsh-symprof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("profiles");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // root 之外的真实目录（含 package.json），软链进 root
+        let real = base.join("real-profile");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("package.json"), r#"{"name":"p"}"#).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("linked")).unwrap();
+        // 指向不存在目标的坏软链：应跳过、且不 panic
+        std::os::unix::fs::symlink(base.join("missing"), root.join("broken")).unwrap();
+
+        let names: Vec<String> = scan_profiles_in(&root).into_iter().map(|p| p.name).collect();
+        assert!(
+            names.contains(&"linked".to_string()),
+            "软链目录应被识别为 profile：{names:?}"
+        );
+        assert!(
+            !names.contains(&"broken".to_string()),
+            "坏软链应被跳过：{names:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     #[test]
     fn detect_target_by_bundles() {
