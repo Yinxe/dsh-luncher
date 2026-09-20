@@ -79,7 +79,12 @@ export function usePluginJobs({ onFinished }: Options = {}): PluginJobsApi {
         const job = byId.get(e.jobId);
         if (!job) continue;
         job.lines = [...job.lines, { stream: e.stream, text: e.line, at: Date.now() }];
-        if (job.lines.length > 4000) job.lines = job.lines.slice(-4000);
+        if (job.lines.length > 4000) {
+          const removed = job.lines.length - 4000;
+          job.lines = job.lines.slice(-4000);
+          // 同步省略计数，否则长任务裁掉旧行后「已省略前 N 行」仍显示 0
+          job.dropped += removed;
+        }
       }
       return next;
     });
