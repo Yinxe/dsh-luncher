@@ -29,8 +29,10 @@
 - **通道自检**：设置页可一键并发探测四条通道（`github.com` refs / jsDelivr / raw / `api.github.com`）的可达性与往返延迟，直接看清当时哪条通、多快。每条通道记录最近成功延迟（EWMA）与连续失败次数：任一通道连续失败 2 次会被**临时跳过 5 分钟**，到期自动半开，避免每次都白等一个超时（自检按钮会清空熔断状态）。
 - **GitHub Token（可选）**：设置里可填一个 token（或直接用 `GITHUB_TOKEN` / `GH_TOKEN` 环境变量），把 `api.github.com` 额度从匿名 60 次/小时 提到 5000 次/小时。插件安装与更新检测走 git / registry，不填也完全可用；设置页会显示当前额度与重置时间。
 - **任务栏 / 托盘图标**：常驻托盘，左键切换窗口；右键菜单为「打开主界面」+ 各 profile 的运行状态（● 运行中 / ○ 未运行，纯展示不可点击）+ 退出；点关闭默认最小化到托盘（可在设置中改为直接退出）。
+- **启动器单实例**：启动器自身同时只允许跑一个——重复双击图标/快捷方式（或从终端再敲一次）不会开出第二个窗口和第二个托盘图标，而是把已有实例的主窗口唤回前台（隐藏到托盘的也会被唤出），新进程随即退出。这是启动器进程级的守卫，与上面「每个 profile 只有一个 dsh 实例」是两层独立保护。
 - **启动器自更新**（两条独立通道，二选一，互不冲突）：
-  - **内置 Tauri updater（推荐，可在应用内直接安装）**：`tauri.conf.json` 的 `plugins.updater` 配好 `pubkey` / `endpoints` 后，启动时自动检查远端 `latest.json`，发现新版本弹横幅（显示版本号 + 更新说明）→ 用户点「下载并安装」才下载、校验签名、安装并重启；点「稍后」就什么都不做。签名不匹配会直接拒绝安装，所以更新源被劫持也无法投毒。设置里另有「发现新版本后自动下载安装并重启」，**默认关闭**——只有想全自动的人才开。
+  - **内置 Tauri updater（推荐，可在应用内直接安装）**：`tauri.conf.json` 的 `plugins.updater` 配好 `pubkey` / `endpoints` 后，启动时自动检查远端 `latest.json`，发现新版本弹横幅（版本号 + 更新说明摘要 + **「查看新特性」**）→ 用户点「下载并安装」才下载、校验签名、安装并重启；点「稍后」就什么都不做。签名不匹配会直接拒绝安装，所以更新源被劫持也无法投毒。设置里另有「发现新版本后自动下载安装并重启」，**默认关闭**——只有想全自动的人才开。
+  - **更新说明从哪来**：横幅摘要与弹窗全文都取自该版本在 `CHANGELOG.md` 里的段落（CI 把它写进 GitHub Release 正文，`tauri-action` 再写进 `latest.json` 的 `notes`）。所以「新版有什么变化」不是发布时随手写的一句话，而是每次发版前必须写清的更新日志——缺失时 CI 直接失败，发不出去。弹窗里的全文按小节与列表排版，可直接从弹窗里下载安装。
   - **自建更新清单（只能跳转下载页）**：设置里填一个返回 `{ "version": "x.y.z", "notes": "...", "url": "https://..." }` 的 JSON 地址。**清单优先于内置 updater**：填了清单就不再走应用内安装。
   - **各安装形态的差异**（打包时 tauri-bundler 会把格式标记写进二进制，运行时据此选择安装方式）：
 
@@ -164,14 +166,22 @@ npm run release        # 同上（别名）
 
    > `bundle.createUpdaterArtifacts` 已经是 `true`：**这两个 secret 没配好，CI 打包会直接失败**（找不到签名密钥）。暂时不想启用应用内更新，就把它改回 `false`。
 
-### 之后每次发版（两件事，都在 git 里完成）
+### 之后每次发版（三件事，都在 git 里完成）
 
-1. 改 `src-tauri/tauri.conf.json` 的 `version` 和 `src-tauri/Cargo.toml` 的 `version`（两者保持一致）；
-2. 把 dev 合进 **main** 并 push —— workflow 是 `on: push: branches: [main]`，推上去就自动打包 → 传产物 → 自动发布正式 Release。**不需要去网页点任何按钮**。
+1. **写 `CHANGELOG.md`**：在 `[Unreleased]` 下面加上 `## [新版本号] - 日期` 段落，写清用户能看到的变化
+   （这段文字就是 GitHub Release 正文与客户端「查看新特性」弹窗的内容，也是唯一来源）；
+2. **三处版本号改成同一个**：`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`package.json`
+   —— 不一致时 CI 会直接失败（`npm run notes:check` 可本地先查）；
+3. **归档 + 提交**：`npm run notes:archive` 生成 `docs/releases/vX.Y.Z.md`，连同上面的改动一起合进 **main** 并 push
+   —— workflow 是 `on: push: branches: [main]`，推上去就自动打包 → 传产物 → 发布正式 Release。**不需要去网页点任何按钮**。
 
-版本号没改就推 main 也不会白跑：workflow 第一步会查到该版本已发布，直接跳过后面的构建（绿勾 + 一条 notice）。
+> 本地自检：`npm run notes`（预览即将发出去的 Release 正文）、`npm run notes:check`（版本号一致性 + 本版说明是否存在）。
+> 更详细的规范、发布后核对清单与常见故障见 [`docs/RELEASING.md`](docs/RELEASING.md)。
 
-> **为什么 workflow 里非要「先草稿、再自动发布」两步**：三端是并发跑的，如果直接发布，先跑完的那个会把 release 发出去，另外两个找不到草稿就去创建 → `422 already_exists(tag_name)`，结果是**整个平台的产物都缺失**（踩过一次：初版 v0.1.1 少了全部 Linux 包）。官方模板的做法是停在 Draft 让你手动点 Publish；这里只是把最后那一步自动化了。
+版本号没改就推 main 也不会白跑：workflow 第一步会查到该版本已发布，直接跳过后面的构建（绿勾 + 一条 notice）；
+但轻量的「规范门禁」作业仍会跑一遍前端构建与 CHANGELOG 校验，几十秒就能暴露「忘了写更新说明」。
+
+> **为什么 workflow 里非要「先草稿、再自动发布」两步**：三端是并发跑的，如果直接发布，先跑完的那个会把 release 发出去，另外两个找不到草稿就去创建 → `422 already_exists(tag_name)`，结果是**整个平台的产物都缺失**（踩过一次：初版 v0.1.1 少了全部 Linux 包）。官方模板的做法是停在 Draft 让你手动点 Publish；这里只是把最后那一步自动化了，并在发布前按 CHANGELOG 再刷一遍正文。
 
 > **别把 release 标成 pre-release**。GitHub 的 release 只有三种状态，而 `releases/latest` 只认「non-draft + non-prerelease」：
 >
@@ -194,7 +204,8 @@ curl -sL https://github.com/<你的账号>/<仓库名>/releases/latest/download/
 本地打包（不走 CI）则 `npm run build:release`，前提是当前 shell 里有 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
 
 > **三端全格式交给 CI**：`.github/workflows/release.yml` 基于 Tauri [官方模板](https://v2.tauri.app/distribute/pipelines/github) + `tauri-apps/tauri-action@v1`——打标签、建 Draft Release、上传产物、生成 `latest.json` 全部由该 action 完成（`includeUpdaterJson: true`）。
-> 触发方式：手动（`workflow_dispatch`）或 push 到 `release` 分支。版本号**可选**：填了走官方 `tauri build --config` 覆盖（不修改任何文件），留空则用 `tauri.conf.json` 里的版本。
+> 触发方式：push 到 `main` 或手动（`workflow_dispatch`）；版本号取自 `src-tauri/tauri.conf.json`（与 `Cargo.toml`、`package.json` 三处必须一致）。
+> Release 正文与 `latest.json` 的 `notes` 都取自 `CHANGELOG.md` 里本版本的段落，由 `scripts/release-notes.mjs` 提取（缺失即失败）。
 > matrix 覆盖 ubuntu-22.04（deb/rpm/AppImage）、windows-latest（.exe/.msi）、macos-latest（universal .dmg）。
 > 跨平台产物无法在单机上交叉编译，Windows / macOS 安装包必须由对应 runner 产出。
 
@@ -205,7 +216,7 @@ curl -sL https://github.com/<你的账号>/<仓库名>/releases/latest/download/
 ```json
 {
   "version": "0.2.0",
-  "notes": "更新说明",
+  "notes": "把 `npm run notes` 的输出贴进来（与 CHANGELOG.md 同源，别手写第二份）",
   "pub_date": "2026-01-01T00:00:00Z",
   "platforms": {
     "windows-x86_64": { "signature": "<.sig 文件内容>", "url": "https://.../DSH-Launcher_0.2.0_x64-setup.exe" },
