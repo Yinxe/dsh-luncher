@@ -221,6 +221,8 @@ export interface BundleInfo {
   enabled: boolean;
   /** 该包通过 patch 层声明的真实插件 id（包名 ≠ 插件 id） */
   pluginIds: string[];
+  /** 宿主自带（in-box）：不可卸载、不可停用 */
+  official: boolean;
 }
 
 export interface PatchItemInfo {

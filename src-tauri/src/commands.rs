@@ -692,6 +692,10 @@ pub fn plugin_uninstall(
     if name.is_empty() {
         return Err("插件名为空".into());
     }
+    // 宿主自带的插件包不允许卸载：卸掉 base / web-app 会让 profile 起不来
+    if crate::profile_cfg::is_inbox_bundle(&name) {
+        return Err(crate::profile_cfg::inbox_bundle_reject(&name, "卸载"));
+    }
     let settings = state.settings.lock().unwrap().clone();
     let mut steps = vec![
         crate::plugin::Step::Note {

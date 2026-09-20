@@ -383,6 +383,11 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
                 <div className="flex items-center gap-1.5">
                   <span className="truncate font-mono text-[12.5px] font-medium">{b.name}</span>
                   <SourceBadge source={b.source} />
+                  {b.official && (
+                    <Badge variant="secondary" className="text-[10px]" title="dsh 宿主自带的插件包：不可卸载、不可停用">
+                      官方
+                    </Badge>
+                  )}
                 </div>
                 <div className="truncate text-[10.5px] text-muted-foreground" title={b.version ?? ""}>
                   {b.version ?? "—"}
@@ -394,7 +399,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
                 size="sm"
                 variant="ghost"
                 className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                disabled={busy}
+                disabled={busy || b.official}
                 onClick={() => {
                   setPurgeClone(false);
                   setPendingUninstall({
@@ -403,13 +408,22 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
                     cloneName: managedCloneName(updates?.[b.name]),
                   });
                 }}
-                title="通过官方 dsh plugin 命令卸载（remove），输出进内置终端"
+                title={
+                  b.official
+                    ? `${b.name} 是 dsh 宿主自带的插件包，卸载会让这个 profile 起不来；要折腾请用「恢复模式」新建一个实例`
+                    : "通过官方 dsh plugin 命令卸载（remove），输出进内置终端"
+                }
               >
                 卸载
               </Button>
               <Switch
                 checked={b.enabled}
-                disabled={busy}
+                disabled={busy || b.official}
+                title={
+                  b.official
+                    ? `${b.name} 是 dsh 宿主自带的插件包，停用同样会让 profile 起不来（base 提供核心运行时，web-app 提供 Web GUI）`
+                    : undefined
+                }
                 onCheckedChange={(v) => toggleBundle(b.name, v)}
               />
             </div>

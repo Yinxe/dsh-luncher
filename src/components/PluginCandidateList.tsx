@@ -1,4 +1,4 @@
-import { CircleAlert, PackageCheck, Puzzle, Workflow } from "lucide-react";
+import { Check, CircleAlert, PackageCheck, Puzzle, Workflow } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import type { PluginCandidate } from "../types";
@@ -52,14 +52,18 @@ export default function PluginCandidateList({
       {...valueProps}
       orientation="vertical"
       spacing={6}
-      className="w-full items-stretch"
+      className="w-full items-stretch overflow-visible"
     >
-      {candidates.map((c) => (
+      {candidates.map((c) => {
+        const on = selected.includes(c.installSpec);
+        return (
         <ToggleGroupItem
           key={`${c.path}|${c.name ?? ""}`}
           value={c.installSpec}
           variant="outline"
           size="sm"
+          // data-[state=on] 的样式同时写在这个按钮上（radix 会给 data-state），
+          // 但"左上角勾子"需要绝对定位的子元素，所以外面再包一层 relative 容器
           disabled={!c.ready || !c.libOk}
           title={
             !c.ready
@@ -69,8 +73,18 @@ export default function PluginCandidateList({
               : undefined
           }
           // 带 ! 的几项是为了压过 toggleVariants 的 size/variant 默认值（h-7 / font-medium / whitespace-nowrap）
-          className="h-auto! w-full flex-col items-stretch gap-1.5 overflow-visible rounded-lg! px-2.5 py-2 text-left font-normal! whitespace-normal! data-[state=on]:border-primary/50 data-[state=on]:bg-primary/5 disabled:cursor-not-allowed disabled:opacity-70"
+          // 选中态：实色边框 + 淡底 + 外发光（原来只有 border-primary/50，辨识度不够）
+          className="relative h-auto! w-full flex-col items-stretch gap-1.5 overflow-visible rounded-lg! px-2.5 py-2 text-left font-normal! whitespace-normal! data-[state=on]:z-10 data-[state=on]:border-primary data-[state=on]:bg-primary/[0.07] data-[state=on]:ring-2 data-[state=on]:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-70"
         >
+          {/* 选中标识：卡片左上角的圆形勾子（叠在边框上，未选中时不渲染） */}
+          {on && (
+            <span
+              aria-hidden
+              className="absolute -top-2 -left-2 z-10 grid h-5 w-5 place-items-center rounded-full bg-primary text-primary-foreground shadow-sm ring-2 ring-background"
+            >
+              <Check className="h-3 w-3" strokeWidth={3} />
+            </span>
+          )}
           <span className="flex w-full items-start gap-2">
             <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
               <span
@@ -133,12 +147,13 @@ export default function PluginCandidateList({
 
           {!c.libOk && (
             <span className="text-[10.5px] leading-relaxed text-amber-600 dark:text-amber-400">
-              仓库未提交 lib/ 构建产物，**不能直装**（dsh 加载不了）——请改用「Clone 仓库」方式安装（会先装依赖并构建），
+              仓库未提交 lib/ 构建产物，不能直装（dsh 加载不了）——请改用「Clone 仓库」方式安装（会先装依赖并构建），
               或让作者提交构建产物
             </span>
           )}
         </ToggleGroupItem>
-      ))}
+        );
+      })}
     </ToggleGroup>
   );
 }

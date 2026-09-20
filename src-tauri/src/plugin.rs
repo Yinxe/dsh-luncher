@@ -690,6 +690,22 @@ pub fn start_job<R: Runtime>(
                         .get_or_insert_with(|| crate::verify::snapshot(&dir))
                         .clone();
 
+                    // 宿主自带的插件包不允许卸载（防御性守卫：命令层已拦，这里保证
+                    // 将来新增的任何调用路径也带不走 base / web-app / headless）
+                    if base_argv.first().map(String::as_str) == Some("remove") {
+                        if let Some(hit) = base_argv
+                            .iter()
+                            .skip(1)
+                            .find(|a| crate::profile_cfg::is_inbox_bundle(a))
+                        {
+                            let msg = crate::profile_cfg::inbox_bundle_reject(hit, "卸载");
+                            emit_line(&app, &handle, id, "stderr", &msg);
+                            remember_hint(&handle, &msg);
+                            ok = false;
+                            break;
+                        }
+                    }
+
                     // 卸载前检查（对齐 dshmarket 的 uninstall 路由）：
                     // 用户自己的 cordis.patch.yml 若仍 insert 着这个包，卸载会让下次启动缺模块；
                     // 启动器不替用户改他的补丁文件，所以这里直接拒绝并指出要删哪几行。

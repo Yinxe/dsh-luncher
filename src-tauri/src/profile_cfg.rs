@@ -16,6 +16,8 @@ pub struct BundleInfo {
     pub enabled: bool,
     /// 该包通过 patch 层声明的真实插件 id（包名 ≠ 插件 id）
     pub plugin_ids: Vec<String>,
+    /// 宿主自带（in-box）：前端据此禁用「卸载」与启停开关
+    pub official: bool,
 }
 
 /// cordis.patch.yml 顶层条目摘要（只读展示；编辑走原始文本保注释）
@@ -170,6 +172,7 @@ pub fn read_detail(settings: &Settings, profile: &str) -> Result<ProfileDetail, 
                 source: source_of(dep_ver.as_deref()).to_string(),
                 enabled,
                 plugin_ids,
+                official: is_inbox_bundle(name),
             });
         }
         // dependencies 全量直接依赖：不在 bundles 里的就是「装了但不是插件」的包
@@ -417,6 +420,11 @@ pub fn set_bundle_enabled(
     name: &str,
     enabled: bool,
 ) -> Result<(), String> {
+    // 宿主自带的包不允许停用（后端权威闸门；前端也会把开关置灰）
+    if is_inbox_bundle(name) {
+        // enabled=true 是「启用」，false 是「停用」——两个方向都拒绝
+        return Err(inbox_bundle_reject(name, if enabled { "启用" } else { "停用" }));
+    }
     let dir = profile_dir(profile)?;
     let pkg_raw = std::fs::read_to_string(dir.join("package.json"))
         .map_err(|e| format!("读取 package.json 失败: {e}"))?;
@@ -1221,6 +1229,37 @@ pub fn delete_profile(name: &str) -> Result<String, String> {
 /// 恢复模式只保留这两个官方内置插件，其余第三方插件全部摘掉
 const OFFICIAL_BUNDLES: &[&str] = &["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"];
 
+/// dsh 宿主自带（in-box）的插件包：**不允许卸载、不允许停用**。
+///
+/// 它们由 dsh 安装本体提供，不是 profile 的普通依赖：
+/// - `@deepseek-ai/dsh-base` 提供核心运行时（timer / hmr / llm / session …），
+///   卸掉或停掉整个 profile 都起不来；
+/// - `@deepseek-ai/dsh-web-app` 提供 Web GUI 表面（消息反馈、会话日志、打开方式…），
+///   Web profile 少了它就没有界面；
+/// - `@deepseek-ai/dsh-headless` 同理，用于 headless profile。
+///
+/// 命名与语义对齐同生态的 dshmarket（它的 `INBOX_BUNDLES` 同样把这几个视为
+/// "ships with the dsh host and must stay put"）。
+pub const INBOX_BUNDLES: &[&str] = &[
+    "@deepseek-ai/dsh-base",
+    "@deepseek-ai/dsh-web-app",
+    "@deepseek-ai/dsh-headless",
+];
+
+/// 该包是否是宿主自带、需受保护的插件包
+pub fn is_inbox_bundle(name: &str) -> bool {
+    INBOX_BUNDLES.contains(&name.trim())
+}
+
+/// 受保护包被操作时的统一拒绝话术
+pub fn inbox_bundle_reject(name: &str, action: &str) -> String {
+    format!(
+        "{name} 是 dsh 宿主自带的插件包，不能{action}：它由 dsh 安装本体提供，\
+         卸载或停用会让这个 profile 起不来（base 提供核心运行时，web-app 提供 Web GUI）。\n\
+         若要一个只含官方插件、可放心折腾的实例，请用「恢复模式」新建一个 profile。"
+    )
+}
+
 /// 把 package.json 的 bundles 收敛到官方两个，并同步移除对应的 dependencies，
 /// 这样恢复模式不会加载也不会安装任何第三方插件。
 fn prune_to_official_bundles(dir: &Path) -> Result<(), String> {
@@ -1911,6 +1950,27 @@ mod tests {
 
         std::env::remove_var("DSH_HOME");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 宿主自带的插件包受保护：不允许卸载、不允许停用
+    #[test]
+    fn inbox_bundles_are_protected() {
+        for name in INBOX_BUNDLES {
+            assert!(is_inbox_bundle(name), "{name} 应受保护");
+        }
+        // 前缀不是宽泛匹配：第三方 @deepseek-ai/dsh-* 与社区包都不在名单里
+        assert!(!is_inbox_bundle("@deepseek-ai/dsh-mcp-client"));
+        assert!(!is_inbox_bundle("@dshp/mcwiki-search"));
+        assert!(!is_inbox_bundle(""));
+        let msg = inbox_bundle_reject("@deepseek-ai/dsh-base", "卸载");
+        assert!(msg.contains("不能卸载"), "{msg}");
+        assert!(msg.contains("恢复模式"), "{msg}");
+
+        // 停用请求在读文件之前就被拒绝（profile 不存在也不该变成"读取失败"）
+        let settings = crate::settings::Settings::default();
+        let err = set_bundle_enabled(&settings, "web-not-exist", "@deepseek-ai/dsh-base", false)
+            .unwrap_err();
+        assert!(err.contains("不能停用"), "{err}");
     }
 
     #[test]
