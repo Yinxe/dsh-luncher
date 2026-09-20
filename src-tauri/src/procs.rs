@@ -1027,7 +1027,14 @@ pub(crate) fn port_owner(host: &str, port: u16, profile: &str) -> Option<PortOwn
     if !is_dsh {
         return Some(PortOwner::OtherProcess(pid));
     }
-    let owner = cmd.as_deref().map(parse_dsh_profile).unwrap_or_default();
+    // 拿不到 cmdline 时（Windows 上 pid_is_dsh 只认映像名 node.exe）既证明不了它是 dsh、
+    // 也判不出属于哪个 profile，绝不能保守归到「本 profile」——否则停本 profile 会
+    // taskkill 掉任何恰好占着该端口的无关 node 进程。这种情况一律 Unknown 交回「请手动处理」，
+    // 检测路径仍会把它算作运行中（只是不给可停的 PID）。
+    let Some(cmd) = cmd.as_deref() else {
+        return Some(PortOwner::Unknown);
+    };
+    let owner = parse_dsh_profile(cmd);
     if owner.is_empty() || owner == profile {
         Some(PortOwner::ThisProfile(pid))
     } else {
