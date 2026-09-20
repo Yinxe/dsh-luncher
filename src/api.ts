@@ -7,6 +7,7 @@ import type {
   InstanceLog,
   InstalledVersion,
   LauncherUpdateStatus,
+  LauncherUpdateProgress,
   LaunchResult,
   ProcExitEvent,
   ProcInfo,
@@ -189,6 +190,8 @@ export const api = {
   openUrl: (url: string) => invoke<void>("open_external", { url }),
   installRuntime: () => invoke<string>("install_runtime"),
   checkLauncherUpdate: () => invoke<LauncherUpdateStatus>("check_launcher_update"),
+  /** 下载并安装启动器新版本；非 Windows 上成功后进程会直接重启，不返回 */
+  installLauncherUpdate: () => invoke<string>("install_launcher_update"),
 };
 
 export const events = {
@@ -198,6 +201,8 @@ export const events = {
     listen<InstallFinishedEvent>("install-finished", (e) => cb(e.payload)),
   onLauncherUpdate: (cb: (s: LauncherUpdateStatus) => void): Promise<UnlistenFn> =>
     listen<LauncherUpdateStatus>("launcher-update", (e) => cb(e.payload)),
+  onLauncherUpdateProgress: (cb: (e: LauncherUpdateProgress) => void): Promise<UnlistenFn> =>
+    listen<LauncherUpdateProgress>("launcher-update-progress", (e) => cb(e.payload)),
   onProcLog: (cb: (e: ProcLogEvent) => void): Promise<UnlistenFn> =>
     listen<ProcLogEvent>("proc-log", (e) => cb(e.payload)),
   onProcExit: (cb: (e: ProcExitEvent) => void): Promise<UnlistenFn> =>

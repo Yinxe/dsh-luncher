@@ -3,6 +3,7 @@ import {
   Alert, AlertAction, AlertDescription, AlertTitle,
 } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import type { LauncherUpdateStatus } from "../types";
 
 interface Props {
@@ -11,9 +12,13 @@ interface Props {
   onOpenUrl: (url: string) => void;
   onApply: () => void;
   applying: boolean;
+  /** 下载进度（内置 updater 模式才有） */
+  progress?: { received: number; total: number } | null;
 }
 
-export default function UpdateBanner({ status, onDismiss, onOpenUrl, onApply, applying }: Props) {
+export default function UpdateBanner({
+  status, onDismiss, onOpenUrl, onApply, applying, progress,
+}: Props) {
   if (!status.available) {
     if (status.mode === "error" && status.message) {
       return (
@@ -39,6 +44,19 @@ export default function UpdateBanner({ status, onDismiss, onOpenUrl, onApply, ap
         启动器新版本 <b>v{status.latest}</b> 已发布（当前 v{status.current}）
       </AlertTitle>
       {status.notes && <AlertDescription className="line-clamp-2">{status.notes}</AlertDescription>}
+      {applying && status.mode === "builtin" && (
+        <div className="mt-1 flex items-center gap-2">
+          <Progress
+            className="h-1.5 w-64"
+            value={progress && progress.total > 0 ? Math.round((progress.received / progress.total) * 100) : 0}
+          />
+          <span className="text-[11px] tabular-nums text-muted-foreground">
+            {progress && progress.total > 0
+              ? `${(progress.received / 1048576).toFixed(1)} / ${(progress.total / 1048576).toFixed(1)} MB`
+              : "正在连接更新源…"}
+          </span>
+        </div>
+      )}
       <AlertAction className="flex gap-1.5">
         {status.mode === "builtin" && (
           <Button size="sm" disabled={applying} onClick={onApply}>

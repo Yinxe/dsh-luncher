@@ -352,7 +352,9 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
                 placeholder="https://example.com/dsh-launcher/latest.json"
                 onChange={(e) => set("updateManifestUrl", e.target.value)}
               />
-              <FieldDescription>返回 {`{version, notes, url}`} 的 JSON；留空则不检查启动器更新</FieldDescription>
+              <FieldDescription>
+                返回 {`{version, notes, url}`} 的 JSON；留空则改用内置 Tauri updater 检查（后者支持应用内「下载并安装」）
+              </FieldDescription>
             </Field>
             <SwitchRow
               id="set-auto-versions"
@@ -365,6 +367,13 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
               checked={draft.autoCheckUpdate}
               onChange={(v) => set("autoCheckUpdate", v)}
               label="启动时自动检查启动器更新"
+            />
+            <SwitchRow
+              id="set-auto-install-update"
+              checked={draft.autoInstallUpdate}
+              onChange={(v) => set("autoInstallUpdate", v)}
+              label="发现新版本后自动下载安装并重启"
+              hint="仅内置 updater 模式生效；Linux 上需要 AppImage 形态"
             />
           </Section>
 

@@ -21,6 +21,8 @@ pub struct Settings {
     pub terminal: String,
     /// 启动时自动检查启动器更新
     pub auto_check_update: bool,
+    /// 发现启动器新版本后直接静默下载安装并重启（仅内置 updater 模式生效）
+    pub auto_install_update: bool,
     /// 启动时自动刷新版本列表
     pub auto_check_versions: bool,
     /// Node 可执行文件覆盖路径（留空自动探测）
@@ -61,6 +63,7 @@ impl Default for Settings {
             active_version: String::new(),
             terminal: "auto".into(),
             auto_check_update: true,
+            auto_install_update: false,
             auto_check_versions: true,
             node_path: String::new(),
             node_source: "auto".into(),

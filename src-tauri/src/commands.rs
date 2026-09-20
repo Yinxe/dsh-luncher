@@ -1265,22 +1265,15 @@ pub async fn check_launcher_update(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<LauncherUpdateStatus, String> {
-    let current = app.package_info().version.to_string();
-    let url = state.settings.lock().unwrap().update_manifest_url.clone();
-    if url.trim().is_empty() {
-        return Ok(LauncherUpdateStatus {
-            available: false,
-            current,
-            latest: None,
-            notes: None,
-            url: None,
-            mode: "unconfigured".into(),
-            message: Some(
-                "未配置启动器更新源。可在设置中填写自建更新清单地址；正式发布时可启用 Tauri updater（签名更新）".into(),
-            ),
-        });
-    }
-    Ok(update_check::check_manifest(url.trim(), &current).await)
+    let settings = state.settings.lock().unwrap().clone();
+    Ok(update_check::check(&app, &settings).await)
+}
+
+/// 下载并安装启动器新版本（内置 updater 模式）。
+/// 非 Windows 平台上本调用不会返回：安装成功后直接重启应用。
+#[tauri::command]
+pub async fn install_launcher_update(app: AppHandle) -> Result<String, String> {
+    update_check::install_builtin(&app).await
 }
 
 #[tauri::command]
@@ -1303,26 +1296,27 @@ pub async fn install_runtime(
     crate::runtime::install(app, &settings).await
 }
 
-/// 启动器启动时推送一次自动检查结果给前端
+/// 启动器启动时推送一次自动检查结果给前端。
+/// 清单地址为空时回落到内置 Tauri updater（能直接下载安装）；
+/// 开了 autoInstallUpdate 且更新源支持应用内安装时，不等用户点确认直接静默升级。
 pub fn emit_startup_checks(app: &AppHandle) {
     let settings = settings::load_settings();
-    if settings.auto_check_update {
-        let app2 = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let current = app2.package_info().version.to_string();
-            let status = if settings.update_manifest_url.trim().is_empty() {
-                None
-            } else {
-                Some(
-                    update_check::check_manifest(settings.update_manifest_url.trim(), &current)
-                        .await,
-                )
-            };
-            if let Some(s) = status {
-                if s.available {
-                    let _ = app2.emit("launcher-update", s);
-                }
-            }
-        });
+    if !settings.auto_check_update {
+        return;
     }
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let status = update_check::check(&app2, &settings).await;
+        if !status.available {
+            return;
+        }
+        if settings.auto_install_update && status.mode == "builtin" {
+            let _ = app2.emit("launcher-update", status);
+            if let Err(e) = update_check::install_builtin(&app2).await {
+                let _ = app2.emit("toast", format!("自动更新失败：{e}"));
+            }
+            return;
+        }
+        let _ = app2.emit("launcher-update", status);
+    });
 }

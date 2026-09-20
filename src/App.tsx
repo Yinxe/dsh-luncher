@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { check as updaterCheck, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 import {
   Puzzle, RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
@@ -91,6 +89,7 @@ export default function App() {
   const [installJob, setInstallJob] = useState<{ version: string; logs: string[] } | null>(null);
   const [update, setUpdate] = useState<LauncherUpdateStatus | null>(null);
   const [updateApplying, setUpdateApplying] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<{ received: number; total: number } | null>(null);
   const [pendingUninstall, setPendingUninstall] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
@@ -127,7 +126,6 @@ export default function App() {
   settingsRef.current = settings;
   const instancesRef = useRef<ProfileInstance[]>([]);
   instancesRef.current = instances;
-  const builtinUpdate = useRef<Update | null>(null);
 
   const { resolved, setTheme } = useTheme();
 
@@ -257,7 +255,15 @@ export default function App() {
         addToast("err", `dsh ${e.version} 安装失败：${e.message.split("\n")[0]}`);
       }
     }));
-    track(events.onLauncherUpdate?.((s) => setUpdate(s)));
+    track(events.onLauncherUpdate?.((s) => {
+      setUpdate(s);
+      // 静默自动更新：后端已经在下载了，这里把进度条顶起来
+      if (s.available && settingsRef.current?.autoInstallUpdate && s.mode === "builtin") {
+        setUpdateApplying(true);
+        setUpdateProgress({ received: 0, total: 0 });
+      }
+    }));
+    track(events.onLauncherUpdateProgress?.((p) => setUpdateProgress(p)));
     track(events.onProcLog?.((e: ProcLogEvent) => {
       const hit = /dsh web:\s*(https?:\/\/\S+)/.exec(e.line);
       setProcs((m) => {
@@ -450,30 +456,31 @@ export default function App() {
 
   const doCheckUpdate = useCallback(async () => {
     try {
-      let status = await api.checkLauncherUpdate();
-      if (status.mode === "unconfigured") {
-        try {
-          const u = await updaterCheck();
-          builtinUpdate.current = u;
-          if (u) {
-            status = {
-              available: true, current: status.current, latest: u.version,
-              notes: u.body ?? null, url: null, mode: "builtin", message: `发现新版本 ${u.version}`,
-            };
-          }
-        } catch { /* 未配置 updater endpoints */ }
-      }
+      // 后端统一决策：配了自建清单就查清单，否则查内置 updater（后者可在应用内安装）
+      const status = await api.checkLauncherUpdate();
       setUpdate(status);
-      if (!status.available && status.mode !== "error") addToast("ok", status.message ?? "已是最新版本");
+      if (status.available) return;
+      if (status.mode === "manifest" || status.mode === "builtin") {
+        addToast("ok", status.message ?? "已是最新版本");
+      } else {
+        addToast("err", status.message ?? "检查更新失败");
+      }
     } catch (e) { addToast("err", `检查更新失败: ${e}`); }
   }, [addToast]);
 
   const doApplyUpdate = useCallback(async () => {
-    const u = builtinUpdate.current;
-    if (!u) return;
     setUpdateApplying(true);
-    try { await u.downloadAndInstall(); await relaunch(); }
-    catch (e) { setUpdateApplying(false); addToast("err", `自动更新失败: ${e}`); }
+    setUpdateProgress(null);
+    try {
+      // 非 Windows 上这个调用不会返回：安装成功后进程直接重启
+      const msg = await api.installLauncherUpdate();
+      addToast("ok", msg);
+      setUpdateApplying(false);
+    } catch (e) {
+      setUpdateApplying(false);
+      setUpdateProgress(null);
+      addToast("err", `自动更新失败: ${e}`);
+    }
   }, [addToast]);
 
   const doSaveSettings = useCallback(async (s: SettingsT) => {
@@ -824,6 +831,7 @@ export default function App() {
           <UpdateBanner
             status={update}
             applying={updateApplying}
+            progress={updateProgress}
             onDismiss={() => setUpdate(null)}
             onOpenUrl={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
             onApply={doApplyUpdate}

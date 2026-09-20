@@ -56,6 +56,7 @@ pub fn run() {
             commands::read_instance_log,
             commands::list_profiles,
             commands::check_launcher_update,
+            commands::install_launcher_update,
             commands::reveal_folder,
             commands::open_external,
             commands::install_runtime,

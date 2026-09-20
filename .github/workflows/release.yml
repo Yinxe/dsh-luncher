@@ -90,10 +90,17 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # updater 签名私钥：在本地 `npm run tauri signer generate -w ~/.tauri/dsh-launcher.key`
+          # 生成后把私钥文件内容整段贴进仓库 secret；钥匙串留空就再配一个空密码 secret。
+          # 两个 secret 缺任意一个，产物都不会带 .sig，也不会生成 latest.json。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__ # action 自动把 __VERSION__ 替换为应用版本号
           releaseName: 'DSH Launcher v__VERSION__'
           releaseBody: '跨平台安装包，请从下方 Assets 下载：Linux（.deb / .rpm / .AppImage）、Windows（NSIS .exe 安装包 / .msi）、macOS（universal .dmg）。'
           releaseDraft: true
           prerelease: false
+          # 生成 updater 清单 latest.json 并上传到同一个 Release —— 应用内自动更新的数据源
+          includeUpdaterJson: true
           args: ${{ matrix.args }} ${{ steps.ver.outputs.config_arg }}

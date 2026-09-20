@@ -29,9 +29,27 @@
 - **通道自检**：设置页可一键并发探测四条通道（`github.com` refs / jsDelivr / raw / `api.github.com`）的可达性与往返延迟，直接看清当时哪条通、多快。每条通道记录最近成功延迟（EWMA）与连续失败次数：任一通道连续失败 2 次会被**临时跳过 5 分钟**，到期自动半开，避免每次都白等一个超时（自检按钮会清空熔断状态）。
 - **GitHub Token（可选）**：设置里可填一个 token（或直接用 `GITHUB_TOKEN` / `GH_TOKEN` 环境变量），把 `api.github.com` 额度从匿名 60 次/小时 提到 5000 次/小时。插件安装与更新检测走 git / registry，不填也完全可用；设置页会显示当前额度与重置时间。
 - **任务栏 / 托盘图标**：常驻托盘，左键切换窗口；右键菜单为「打开主界面」+ 各 profile 的运行状态（● 运行中 / ○ 未运行，纯展示不可点击）+ 退出；点关闭默认最小化到托盘（可在设置中改为直接退出）。
-- **启动器自更新**：
-  - 支持自建**更新清单**（设置里填一个返回 `{ "version": "x.y.z", "notes": "...", "url": "https://..." }` 的 JSON 地址），启动时自动检查，发现新版本弹横幅跳转下载；
-  - 同时内置 **Tauri updater**（签名自动更新）：发布时在 `src-tauri/tauri.conf.json` 的 `plugins.updater` 里配好 `pubkey` 和 `endpoints`，即可在应用内一键"下载并安装 + 重启"。
+- **启动器自更新**（两条独立通道，二选一，互不冲突）：
+  - **内置 Tauri updater（推荐，可在应用内直接安装）**：`tauri.conf.json` 的 `plugins.updater` 配好 `pubkey` / `endpoints` 后，启动时自动检查远端 `latest.json`，发现新版本弹横幅 →「下载并安装」会下载签名包、校验签名、安装并自动重启；勾选「发现新版本后自动下载安装并重启」则全程静默，不再询问。签名不匹配会被直接拒绝安装，所以更新源被劫持也无法投毒。
+  - **自建更新清单（只能跳转下载页）**：设置里填一个返回 `{ "version": "x.y.z", "notes": "...", "url": "https://..." }` 的 JSON 地址。**清单优先于内置 updater**：填了清单就不再走应用内安装。
+  - Linux 上只有 **AppImage** 形态支持应用内更新；`.deb` / `.rpm` 由系统包管理器负责升级，界面会明确提示（`mode: unsupported`）。
+
+## 自动更新是怎么工作的
+
+```
+你 push 一个 tag / 手动触发 CI
+        ↓  tauri-action 打包三端产物
+   用私钥给每个产物签名 → 生成 .sig
+        ↓
+   生成 latest.json（version + 各平台下载地址 + 签名）并上传到同一个 Release
+        ↓
+用户机器上的启动器启动时 GET 这个 latest.json
+        ↓
+   版本比自己新？ → 下载对应平台安装包 → 用内置公钥验签 → 安装 → 重启
+```
+
+关键点只有三个：**私钥在 CI**（签名）、**公钥在安装包里的 `tauri.conf.json`**（验签）、**`latest.json` 必须能通过 HTTPS 匿名访问**。
+
 
 ## 数据目录
 
@@ -99,15 +117,72 @@ npm run release        # 同上（别名）
 
 ## 发布新版本（启动器自身）
 
-1. 改 `src-tauri/tauri.conf.json` 的 `version` 与 `src-tauri/Cargo.toml` 的 `version`；
-2. 在 `src-tauri/tauri.conf.json` 的 `plugins.updater` 里配好 `pubkey` / `endpoints`，并把 `bundle.createUpdaterArtifacts` 改回 `true`，然后设置 `TAURI_SIGNING_PRIVATE_KEY` 环境变量；
-3. `npm run build:release` —— 产出安装包，`createUpdaterArtifacts` 会同时生成 updater 签名产物；
-4. 把安装包和 `latest.json`（Tauri updater 格式）发布到你的下载源，并同步更新自建清单 JSON 或 `plugins.updater.endpoints`。
+### 第一次：一次性配置（约 5 分钟）
 
-> **三端全格式交给 CI**：`.github/workflows/release.yml` 基于 Tauri [官方模板](https://v2.tauri.app/distribute/pipelines/github) + `tauri-apps/tauri-action@v1`——打标签、建 Draft Release、上传产物全部由该 action 完成，workflow 里没有任何自定义版本脚本。
+1. **生成签名密钥对**（只做一次，之后所有版本复用同一对）：
+
+   ```bash
+   npm run tauri signer generate -w ~/.tauri/dsh-launcher.key
+   # 会打印一串 base64 公钥，并把私钥写进 ~/.tauri/dsh-launcher.key
+   # 提示输入密码时可以直接回车（留空）
+   ```
+
+   > 私钥 = 更新权限。**不要提交进仓库**，丢了就只能让老用户手动重装（新私钥签的包老版本验不过）。
+   > 公钥是烧进安装包里的，所以改公钥 / 改 endpoints **必须重新发版**；只有已经装着「带新公钥」那版的人才能自动升级——再往后的版本就都能滚动了。
+
+2. **把公钥写进 `src-tauri/tauri.conf.json`**，并把 endpoints 指向你的 Release：
+
+   ```jsonc
+   "plugins": {
+     "updater": {
+       "pubkey": "<上一步打印的公钥>",
+       "endpoints": [
+         "https://github.com/<你的账号>/<仓库名>/releases/latest/download/latest.json"
+       ],
+       "windows": { "installMode": "passive" }
+     }
+   }
+   ```
+
+3. **在 GitHub 仓库加两个 Secret**（Settings → Secrets and variables → Actions）：
+
+   | Secret | 值 |
+   | --- | --- |
+   | `TAURI_SIGNING_PRIVATE_KEY` | `~/.tauri/dsh-launcher.key` 文件的**完整内容**（含 `untrusted comment:` 那一行） |
+   | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 生成时设的密码；留空则填一个空字符串 |
+
+   > `bundle.createUpdaterArtifacts` 已经是 `true`：**这两个 secret 没配好，CI 打包会直接失败**（找不到签名密钥）。暂时不想启用应用内更新，就把它改回 `false`。
+
+### 之后每次发版
+
+1. 改 `src-tauri/tauri.conf.json` 的 `version` 和 `src-tauri/Cargo.toml` 的 `version`（两者保持一致）；
+2. 触发 `.github/workflows/release.yml`：手动 `workflow_dispatch`（可填版本号覆盖）或 push 到 `release` 分支；
+3. CI 产出三端安装包 + `.sig` 签名 + `latest.json`，全部挂到一个 **Draft Release**；
+4. **把 Draft Release 点「Publish release」**——`releases/latest/download/...` 只能访问已发布的 Release，草稿状态下所有客户端的自动更新都会 404，这是最常见的「配好了却检查不到更新」的原因。
+
+本地打包（不走 CI）则 `npm run build:release`，前提是当前 shell 里有 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
+
+> **三端全格式交给 CI**：`.github/workflows/release.yml` 基于 Tauri [官方模板](https://v2.tauri.app/distribute/pipelines/github) + `tauri-apps/tauri-action@v1`——打标签、建 Draft Release、上传产物、生成 `latest.json` 全部由该 action 完成（`includeUpdaterJson: true`）。
 > 触发方式：手动（`workflow_dispatch`）或 push 到 `release` 分支。版本号**可选**：填了走官方 `tauri build --config` 覆盖（不修改任何文件），留空则用 `tauri.conf.json` 里的版本。
 > matrix 覆盖 ubuntu-22.04（deb/rpm/AppImage）、windows-latest（.exe/.msi）、macos-latest（universal .dmg）。
 > 跨平台产物无法在单机上交叉编译，Windows / macOS 安装包必须由对应 runner 产出。
+
+### 不用 GitHub Releases 行不行
+
+行。任何能匿名 HTTPS 访问的地方都行（对象存储 / 自己的服务器 / CDN）：把 `endpoints` 指向你托管的 `latest.json`，格式是
+
+```json
+{
+  "version": "0.2.0",
+  "notes": "更新说明",
+  "pub_date": "2026-01-01T00:00:00Z",
+  "platforms": {
+    "windows-x86_64": { "signature": "<.sig 文件内容>", "url": "https://.../DSH-Launcher_0.2.0_x64-setup.exe" },
+    "darwin-aarch64": { "signature": "...", "url": "https://.../DSH.Launcher_0.2.0_aarch64.dmg" },
+    "linux-x86_64":   { "signature": "...", "url": "https://.../DSH-Launcher_0.2.0_amd64.AppImage" }
+  }
+}
+```
 
 ## 已知边界
 

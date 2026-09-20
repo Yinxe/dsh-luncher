@@ -65,6 +65,8 @@ export interface Settings {
   activeVersion: string;
   terminal: string;
   autoCheckUpdate: boolean;
+  /** 发现启动器新版本后直接静默下载安装并重启（仅内置 updater 模式） */
+  autoInstallUpdate: boolean;
   autoCheckVersions: boolean;
   nodePath: string;
   /** Node 来源：auto（系统优先，缺失回退内置）| system | runtime */
@@ -156,8 +158,14 @@ export interface LauncherUpdateStatus {
   latest: string | null;
   notes: string | null;
   url: string | null;
-  mode: "manifest" | "builtin" | "unconfigured" | "error";
+  /** builtin = 内置 updater，可在应用内直接安装；其余模式只能跳转下载页 */
+  mode: "manifest" | "builtin" | "unconfigured" | "unsupported" | "error";
   message: string | null;
+}
+
+export interface LauncherUpdateProgress {
+  received: number;
+  total: number;
 }
 
 export interface LaunchResult {
