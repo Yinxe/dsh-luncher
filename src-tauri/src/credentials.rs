@@ -133,7 +133,13 @@ pub fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
     }
 
     let path = credentials_path();
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    // 只有「文件不存在」才当作空文档从头写；权限 / IO 等其它读取失败必须拒绝写入，
+    // 否则会用新内容覆盖掉磁盘上已经存在的凭据（静默丢数据）。
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("读取凭据文件失败，已拒绝写入以免覆盖现有凭据：{e}")),
+    };
     let mut doc: serde_yaml::Value = if raw.trim().is_empty() {
         serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
     } else {

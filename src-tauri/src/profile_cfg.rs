@@ -482,7 +482,13 @@ fn set_ids_disabled(
         }
     }
     let path = user_patch_path(profile)?;
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    // 只有「文件不存在」才当作空；权限 / IO 等读取失败要拒绝写入，否则会用只含本次改动的
+    // 新内容覆盖掉磁盘上已有的 patch 文件，静默丢掉其它条目。
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("读取插件配置失败，已拒绝写入以免覆盖现有内容：{e}")),
+    };
 
     if disabled {
         // 已禁用的 id 不重复追加
@@ -971,7 +977,13 @@ pub fn set_web_quick_config(profile: &str, input: &WebQuickConfigInput) -> Resul
     let blocks: Vec<String> = ids.iter().map(|id| web_quick_block(id, input)).collect();
 
     let path = user_patch_path(profile)?;
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    // 只有「文件不存在」才当作空；权限 / IO 等读取失败要拒绝写入，否则会用只含本次改动的
+    // 新内容覆盖掉磁盘上已有的 patch 文件，静默丢掉其它条目。
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("读取插件配置失败，已拒绝写入以免覆盖现有内容：{e}")),
+    };
     let lines: Vec<&str> = raw.lines().collect();
 
     let mut out: Vec<String> = Vec::with_capacity(lines.len() + 16);

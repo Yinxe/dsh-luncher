@@ -558,7 +558,13 @@ pub fn write(input: &ModelConfigInput) -> Result<(), String> {
 
     // 读原文件：存在但解析失败 / 顶层非映射 → 拒绝（防止覆盖未知内容）
     let path = global_config_path();
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    // 只有「文件不存在」才当作空文档；权限 / IO 等其它读取失败必须拒绝写入，
+    // 否则会用新内容覆盖掉磁盘上已有的 settings.yaml（静默丢配置）。
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("读取 settings.yaml 失败，已拒绝写入以免覆盖现有配置：{e}")),
+    };
     let existing_root: Option<Mapping> = if raw.trim().is_empty() {
         None
     } else {
