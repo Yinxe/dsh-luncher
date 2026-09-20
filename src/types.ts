@@ -122,7 +122,7 @@ export interface ProcExitEvent {
   stopped: boolean;
 }
 
-/** 前端维护的单个内嵌 dsh 进程视图状态 */
+/** 前端维护的单个 dsh 实例视图状态（内嵌子进程走实时管道，独立/外部实例没有管道） */
 export interface ProcEntry {
   id: number;
   version: string;
@@ -133,6 +133,19 @@ export interface ProcEntry {
   code: number | null;
   /** 从日志中识别出的 dsh web UI 地址 */
   webUrl: string | null;
+  /** true = 非内嵌实例（独立进程 / 终端外部启动）：日志不在管道里 */
+  external?: boolean;
+  /** 独立进程的日志文件路径（外部实例为 null） */
+  logFile?: string | null;
+  /** web 监听端口 */
+  port?: number | null;
+}
+
+/** 独立进程的日志读取结果（read_instance_log） */
+export interface InstanceLog {
+  path: string;
+  content: string;
+  truncated: boolean;
 }
 
 export interface RuntimeProgressEvent {
@@ -152,6 +165,14 @@ export interface ProfileInstance {
   /** embedded=启动器子进程 | external=终端/外部启动 | detached=启动器派生的独立进程 | port=按端口探测发现 */
   source: string | null;
   version: string | null;
+  /** web 实例的监听端口（按端口发现时提供；无名实例靠它区分） */
+  port: number | null;
+  /** 独立进程的日志文件路径（内嵌/外部实例为 null） */
+  logFile: string | null;
+  /** 启动时间戳（毫秒）；外部实例未知 */
+  startedAt: number | null;
+  /** 从实例日志解析出的 dsh 访问地址（独立进程由后端解析；外部实例没有日志可解） */
+  webUrl: string | null;
 }
 
 export interface BundleInfo {

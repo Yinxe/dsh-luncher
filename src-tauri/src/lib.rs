@@ -48,6 +48,7 @@ pub fn run() {
             commands::list_profile_instances,
             commands::stop_profile_instance,
             commands::export_proc_log,
+            commands::read_instance_log,
             commands::list_profiles,
             commands::check_launcher_update,
             commands::reveal_folder,

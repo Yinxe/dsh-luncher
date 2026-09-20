@@ -473,10 +473,25 @@ fn remove_detached_record(pid: u32) {
     }
 }
 
-/// cmdline 是否为 dsh 进程（@deepseek--ai/dsh 的 bin.js；Windows 路径分隔符为反斜杠）
+/// cmdline 是否为 dsh 进程。两种形态都要认：
+/// - 包内入口（启动器自己就是这么起的）：`.../@deepseek-ai/dsh/...bin.js`；
+/// - npm 安装痕迹：argv 里出现 `.../node_modules/.bin/dsh`（Windows 是 `.bin\dsh.cmd`
+///   / `.ps1`）。终端里 `npm exec @deepseek-ai/dsh …` / `npx @deepseek-ai/dsh …` /
+///   全局安装的 `dsh` 命令**全是这个形态**，漏了它这些实例就「看不到、也停不掉」。
 fn is_dsh_cmdline(cmd: &str) -> bool {
-    (cmd.contains("@deepseek-ai/dsh") || cmd.contains("@deepseek-ai\\dsh"))
-        && cmd.contains("bin.js")
+    let pkg_entry =
+        (cmd.contains("@deepseek-ai/dsh") || cmd.contains("@deepseek-ai\\dsh")) && cmd.contains("bin.js");
+    if pkg_entry {
+        return true;
+    }
+    cmd.split_whitespace().any(|part| {
+        let p = part.trim_matches(|c| c == '"' || c == '\'');
+        let p = p
+            .strip_suffix(".cmd")
+            .or_else(|| p.strip_suffix(".ps1"))
+            .unwrap_or(p);
+        p.ends_with("node_modules/.bin/dsh") || p.ends_with("node_modules\\.bin\\dsh")
+    })
 }
 
 /// 目标 pid 是否仍是一个 dsh 进程（存活校验 + PID 复用防护），全平台。
@@ -759,10 +774,20 @@ pub struct ProfileInstance {
     pub profile: String,
     pub running: bool,
     pub pid: Option<u32>,
-    /// embedded = 启动器子进程；external = 终端/外部启动
+    /// embedded = 启动器子进程；detached = 启动器派生的独立进程；
+    /// external = 终端/外部启动；port = 按监听端口反向发现
     pub source: Option<String>,
     /// 内嵌实例对应的 dsh 版本（外部实例未知）
     pub version: Option<String>,
+    /// web 实例的监听端口（按端口发现时提供，用于展示与区分同名实例）
+    pub port: Option<u16>,
+    /// 独立进程的日志文件路径（内嵌实例走日志管道；外部实例没有文件日志）
+    pub log_file: Option<String>,
+    /// 从实例日志里解析出的 dsh 访问地址（内嵌实例由前端从实时日志解析；
+    /// 独立进程在这里由后端解析，外部实例没有日志可解）
+    pub web_url: Option<String>,
+    /// 启动时间（毫秒时间戳）；外部实例未知
+    pub started_at: Option<u64>,
 }
 
 /// 汇总各 profile 的实例状态（内嵌 + 系统中的外部进程）
@@ -779,6 +804,15 @@ pub fn profile_instances(state: &ProcState) -> Vec<ProfileInstance> {
                 pid: Some(*id),
                 source: Some("embedded".into()),
                 version: Some(h.version.clone()),
+                port: None,
+                log_file: None,
+                web_url: None,
+                started_at: Some(
+                    h.started_at
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                ),
             });
         }
     }
@@ -794,22 +828,15 @@ pub fn profile_instances(state: &ProcState) -> Vec<ProfileInstance> {
             pid: Some(r.pid),
             source: Some("detached".into()),
             version: Some(r.version.clone()),
+            port: None,
+            web_url: web_url_from_log(&r.log_file),
+            log_file: Some(r.log_file.clone()),
+            started_at: Some(r.started_at),
         });
     }
-    for (pid, profile) in external_running_profile_pids(&claimed) {
-        // 带 DSH_LAUNCHER_DETACHED 标记的是启动器派生的独立进程，其余为终端/外部启动
-        let source = if detached_marker(pid) { "detached" } else { "external" };
-        out.push(ProfileInstance {
-            profile,
-            running: true,
-            pid: Some(pid),
-            source: Some(source.into()),
-            version: None,
-        });
-    }
-    // 端口兜底：cmdline 认不出来的实例（换了包装、参数写法不同、跨启动器重启）只要
-    // 还占着该 profile 配置的 web 端口，就同样算「运行中」——重启时才不会漏，
-    // 也不会因为「以为没在跑」而重复拉起。
+    // 端口归属放在 cmdline 扫描**之前**：端子/独立实例只要占着某个 profile 配的 web
+    // 端口就先认下来并把 PID 记入 claimed，这样后面 cmdline 扫描不会把同一实例
+    // 再报一遍（终端 npx 起的 dsh cmdline 里没有 --profile，只能靠端口归属）。
     for p in crate::profiles::scan_profiles() {
         if out.iter().any(|i| i.profile == p.name) {
             continue;
@@ -828,16 +855,90 @@ pub fn profile_instances(state: &ProcState) -> Vec<ProfileInstance> {
         if !ok {
             continue;
         }
+        if let Some(pid) = pid {
+            claimed.push(pid);
+        }
         out.push(ProfileInstance {
             profile: p.name.clone(),
             running: true,
             pid,
             source: Some("port".into()),
             version: None,
+            port: Some(port),
+            log_file: None,
+            web_url: None,
+            started_at: None,
+        });
+    }
+    // 通用端口反向发现：系统里任何 dsh 正在监听的端口都列出来——不要求该端口出现在
+    // profile 配置里（终端 `dsh web --port 9999`、没写过快捷配置的 profile 都算），
+    // 也不要求经过启动器（所以外部独立进程、启动器重启后的残留都能看到并停掉）。
+    for (port, pid) in dsh_listening_ports() {
+        if claimed.contains(&pid) {
+            continue;
+        }
+        claimed.push(pid);
+        // 能解析出 profile 就用它；解析不出（终端 `dsh web` 没带 --profile）就留空，
+        // 前端按 `:端口` 展示，仍可按 PID 停止。
+        let name = pid_cmdline(pid)
+            .map(|cmd| parse_dsh_profile(&cmd))
+            .unwrap_or_default();
+        if !name.is_empty() && out.iter().any(|i| i.profile == name) {
+            continue;
+        }
+        out.push(ProfileInstance {
+            profile: name,
+            running: true,
+            pid: Some(pid),
+            source: Some("port".into()),
+            version: None,
+            port: Some(port),
+            log_file: None,
+            web_url: None,
+            started_at: None,
+        });
+    }
+    // cmdline 外部扫描兜底：没有配 web 端口、也没监听端口的实例（desktop/headless）
+    // 只能靠 cmdline 里的 --profile 认出来；已由端口归属或注册表认领的 PID 会跳过。
+    for (pid, profile) in external_running_profile_pids(&claimed) {
+        // 带 DSH_LAUNCHER_DETACHED 标记的是启动器派生的独立进程，其余为终端/外部启动
+        let source = if detached_marker(pid) { "detached" } else { "external" };
+        out.push(ProfileInstance {
+            profile,
+            running: true,
+            pid: Some(pid),
+            source: Some(source.into()),
+            version: None,
+            port: None,
+            log_file: None,
+            web_url: None,
+            started_at: None,
         });
     }
     out.sort_by(|a, b| a.profile.cmp(&b.profile));
     out
+}
+
+/// 系统里所有「dsh 进程正在监听的 TCP 端口」→ `(端口, PID)`。
+///
+/// 这是「按端口反向发现」的入口：不预设端口、不看启动器注册表，只要是 dsh 且在
+/// 监听就列出来。dsh 启动器之外的终端/npx/独立进程因此同样能被发现与停止。
+pub fn dsh_listening_ports() -> Vec<(u16, u32)> {
+    let procs = enumerate_processes(); // 带 TTL 缓存，避免逐 PID 起进程探测
+    let cmd_of = |pid: u32| -> Option<&str> {
+        procs
+            .iter()
+            .find(|(p, _)| *p == pid)
+            .map(|(_, cmd)| cmd.as_str())
+    };
+    crate::netports::listening_tcp()
+        .into_iter()
+        .filter(|(_, pid)| {
+            cmd_of(*pid)
+                .map(is_dsh_cmdline)
+                .unwrap_or_else(|| pid_is_dsh(*pid))
+        })
+        .collect()
 }
 
 /// 目标 PID 的 cmdline（走带 TTL 缓存的进程枚举）。
@@ -889,6 +990,97 @@ pub(crate) fn port_owner(host: &str, port: u16, profile: &str) -> Option<PortOwn
     } else {
         Some(PortOwner::OtherProfile { pid, profile: owner })
     }
+}
+
+/// 从实例日志里解析 dsh 的访问地址（`dsh web: <url>`）。
+/// 与前端 App.tsx 解析实时日志用的是同一判据，保证独立进程与内嵌实例的「打开」一致。
+fn parse_web_url(text: &str) -> Option<String> {
+    let idx = text.find("dsh web:")?;
+    let url = text[idx + "dsh web:".len()..].split_whitespace().next()?;
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Some(url.trim_end_matches([',', ')', ']']).to_string())
+    } else {
+        None
+    }
+}
+
+/// 从日志文件里取访问地址。`dsh web: <url>` 在启动早期打印，所以小文件整读、
+/// 大文件只读「开头 + 结尾」各 64KB，避免每次状态轮询都整读长日志。
+fn web_url_from_log(path: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const WINDOW: u64 = 64 * 1024;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut text = String::new();
+    if len <= WINDOW * 2 {
+        f.read_to_string(&mut text).ok()?;
+    } else {
+        let mut head = vec![0u8; WINDOW as usize];
+        let n = f.read(&mut head).ok()?;
+        text.push_str(&String::from_utf8_lossy(&head[..n]));
+        f.seek(SeekFrom::Start(len - WINDOW)).ok()?;
+        let mut tail = Vec::new();
+        f.read_to_end(&mut tail).ok()?;
+        text.push_str(&String::from_utf8_lossy(&tail));
+    }
+    parse_web_url(&text)
+}
+
+/// 读取独立进程实例日志的尾部：`(日志路径, 内容, 是否被截断)`。
+///
+/// 只认注册表里登记的日志文件（不接受任意路径），因此外部实例/内嵌实例返回 `None`
+/// —— 外部实例的日志在启动它的终端里，内嵌实例走日志管道。
+pub fn read_instance_log_tail(
+    pid: u32,
+    max_bytes: usize,
+) -> Result<Option<(String, String, bool)>, String> {
+    let Some(rec) = validate_detached_registry()
+        .into_iter()
+        .find(|r| r.pid == pid)
+    else {
+        return Ok(None);
+    };
+    let (text, truncated) = read_tail(&rec.log_file, max_bytes)?;
+    Ok(Some((rec.log_file, text, truncated)))
+}
+
+/// 读文件尾部（最多 max_bytes），截断时丢掉半行并加提示
+fn read_tail(path: &str, max_bytes: usize) -> Result<(String, bool), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).map_err(|e| format!("打开日志失败: {e}"))?;
+    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    let max = max_bytes.max(4096) as u64;
+    let truncated = len > max;
+    if truncated {
+        f.seek(SeekFrom::Start(len - max)).map_err(|e| e.to_string())?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).map_err(|e| format!("读取日志失败: {e}"))?;
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if truncated {
+        if let Some(i) = text.find('\n') {
+            text.drain(..=i);
+        }
+        text = format!("…（仅显示末尾 {} KB）\n{text}", max / 1024);
+    }
+    Ok((text, truncated))
+}
+
+/// 按 PID 结束一个**非内嵌**实例（启动器派生的独立进程 / 终端外部启动）。
+///
+/// 这是「任何被发现的实例都必须能关掉」的兜底：只要它出现在注册表里、或确认是
+/// dsh 进程就结束；否则返回 `Ok(false)` 不动它（绝不误杀）。
+pub fn stop_external_pid(pid: u32) -> Result<bool, String> {
+    let in_registry = validate_detached_registry().iter().any(|r| r.pid == pid);
+    if !in_registry && !pid_is_dsh(pid) {
+        return Ok(false);
+    }
+    force_kill_pid(pid)?;
+    if in_registry {
+        remove_detached_record(pid);
+    }
+    invalidate_process_cache();
+    Ok(true)
 }
 
 /// 停止某个 profile 的实例：优先内嵌，其次外部进程
@@ -959,6 +1151,25 @@ mod tests {
     use crate::util::DSH_ENV_LOCK;
 
     #[test]
+    fn is_dsh_cmdline_matches_npm_shim() {
+        // 终端 npx / npm exec / 全局安装起的 dsh：进程 argv 是 node_modules/.bin/dsh
+        // 这种形态没有 @deepseek-ai/dsh 字样，必须靠 shim 路径认出来
+        assert!(is_dsh_cmdline(
+            "node /home/u/.npm/_npx/1e7f/node_modules/.bin/dsh web"
+        ));
+        assert!(is_dsh_cmdline(
+            r"node C:\Users\u\AppData\Local\npm-cache\_npx\1e7f\node_modules\.bin\dsh web"
+        ));
+        // Windows 上 npm 生成的是 .cmd / .ps1 包装
+        assert!(is_dsh_cmdline(
+            r#"cmd /c "C:\Users\u\AppData\Roaming\npm\node_modules\.bin\dsh.cmd" web"#
+        ));
+        // 只应匹配 dsh 本身，不能把同前缀的其它 bin 也认进来
+        assert!(!is_dsh_cmdline("node /home/u/node_modules/.bin/dsh-something"));
+        assert!(!is_dsh_cmdline("node /home/u/node_modules/.bin/codex"));
+    }
+
+    #[test]
     fn is_dsh_cmdline_matches_both_separators() {
         assert!(is_dsh_cmdline(
             "node /home/u/.dsh-launcher/versions/0.1.5/node_modules/@deepseek-ai/dsh/bin.js --profile web"
@@ -975,6 +1186,8 @@ mod tests {
     fn detached_registry_roundtrip_and_stale_purge() {
         let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("dsh-detreg-{}", std::process::id()));
+        // launcher_home() 只认存在的目录（否则回落到 $HOME），受限环境里必须先建出来
+        std::fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
 
         let mk = |pid: u32, profile: &str| DetachedRecord {
@@ -1009,6 +1222,134 @@ mod tests {
         assert!(
             list.iter().any(|(pid, _)| *pid == std::process::id()),
             "进程枚举应包含自身 pid"
+        );
+    }
+
+    /// 端到端：**不是启动器启动的** dsh（伪造进程，cmdline 像 dsh 且自己监听端口）
+    /// 必须能被「按端口反向发现」；启动器派生的独立进程必须能被注册表校验保留。
+    #[cfg(unix)]
+    #[test]
+    fn discovers_external_dsh_by_port_and_registry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-port-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+
+        // 端口先用 bind(0) 占一个号再放掉，交给伪进程去 bind
+        let port = {
+            let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            l.local_addr().unwrap().port()
+        };
+        // 路径同时含 @deepseek-ai/dsh 与 bin.js —— 满足 is_dsh_cmdline
+        let fake = tmp.join("@deepseek-ai/dsh/lib/bin.js");
+        std::fs::create_dir_all(fake.parent().unwrap()).unwrap();
+        std::fs::write(
+            &fake,
+            format!(
+                r#"#!/usr/bin/env python3
+import socket, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", {port}))
+s.listen(5)
+time.sleep(120)
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut child = Command::new(&fake)
+            .args(["--profile", "web-ext"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+
+        let mut up = false;
+        for _ in 0..100 {
+            if crate::netports::is_listening("127.0.0.1", port) {
+                up = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(up, "伪造的 dsh 进程未能在超时内监听端口");
+
+        // 1) 认得出它是 dsh（cmdline 判据，与单实例守卫/端口归属同一套）
+        assert!(pid_is_dsh(pid), "伪造进程应被认成 dsh");
+        // 2) 端口 → PID
+        assert_eq!(crate::netports::listener_pid(port), Some(pid));
+        // 3) 反向发现：不依赖 profile 配置、不依赖注册表，也能扫到这个端口
+        assert!(
+            dsh_listening_ports().contains(&(port, pid)),
+            "应按端口发现非启动器启动的 dsh"
+        );
+        // 4) 启动器派生的独立进程：写入注册表后必须被校验保留（而不是当陈旧条目清掉）
+        let log_path = tmp.join("web-ext.log");
+        std::fs::write(
+            &log_path,
+            "line1\ndsh web: http://127.0.0.1:39999/?token=abc (LAN: http://10.0.0.2:39999/?token=abc)\nline3\n",
+        )
+        .unwrap();
+        append_detached_record(&DetachedRecord {
+            pid,
+            profile: "web-ext".into(),
+            version: "0.0.0".into(),
+            started_at: 1,
+            log_file: log_path.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        let valid = validate_detached_registry();
+        assert!(
+            valid.iter().any(|r| r.pid == pid),
+            "detached 注册表应保留存活实例，否则界面看不到、也停不掉"
+        );
+
+        // 5) 独立进程日志通道：实例终端按 PID 读它的日志文件尾部
+        let (path, text, truncated) = read_instance_log_tail(pid, 64 * 1024)
+            .unwrap()
+            .expect("注册表里的独立进程应能读到日志");
+        assert_eq!(path, log_path.to_string_lossy());
+        assert!(text.contains("line3") && !truncated, "应读到日志内容: {text:?}");
+        // 独立进程的 web 地址由后端从日志解析（前端据此显示「打开」，与内嵌实例一致）
+        assert_eq!(
+            web_url_from_log(&path).as_deref(),
+            Some("http://127.0.0.1:39999/?token=abc")
+        );
+
+        // 超长日志按 max_bytes 截断，并带上截断标记
+        std::fs::write(&log_path, format!("{}\n尾部标记\n", "x".repeat(200_000))).unwrap();
+        let (_p, tail, cut) = read_instance_log_tail(pid, 8192).unwrap().unwrap();
+        assert!(cut && tail.len() < 20_000, "超长日志应被截断");
+        assert!(tail.contains("尾部标记"), "截断后应保留末尾内容");
+
+        // 6) 统一停止入口：按 PID 能结束它（外部实例路径）
+        assert!(stop_external_pid(pid).unwrap());
+        let _ = child.wait();
+        // 注册表记录已被清掉 → 日志通道也随之失效（外部实例本来就没有文件日志）
+        assert!(read_instance_log_tail(pid, 4096).unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::remove_var("DSH_LAUNCHER_HOME");
+    }
+
+    #[test]
+    fn parse_web_url_matches_frontend_rule() {
+        // 真实日志行：取第一个 URL，忽略后面的 (LAN: …)
+        let line = "dsh web: http://127.0.0.1:3081/?token=0tg2uteA (LAN: http://192.168.1.114:3081/?token=0tg2uteA)";
+        assert_eq!(
+            parse_web_url(line).as_deref(),
+            Some("http://127.0.0.1:3081/?token=0tg2uteA")
+        );
+        // 与前端 /dsh web:\s*(https?:\/\/\S+)/ 对齐：只认 http(s)
+        assert_eq!(parse_web_url("dsh web: not-a-url"), None);
+        assert_eq!(parse_web_url("no marker here"), None);
+        assert_eq!(
+            parse_web_url("boot…\ndsh web:   https://a.b:1/?t=1\n"),
+            Some("https://a.b:1/?t=1".to_string())
         );
     }
 

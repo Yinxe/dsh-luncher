@@ -416,13 +416,19 @@ fn ensure_profile_free(
     Ok(())
 }
 
+/// 停止一个实例。先按内嵌子进程找；找不到就按 PID 找独立进程/终端外部启动的 dsh。
+/// 这样界面上任何被发现的实例都有统一的「停止」入口（内嵌实例带日志管道，
+/// 独立/外部实例没有，只能按 PID 结束）。
 #[tauri::command]
 pub fn stop_process(
     app: AppHandle,
     procs: State<'_, crate::procs::ProcState>,
     id: u32,
 ) -> Result<bool, String> {
-    Ok(crate::procs::stop(&app, &procs, id))
+    if crate::procs::stop(&app, &procs, id) {
+        return Ok(true);
+    }
+    crate::procs::stop_external_pid(id)
 }
 
 #[tauri::command]
@@ -448,6 +454,31 @@ pub fn stop_profile_instance(
     profile: String,
 ) -> Result<bool, String> {
     crate::procs::stop_profile(&app, &procs, &profile)
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceLog {
+    pub path: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+/// 读取独立进程实例的日志尾部（内嵌实例走日志管道，外部实例没有文件日志 → None）。
+/// 只按 PID 从注册表解析路径，避免把「读任意文件」暴露给前端。
+#[tauri::command]
+pub fn read_instance_log(
+    pid: u32,
+    max_bytes: Option<u32>,
+) -> Result<Option<InstanceLog>, String> {
+    let max = max_bytes.unwrap_or(64 * 1024) as usize;
+    Ok(crate::procs::read_instance_log_tail(pid, max)?.map(|(path, content, truncated)| {
+        InstanceLog {
+            path,
+            content,
+            truncated,
+        }
+    }))
 }
 
 /// 把运行日志导出到 ~/.dsh-launcher/logs/

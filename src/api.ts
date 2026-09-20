@@ -4,6 +4,7 @@ import type {
   EnvironmentInfo,
   InstallFinishedEvent,
   InstallLogEvent,
+  InstanceLog,
   InstalledVersion,
   LauncherUpdateStatus,
   LaunchResult,
@@ -58,6 +59,9 @@ export const api = {
     invoke<boolean>("stop_profile_instance", { profile }),
   exportProcLog: (profile: string, pid: number, content: string) =>
     invoke<string>("export_proc_log", { profile, pid, content }),
+  /** 独立进程实例的日志尾部；返回 null = 该实例没有文件日志（内嵌/外部启动） */
+  readInstanceLog: (pid: number, maxBytes?: number) =>
+    invoke<InstanceLog | null>("read_instance_log", { pid, maxBytes: maxBytes ?? null }),
   getProfileDetail: (profile: string) =>
     invoke<ProfileDetail>("get_profile_detail", { profile }),
   getPatchReload: (profile: string) => invoke<string>("get_patch_reload", { profile }),

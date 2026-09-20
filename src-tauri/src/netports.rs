@@ -59,6 +59,26 @@ pub fn listener_pid(port: u16) -> Option<u32> {
         .map(|l| l.process.pid)
 }
 
+/// 本机所有处于 LISTEN 的 TCP 端口及其占用进程 PID（一个端口可能对应多个 PID）。
+///
+/// 与 [`listener_pid`] 的区别：这个不预设端口，用来**反向发现**「系统里到底有哪些
+/// dsh 在监听端口」，因此不依赖 profile 有没有配端口、也不依赖启动器注册表。
+pub fn listening_tcp() -> Vec<(u16, u32)> {
+    use listeners::{Protocol, SocketState};
+    if !listeners::IS_OS_SUPPORTED {
+        return Vec::new();
+    }
+    listeners::get_all()
+        .ok()
+        .map(|set| {
+            set.into_iter()
+                .filter(|l| l.protocol == Protocol::TCP && l.state == SocketState::Listen)
+                .map(|l| (l.socket.port(), l.process.pid))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

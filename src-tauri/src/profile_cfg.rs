@@ -1727,9 +1727,11 @@ mod tests {
         }
         // 管理禁用块数量不变，且新写入条目都位于首个管理块之前
         assert_eq!(raw.matches(MANAGE_MARKER).count(), real_raw.matches(MANAGE_MARKER).count());
-        let disable_pos = raw.find(MANAGE_MARKER).unwrap();
-        for id in ["webserver", "web-runtime", "connection"] {
-            assert!(raw.find(&format!("- id: {id}")).unwrap() < disable_pos);
+        // 真实 patch 的 disabled 块也可能是手写的（不含启动器 marker），此时没有位置可比
+        if let Some(disable_pos) = raw.find(MANAGE_MARKER) {
+            for id in ["webserver", "web-runtime", "connection"] {
+                assert!(raw.find(&format!("- id: {id}")).unwrap() < disable_pos);
+            }
         }
         // 回读与输入一致
         let after = get_web_quick_config("web").unwrap();

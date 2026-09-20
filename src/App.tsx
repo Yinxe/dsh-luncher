@@ -4,7 +4,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import {
   Package, Rocket, Puzzle, FileCog, RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
-  TriangleAlert, ChevronDown, CopyPlus, KeyRound, Info, RotateCw, Bot,
+  TriangleAlert, ChevronDown, CopyPlus, KeyRound, Info, RotateCw, Bot, FileText,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
@@ -295,11 +295,19 @@ export default function App() {
     }
   }, [addToast]);
 
+  /** 实例终端的停止：内嵌/独立/外部统一按 PID 走 stop_process */
   const doStopProc = useCallback(async (id: number) => {
     try {
-      await api.stopProcess(id);
-      addToast("info", `已请求停止进程 ${id}`);
+      const hit = await api.stopProcess(id);
+      addToast(hit ? "ok" : "info", hit ? `已停止实例 ${id}` : `实例 ${id} 未在运行`);
+      refreshInstances();
     } catch (e) { addToast("err", `停止失败: ${e}`); }
+  }, [addToast, refreshInstances]);
+
+  /** 独立进程实例的日志尾部（内嵌实例走实时管道，不用这个） */
+  const readInstanceLog = useCallback((pid: number) => api.readInstanceLog(pid), []);
+  const revealPath = useCallback((path: string) => {
+    api.reveal(path).catch((e) => addToast("err", String(e)));
   }, [addToast]);
 
   const doInstallRuntime = useCallback(async () => {
@@ -431,11 +439,15 @@ export default function App() {
     try {
       const info = await api.startEmbedded(null, profile, undefined, detached);
       if (detached) {
-        // 独立进程无日志管道：不建实例终端条目，由 /proc 扫描轮询感知
+        // 独立进程没有日志管道：先刷新实例列表把它带进「实例终端」，再选中并展开，
+        // 否则用户启动完看不到任何反馈（只能去 Profile 实例页找）
         addToast(
           "ok",
           `profile「${info.profile}」已以独立进程启动（PID ${info.id}），日志：~/.dsh-launcher/instance-logs`
         );
+        await refreshInstances();
+        setActiveProc(info.id);
+        setDrawerOpen(true);
       } else {
         setProcs((m) => ({
           ...m,
@@ -479,10 +491,15 @@ export default function App() {
     [restartingProfile, addToast, doStartProfile]
   );
 
-  const doStopProfileInstance = useCallback(async (profile: string) => {
+  /** 统一停止入口：已知 PID 就按 PID 停（内嵌/独立/外部都走这一条），
+   *  否则退回按 profile 停。这样「按端口发现的外部实例」也一定有停止途径。 */
+  const doStopInstance = useCallback(async (row: { profile: string; pid: number | null }) => {
+    const name = row.profile || (row.pid != null ? `PID ${row.pid}` : "该实例");
     try {
-      const hit = await api.stopProfileInstance(profile);
-      addToast(hit ? "ok" : "info", hit ? `已停止 profile「${profile}」` : "该 profile 未在运行");
+      const hit = row.pid != null
+        ? await api.stopProcess(row.pid)
+        : await api.stopProfileInstance(row.profile);
+      addToast(hit ? "ok" : "info", hit ? `已停止「${name}」` : `「${name}」未在运行`);
       refreshInstances();
     } catch (e) { addToast("err", `停止失败: ${e}`); }
   }, [addToast, refreshInstances]);
@@ -533,9 +550,36 @@ export default function App() {
     [installed, settings]
   );
 
+  // 实例终端抽屉的数据源：内嵌子进程（实时管道）+ 独立/外部实例（无管道，
+  // 独立进程按需 tail 日志文件，外部实例只提示「日志在启动它的终端里」）
+  const panelProcs = useMemo<ProcEntry[]>(() => {
+    const list: ProcEntry[] = Object.values(procs).map((p) => ({ ...p, external: false }));
+    const seen = new Set(list.map((p) => p.id));
+    for (const i of instances) {
+      if (i.source === "embedded" || i.pid == null || seen.has(i.pid)) continue;
+      seen.add(i.pid);
+      list.push({
+        id: i.pid,
+        version: i.version ?? "",
+        profile: i.profile,
+        startedAt: i.startedAt ?? 0,
+        lines: [],
+        exited: false,
+        code: null,
+        webUrl: i.webUrl ?? null,
+        external: true,
+        logFile: i.logFile ?? null,
+        port: i.port ?? null,
+      });
+    }
+    return list.sort((a, b) => a.id - b.id);
+  }, [procs, instances]);
+
+  // 运行中实例数：必须走 panelProcs——独立进程/终端外部启动的实例不在 procs 里，
+  // 早先只数 procs 会出现「界面上有 2 个在跑、角标却显示 1」
   const runningInstanceCount = useMemo(
-    () => Object.values(procs).filter((p) => !p.exited).length,
-    [procs]
+    () => panelProcs.filter((p) => !p.exited).length,
+    [panelProcs]
   );
 
   // 有无任何运行中的 Profile 实例（含外部终端启动的）——运行期间禁止切换 DSH 版本
@@ -544,30 +588,39 @@ export default function App() {
     [instances]
   );
 
+  // 顶栏「打开 DSH 界面」：内嵌实例从前端实时日志解析，独立进程由后端从日志解析
   const liveWebProcs = useMemo(
-    () => Object.values(procs).filter((p) => !p.exited && p.webUrl).sort((a, b) => b.startedAt - a.startedAt),
-    [procs]
+    () => panelProcs.filter((p) => !p.exited && p.webUrl).sort((a, b) => b.startedAt - a.startedAt),
+    [panelProcs]
   );
 
   // Profile 实例阶段：stopped → starting → ready（出现 URL）/ failed
   const instanceRows = useMemo(() => {
     type Phase = "stopped" | "starting" | "ready" | "failed" | "external";
-    type Row = { profile: string; phase: Phase; pid: number | null; source: string | null; version: string | null; webUrl: string | null; code: number | null; target: ProfileTarget };
+    type Row = { key: string; profile: string; phase: Phase; pid: number | null; source: string | null; version: string | null; webUrl: string | null; code: number | null; target: ProfileTarget; port: number | null; logFile: string | null };
+    // 行主键：有 profile 名就用名字；没有 profile（终端 `dsh web` 没带 --profile）就用
+    // PID/端口，否则多个无名实例会互相覆盖，界面上只剩一个
+    const keyOf = (profile: string, pid: number | null, port: number | null) =>
+      profile || (pid != null ? `pid:${pid}` : port != null ? `port:${port}` : "unknown");
     const map = new Map<string, Row>();
     for (const p of profiles) {
-      map.set(p.name, { profile: p.name, phase: "stopped", pid: null, source: null, version: null, webUrl: null, code: null, target: p.target });
+      map.set(p.name, { key: p.name, profile: p.name, phase: "stopped", pid: null, source: null, version: null, webUrl: null, code: null, target: p.target, port: null, logFile: null });
     }
     for (const i of instances) {
-      const known = map.get(i.profile);
-      map.set(i.profile, {
+      const key = keyOf(i.profile, i.pid, i.port);
+      const known = map.get(key);
+      map.set(key, {
+        key,
         profile: i.profile,
         phase: "external",
         pid: i.pid,
         source: i.source,
         version: i.version,
-        webUrl: null,
+        webUrl: i.webUrl ?? null,
         code: null,
         target: known?.target ?? "unknown",
+        port: i.port ?? null,
+        logFile: i.logFile ?? null,
       });
     }
     const latest = new Map<string, ProcEntry>();
@@ -576,12 +629,14 @@ export default function App() {
       if (!cur || p.startedAt > cur.startedAt) latest.set(p.profile, p);
     }
     for (const p of latest.values()) {
+      const key = keyOf(p.profile, p.id, null);
       const phase: Phase = p.exited
         ? p.code == null || p.code === 0 ? "stopped" : "failed"
         : p.webUrl ? "ready" : "starting";
-      map.set(p.profile, { profile: p.profile, phase, pid: p.id, source: "embedded", version: p.version, webUrl: p.webUrl, code: p.code, target: map.get(p.profile)?.target ?? "unknown" });
+      map.set(key, { key, profile: p.profile, phase, pid: p.id, source: "embedded", version: p.version, webUrl: p.webUrl, code: p.code, target: map.get(key)?.target ?? "unknown", port: null, logFile: null });
     }
-    return [...map.values()].sort((a, b) => a.profile.localeCompare(b.profile));
+    const label = (r: Row) => r.profile || `:${r.port ?? "?"}`;
+    return [...map.values()].sort((a, b) => label(a).localeCompare(label(b)));
   }, [profiles, instances, procs]);
 
   if (!settings || !env) {
@@ -1022,12 +1077,13 @@ export default function App() {
                     : "运行中（外部启动）"
                     : "未运行";
                   const canStop = row.phase === "starting" || row.phase === "ready" || row.phase === "external";
-                  const canOpen = row.phase === "ready" && !!row.webUrl;
+                  // 独立进程是从日志文件解析出的地址，phase 是 external 但同样能打开
+                  const canOpen = !!row.webUrl && row.phase !== "failed" && row.phase !== "stopped";
                   const targetMeta = TARGET_META[row.target];
                   const canStart = targetMeta.launchable;
                   const expanded = !!expandedProfiles[row.profile];
                   return (
-                    <Card key={row.profile} className="gap-0 py-0">
+                    <Card key={row.key} className="gap-0 py-0">
                       <Collapsible
                         open={expanded}
                         onOpenChange={(o) => setExpandedProfiles((m) => ({ ...m, [row.profile]: o }))}
@@ -1044,7 +1100,9 @@ export default function App() {
                           )}
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5">
-                              <span className="font-mono text-[13px] font-semibold">{row.profile}</span>
+                              <span className="font-mono text-[13px] font-semibold">
+                                {row.profile || (row.port != null ? `:${row.port}` : "（未命名实例）")}
+                              </span>
                               <Badge variant={targetMeta.variant} title={targetMeta.desc}>
                                 {targetMeta.label}
                               </Badge>
@@ -1052,6 +1110,7 @@ export default function App() {
                             <div className="text-[11px] text-muted-foreground">
                               {phaseText}
                               {row.pid ? ` · PID ${row.pid}` : ""}
+                              {row.port != null ? ` · :${row.port}` : ""}
                               {row.version ? ` · ${row.version}` : ""}
                             </div>
                           </div>
@@ -1065,25 +1124,27 @@ export default function App() {
                           )}
                           {canStop ? (
                             <>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                disabled={restartingProfile === row.profile}
-                                onClick={() => doRestartProfile(row.profile)}
-                                title="停止并按当前启动方式重新启动"
-                              >
-                                {restartingProfile === row.profile ? (
-                                  <Loader2 className="animate-spin" />
-                                ) : (
-                                  <RotateCw />
-                                )}{" "}
-                                重启
-                              </Button>
+                              {row.profile && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={restartingProfile === row.profile}
+                                  onClick={() => doRestartProfile(row.profile)}
+                                  title="停止并按当前启动方式重新启动"
+                                >
+                                  {restartingProfile === row.profile ? (
+                                    <Loader2 className="animate-spin" />
+                                  ) : (
+                                    <RotateCw />
+                                  )}{" "}
+                                  重启
+                                </Button>
+                              )}
                               <Button
                                 size="sm"
                                 variant="destructive"
                                 disabled={restartingProfile === row.profile}
-                                onClick={() => doStopProfileInstance(row.profile)}
+                                onClick={() => doStopInstance(row)}
                               >
                                 <Square /> 停止
                               </Button>
@@ -1105,6 +1166,16 @@ export default function App() {
                               <Play /> 启动
                             </Button>
                           )}
+                          {row.logFile && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title={`打开日志文件夹：${row.logFile}`}
+                              onClick={() => revealPath(row.logFile!.replace(/[\\/][^\\/]*$/, ""))}
+                            >
+                              <FileText />
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="icon"
@@ -1124,21 +1195,26 @@ export default function App() {
                           >
                             <Puzzle />
                           </Button>
-                          <CollapsibleTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              title={expanded ? "收起配置面板" : "展开配置面板（快捷配置 / cordis.patch.yml / package.json）"}
-                            >
-                              <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? "rotate-180" : ""}`} />
-                            </Button>
-                          </CollapsibleTrigger>
+                          {/* 无名实例（终端 `dsh web` 没带 --profile）没有对应 profile，不提供配置面板 */}
+                          {row.profile && (
+                            <CollapsibleTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                title={expanded ? "收起配置面板" : "展开配置面板（快捷配置 / cordis.patch.yml / package.json）"}
+                              >
+                                <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? "rotate-180" : ""}`} />
+                              </Button>
+                            </CollapsibleTrigger>
+                          )}
                         </div>
-                        <CollapsibleContent>
-                          <div className="border-t border-border px-3 pb-4 pt-3">
-                            <ProfileConfigPanel profile={row.profile} target={row.target} onToast={addToast} />
-                          </div>
-                        </CollapsibleContent>
+                        {row.profile && (
+                          <CollapsibleContent>
+                            <div className="border-t border-border px-3 pb-4 pt-3">
+                              <ProfileConfigPanel profile={row.profile} target={row.target} onToast={addToast} />
+                            </div>
+                          </CollapsibleContent>
+                        )}
                       </Collapsible>
                     </Card>
                   );
@@ -1169,12 +1245,14 @@ export default function App() {
       </div>
 
       <ProcessSidePanel
-        procs={Object.values(procs).sort((a, b) => a.id - b.id)}
+        procs={panelProcs}
         activeId={activeProc}
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         onSelect={setActiveProc}
         onStop={doStopProc}
+        onReadLog={readInstanceLog}
+        onReveal={revealPath}
         onOpenWeb={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
         onExport={() => {
           const p = activeProc != null ? procsRef.current[activeProc] : null;
