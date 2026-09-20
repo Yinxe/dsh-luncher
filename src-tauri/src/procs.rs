@@ -112,41 +112,46 @@ pub fn spawn_embedded(
 
     let child = cmd.spawn().map_err(|e| format!("启动 dsh 失败: {e}"))?;
     let id = child.id();
+    let child_cell = Arc::new(Mutex::new(Some(child)));
     let handle = ProcHandle {
         version: target.version.clone(),
         profile: prof.to_string(),
         started_at: SystemTime::now(),
-        child: Arc::new(Mutex::new(Some(child))),
+        child: child_cell.clone(),
     };
+    // 先登记、后接管道：中间任何一步 panic（如 reader 线程创建失败）都不会留下
+    // 「已在运行、但注册表里查无此进程 → Windows 上杀不掉也没人收尸」的孤儿 dsh。
+    state.procs.lock().unwrap().insert(id, handle);
 
-    if let Some(out) = handle.child.lock().unwrap().as_mut().unwrap().stdout.take() {
+    let (version, profile) = (target.version.clone(), prof.to_string());
+    // 登记后 stop() 可能并发把 child 摘走（置 None），这里用 if let 而非 unwrap 兜底，
+    // 取不到管道只意味着这一瞬已被停止，跳过挂 reader 即可。
+    if let Some(out) = child_cell.lock().unwrap().as_mut().and_then(|c| c.stdout.take()) {
         spawn_reader(
             app.clone(),
             ProcLogEvent {
                 id,
-                version: handle.version.clone(),
-                profile: handle.profile.clone(),
+                version: version.clone(),
+                profile: profile.clone(),
                 line: String::new(),
                 stream: "stdout".into(),
             },
             out,
         );
     }
-    if let Some(err) = handle.child.lock().unwrap().as_mut().unwrap().stderr.take() {
+    if let Some(err) = child_cell.lock().unwrap().as_mut().and_then(|c| c.stderr.take()) {
         spawn_reader(
             app.clone(),
             ProcLogEvent {
                 id,
-                version: handle.version.clone(),
-                profile: handle.profile.clone(),
+                version,
+                profile,
                 line: String::new(),
                 stream: "stderr".into(),
             },
             err,
         );
     }
-
-    state.procs.lock().unwrap().insert(id, handle);
 
     let info = ProcInfo {
         id,
