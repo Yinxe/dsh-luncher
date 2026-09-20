@@ -109,8 +109,10 @@ pub fn versions_dir() -> PathBuf {
     launcher_home().join("versions")
 }
 
+const SETTINGS_FILE: &str = "settings.json";
+
 pub fn settings_path() -> PathBuf {
-    launcher_home().join("settings.json")
+    launcher_home().join(SETTINGS_FILE)
 }
 
 pub fn load_settings() -> Settings {
@@ -122,10 +124,65 @@ pub fn load_settings() -> Settings {
 
 pub fn save_settings(settings: &Settings) -> Result<(), String> {
     let path = settings_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
-    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "设置路径缺少父目录".to_string())?;
+    fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
     let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    fs::write(&path, text).map_err(|e| format!("写入设置失败: {e}"))?;
+    // 原子写：先写同目录临时文件、再 rename 覆盖。直接 fs::write 会先截断目标文件，
+    // 中途崩溃 / 断电会留下半截 JSON，下次启动解析失败会静默回退到默认设置，
+    // 再保存时就把 github_token、registry 等全部覆盖掉。
+    let tmp = parent.join(format!("{SETTINGS_FILE}.tmp"));
+    fs::write(&tmp, &text).map_err(|e| format!("写入设置失败: {e}"))?;
+    #[cfg(unix)]
+    {
+        // settings.json 可能存有 github_token，落位前收紧到仅本人可读写
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    }
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("写入设置失败: {e}")
+    })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_round_trips_token_and_leaves_no_temp_file() {
+        let _env = crate::util::DSH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-settings-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+
+        let mut s = Settings::default();
+        s.github_token = "ghp_secret_value".into();
+        s.registry = "https://registry.npmmirror.com".into();
+        save_settings(&s).unwrap();
+
+        let path = settings_path();
+        let stale = launcher_home().join(format!("{SETTINGS_FILE}.tmp"));
+        assert!(path.exists(), "settings.json 应已落位");
+        assert!(!stale.exists(), "原子写不应残留临时文件");
+
+        let back = load_settings();
+        assert_eq!(back.github_token, "ghp_secret_value");
+        assert_eq!(back.registry, "https://registry.npmmirror.com");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "含 token 的 settings.json 应仅本人可读写");
+        }
+
+        std::env::remove_var("DSH_LAUNCHER_HOME");
+        fs::remove_dir_all(&tmp).ok();
+    }
 }
