@@ -513,6 +513,19 @@ pub fn start_job<R: Runtime>(
                                     sp.owner, sp.repo
                                 ),
                             );
+                            // 解释清楚"下一步会出现一个 codeload 链接"：pnpm 对 github: 规格
+                            // 一律下载**整仓 tarball**（即便带 #path: 子目录，也是整仓下完再取子目录），
+                            // 链接里的 40 位 sha 是它在解析阶段把 ref 钉到的提交。
+                            emit_line(
+                                &app,
+                                &handle,
+                                id,
+                                "info",
+                                "（说明：pnpm 安装 github: 规格时会去 codeload.github.com 下载**整仓 tar.gz**，\
+                                 即使带 #path: 子目录也是整仓下完再取子目录；链接里的 40 位 sha 是它把 ref 钉到的提交。\
+                                 网络慢时这一下载容易撞上 pnpm 单请求 60s 超时（日志里的 `error (23)`），\
+                                 启动器会自动用更长的超时重试一次；若经常超时，改用「Clone 仓库」安装可以完全绕开 codeload）",
+                            );
                             let token = crate::registry::github_token(Some(&settings.github_token));
                             // 任务线程是普通 std::thread，这里用 block_on 跑只读探测
                             match tauri::async_runtime::block_on(crate::registry::fetch_github_repo(

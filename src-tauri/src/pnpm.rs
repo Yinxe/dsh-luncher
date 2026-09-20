@@ -133,8 +133,11 @@ impl PnpmFailure {
                  已自动重试一次；若仍失败请稍后再试。"
             ),
             PnpmFailure::FetchTimeout => format!(
-                "下载超时：github 源会下载整个仓库，pnpm 默认单请求 60 秒常常不够。\
-                 已自动用 `{FETCH_TIMEOUT_OVERRIDE}` 加长超时重试一次。"
+                "下载超时（日志里的 `error (23)` 就是它）：github: 规格会让 pnpm 去 codeload.github.com\
+                 下载**整仓 tar.gz**（带 #path: 子目录也一样，整仓下完再取子目录），pnpm 默认单请求 60 秒常常不够。\n\
+                 已自动用 `{FETCH_TIMEOUT_OVERRIDE}`（并以 PNPM_CONFIG_FETCH_TIMEOUT 再给一遍）重试一次。\n\
+                 如果反复超时：改用「Clone 仓库」安装——一次 git clone 到本地后按 link: 安装，\
+                 整仓只下载一次、后续更新走 git pull，完全不经过 codeload。"
             ),
             PnpmFailure::IgnoredBuilds | PnpmFailure::GitPrepareNotAllowed => format!(
                 "有依赖需要在安装时执行构建脚本，被 pnpm 默认拦截（pnpm 已打印被拦的包名）。\n\
