@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "title": "DSH Launcher",
+        "label": "main",
+        "width": 1100,
+        "height": 740,
+        "minWidth": 480,
+        "minHeight": 520,
+        "center": true,
+        "visible": true,
+        "decorations": true,
+        "transparent": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ]
+  }
+}

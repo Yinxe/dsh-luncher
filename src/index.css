@@ -10,6 +10,9 @@
   /* 亮色主题 —— Levels 风格：奶油纸感底 + 绿色信号色 + 绿灰中性色
      参考 design-systems/levels/tokens.css */
   --radius: 0.75rem;
+  /* 无边框窗口的圆角：.app-frame 与 body 上的弹层遮罩共用；
+     最大化时由 html.window-maximized 置零（见文件末尾） */
+  --window-radius: 12px;
   --background: #fbf7ef;
   --foreground: #1f2a24;
   --card: #ffffff;
@@ -145,18 +148,13 @@ body,
 }
 
 body {
-  @apply bg-background text-foreground font-sans antialiased;
+  @apply text-foreground font-sans antialiased;
   font-size: 13.5px;
   overflow: hidden;
   user-select: none;
-  /* 控制台点阵纹理 + Levels 式奶油底微渐变（亮色；暗色 --page-gradient: none） */
-  background-image:
-    radial-gradient(
-      color-mix(in oklch, var(--foreground) 7%, transparent) 1px,
-      transparent 1px
-    ),
-    var(--page-gradient);
-  background-size: 22px 22px, 100% 100%;
+  /* 无边框窗口：body 必须保持透明，底色/点阵纹理搬到了 .app-frame（见文件末尾），
+     否则窗口圆角之外会被 body 的实色底填成方块 */
+  background: transparent;
 }
 
 @layer base {
@@ -164,7 +162,7 @@ body {
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground;
   }
   html {
     @apply font-sans;
@@ -280,3 +278,110 @@ body {
 .dsh-code .cm-cursor.cm-cursor {
   border-left-color: var(--foreground);
 }
+
+/* ── 自绘窗口外壳（decorations:false + transparent:true） ──────────────
+   原生标题栏换成 <WindowChrome> 自绘：.app-frame 负责圆角、描边与窗口底色，
+   body 保持透明，圆角之外的区域才露得出桌面。
+   这些规则刻意不放进 @layer —— 无层级样式优先于 Tailwind 工具类，
+   窗口控件不必再跟 Button 自带的高度/圆角/hover 打架。 */
+.app-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--window-radius);
+  background-color: var(--background);
+  /* 控制台点阵纹理 + Levels 式奶油底微渐变（亮色；暗色 --page-gradient: none） */
+  background-image:
+    radial-gradient(
+      color-mix(in oklch, var(--foreground) 7%, transparent) 1px,
+      transparent 1px
+    ),
+    var(--page-gradient);
+  background-size: 22px 22px, 100% 100%;
+  /* 顶边一道极淡的高光，让窗口边缘看起来像一块玻璃（用主题 token，
+     不依赖 color-mix，老 WebView 上也不会退化成一条实色线） */
+  box-shadow: inset 0 1px 0 var(--border);
+}
+
+/* 最大化/全屏：贴边显示，圆角、描边、高光全部收掉 */
+.app-frame[data-maximized="true"] {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+/* 窗口最大化的全局开关：--window-radius 也驱动弹层遮罩，一起归零 */
+.window-maximized {
+  --window-radius: 0px;
+}
+
+.window-titlebar {
+  display: flex;
+  align-items: center;
+  height: 34px;
+  flex-shrink: 0;
+  padding-left: 10px;
+  border-bottom: 1px solid var(--border);
+  /* 跟紧挨着的侧栏同一档实色，做出「窗口标签条」的层次：
+     直接用 token 而不是 color-mix，避免老 WebView 上退化成一条实色（白）带 */
+  background: var(--sidebar);
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 失焦时窗口标签弱化（原生窗口的标题变灰） */
+.titlebar-brand {
+  transition: opacity 160ms ease;
+}
+.app-frame[data-focused="false"] .titlebar-brand {
+  opacity: 0.5;
+}
+
+.window-control {
+  height: 100%;
+  width: 46px;
+  border-radius: 0;
+  color: var(--muted-foreground);
+}
+.window-control:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+.window-control:focus-visible {
+  outline-offset: -2px;
+}
+/* 窗口按钮的图标比正文图标小一号、笔画更细，接近系统标题栏的观感 */
+.window-control svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.6;
+}
+.window-control-close:hover {
+  background: #e5484d;
+  color: #fff;
+}
+
+/* Radix 弹层挂在 body 上，不受 .app-frame 的圆角裁剪：
+   给铺满窗口的遮罩补同一套圆角，窗口四角才不会被遮罩方块盖住 */
+[data-slot="dialog-overlay"],
+[data-slot="alert-dialog-overlay"],
+[data-slot="sheet-overlay"] {
+  border-radius: var(--window-radius);
+}
+/* 贴边的 Sheet 同理：贴着窗口那两侧跟窗口一样圆 */
+[data-slot="sheet-content"][data-side="right"] {
+  border-top-right-radius: var(--window-radius);
+  border-bottom-right-radius: var(--window-radius);
+}
+[data-slot="sheet-content"][data-side="left"] {
+  border-top-left-radius: var(--window-radius);
+  border-bottom-left-radius: var(--window-radius);
+}
+[data-slot="sheet-content"][data-side="bottom"] {
+  border-bottom-right-radius: var(--window-radius);
+  border-bottom-left-radius: var(--window-radius);
+}
+

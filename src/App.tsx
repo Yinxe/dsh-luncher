@@ -743,7 +743,9 @@ export default function App() {
             npm {env.npm ?? "未装"}
           </Badge>
           <Badge variant="outline" className="hidden font-mono xl:inline-flex">{env.os}/{env.arch}</Badge>
-          <div className="flex-1" />
+          {/* 顶栏空白处也能拖窗口（data-tauri-drag-region 只管自己那一层，
+              按钮之类的可点元素不受影响） */}
+          <div className="flex-1" data-tauri-drag-region />
           {liveWebProcs.length > 0 && (
             <Button
               size="sm"
