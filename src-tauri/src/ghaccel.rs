@@ -200,22 +200,30 @@ pub fn candidates(extra: &str) -> Vec<String> {
 
 /// 是否值得走代理的 github 链接
 pub fn is_github_url(url: &str) -> bool {
-    let u = url.trim();
-    for host in [
-        "https://github.com/",
-        "http://github.com/",
-        "https://raw.githubusercontent.com/",
-        "http://raw.githubusercontent.com/",
-        "https://gist.githubusercontent.com/",
-        "https://codeload.github.com/",
-        "https://objects.githubusercontent.com/",
-        "https://github.com",
-    ] {
-        if u.starts_with(host) {
-            return true;
-        }
+    // 只做「是不是 github 主机」的判定，不返回改写结果，故整体小写化后比较即可
+    // （主机名与 scheme 都大小写不敏感）。
+    let u = url.trim().to_ascii_lowercase();
+    if let Some(rest) = u.strip_prefix("git@github.com:") {
+        return !rest.is_empty();
     }
-    u.starts_with("git@github.com:")
+    let Some(after_scheme) = u
+        .strip_prefix("https://")
+        .or_else(|| u.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    // 主机名到第一个 '/'、'?'、'#' 或 ':'（端口）为止。此前用带裸 "https://github.com"
+    // 前缀的 starts_with 会把 https://github.com.evil.test/... 误判成 github 链接、
+    // 一并丢给第三方代理，这里改成主机名精确匹配。
+    let host = after_scheme.split(['/', '?', '#', ':']).next().unwrap_or("");
+    matches!(
+        host,
+        "github.com"
+            | "raw.githubusercontent.com"
+            | "gist.githubusercontent.com"
+            | "codeload.github.com"
+            | "objects.githubusercontent.com"
+    )
 }
 
 /// 把 github 链接拼上前缀；不是 github 链接（或已带前缀）就原样返回
@@ -457,6 +465,26 @@ mod tests {
             rewrite("git@github.com:o/r.git", p),
             "https://gh-proxy.com/https://github.com/o/r.git"
         );
+    }
+
+    #[test]
+    fn github_host_matched_exactly_not_by_prefix() {
+        // 真正的 github 主机：带不带路径、带端口、大写都要认
+        assert!(is_github_url("https://github.com"));
+        assert!(is_github_url("https://github.com/o/r"));
+        assert!(is_github_url("https://github.com:443/o/r"));
+        assert!(is_github_url("HTTPS://GitHub.com/o/r"));
+        assert!(is_github_url("https://raw.githubusercontent.com/o/r/f"));
+        assert!(is_github_url("git@github.com:o/r.git"));
+        // 伪装成 github 的相似主机：绝不认，避免被丢给第三方代理
+        assert!(!is_github_url("https://github.com.evil.test/x"));
+        assert!(!is_github_url("https://evilgithub.com/x"));
+        assert!(!is_github_url("https://github.como/x"));
+        assert!(!is_github_url("git@github.com.evil.test:o/r.git"));
+        assert!(!is_github_url("https://example.invalid/https://github.com/x"));
+        // 相似主机也不会被改写
+        let p = "https://gh-proxy.com/";
+        assert_eq!(rewrite("https://github.com.evil.test/x", p), "https://github.com.evil.test/x");
     }
 
     #[test]
