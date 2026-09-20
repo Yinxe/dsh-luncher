@@ -164,11 +164,14 @@ npm run release        # 同上（别名）
 
    > `bundle.createUpdaterArtifacts` 已经是 `true`：**这两个 secret 没配好，CI 打包会直接失败**（找不到签名密钥）。暂时不想启用应用内更新，就把它改回 `false`。
 
-### 之后每次发版
+### 之后每次发版（两件事，都在 git 里完成）
 
 1. 改 `src-tauri/tauri.conf.json` 的 `version` 和 `src-tauri/Cargo.toml` 的 `version`（两者保持一致）；
-2. 触发 `.github/workflows/release.yml`：手动 `workflow_dispatch`（可填版本号覆盖）或 push 到 `release` 分支；
-3. CI 产出三端安装包 + `.sig` 签名 + `latest.json`，**直接发布成正式 Release**（`releaseDraft: false`），并把 `latest.json` 的下载地址改写成 canonical 形式。**不需要任何手动步骤**。
+2. 把 dev 合进 **main** 并 push —— workflow 是 `on: push: branches: [main]`，推上去就自动打包 → 传产物 → 自动发布正式 Release。**不需要去网页点任何按钮**。
+
+版本号没改就推 main 也不会白跑：workflow 第一步会查到该版本已发布，直接跳过后面的构建（绿勾 + 一条 notice）。
+
+> **为什么 workflow 里非要「先草稿、再自动发布」两步**：三端是并发跑的，如果直接发布，先跑完的那个会把 release 发出去，另外两个找不到草稿就去创建 → `422 already_exists(tag_name)`，结果是**整个平台的产物都缺失**（踩过一次：初版 v0.1.1 少了全部 Linux 包）。官方模板的做法是停在 Draft 让你手动点 Publish；这里只是把最后那一步自动化了。
 
 > **别把 release 标成 pre-release**。GitHub 的 release 只有三种状态，而 `releases/latest` 只认「non-draft + non-prerelease」：
 >

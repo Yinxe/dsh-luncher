@@ -1,19 +1,17 @@
-name: Release 打包
+name: 发布
 
-# 基于 Tauri 官方模板：https://v2.tauri.app/distribute/pipelines/github
-# 构建与发布交给 tauri-apps/tauri-action@v1 —— 它自己读 tauri.conf.json 的
-# version、替换 __VERSION__、创建 Draft Release 并上传产物；末尾再补一个
-# normalize-updater-json 作业把 latest.json 的下载地址改写成 canonical 形式。
+# 官方模板：https://v2.tauri.app/distribute/pipelines/github
+# 只改了三处，都在代码里标了 ★：
+#   ★1 触发方式：push 到 main（平时在 dev 开发，合进 main 即发版）+ 手动触发
+#   ★2 注入签名密钥：否则产物没有 .sig、也不会生成 latest.json
+#   ★3 末尾加一个 4 行作业：把官方模板停在 Draft 的 release 自动转正式
+#
+# 发版流程：改 src-tauri/tauri.conf.json 与 src-tauri/Cargo.toml 的 version
+# （两处要一致）→ 合进 main → 完事。版本号没改就推 main 也不会白跑，会跳过。
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: '发布版本号（留空则用 tauri.conf.json 中的版本）'
-        required: false
-        type: string
   push:
-    branches:
-      - release
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   publish-tauri:
@@ -23,245 +21,95 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS 用 universal 单包同时覆盖 Apple Silicon 与 Intel（官方示例之一）
+          # macOS 用 universal 单包同时覆盖 Apple Silicon 与 Intel
           - platform: 'macos-latest'
             args: '--target universal-apple-darwin'
-          # Linux：deb + rpm + AppImage（由 tauri.conf.json 的 bundle.targets = all 决定）
+          # Linux 产出 deb + rpm + AppImage（tauri.conf.json 的 bundle.targets = all）
           - platform: 'ubuntu-22.04'
             args: ''
-          # Windows：NSIS .exe + .msi
+          # Windows 产出 NSIS .exe + .msi
           - platform: 'windows-latest'
             args: ''
-
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: 安装 Linux 系统依赖
-        if: matrix.platform == 'ubuntu-22.04'
+      # 版本号没变就别白跑 7 分钟：已经正式发布过就跳过这一步之后的动作
+      - name: 该版本是否已发布
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+          V=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          HIT=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name==\"v$V\" and .draft==false) | .tag_name")
+          if [ -n "$HIT" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v$V 已经发布过了，本次跳过。发新版本请先改 version"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: 安装 Node.js
+      - name: setup node
+        if: steps.gate.outputs.skip != 'true'
         uses: actions/setup-node@v6
         with:
           node-version: lts/*
-          cache: npm
 
-      - name: 安装 Rust
+      - name: install Rust stable
+        if: steps.gate.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
-          # 交叉目标只有 macOS 需要，其他平台留空以省编译时间
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Rust 编译缓存
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: './src-tauri -> target'
+      - name: install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04' && steps.gate.outputs.skip != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: 安装前端依赖
+      - name: install frontend dependencies
+        if: steps.gate.outputs.skip != 'true'
         run: npm ci
 
-      # 可选版本号：填了就通过官方 `tauri build --config` 覆盖（不修改任何文件），
-      # 留空则由 tauri-action 从 tauri.conf.json 读取。config_arg 会同时进入
-      # tauri-action 的版本解析（决定 __VERSION__）和 tauri build 的实际参数。
-      - name: 解析版本号
-        id: ver
-        shell: bash
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          if [ -z "$INPUT_VERSION" ]; then
-            echo "未填版本号，使用 tauri.conf.json 中的版本"
-            echo "config_arg=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          node -e '
-            const v = process.env.INPUT_VERSION;
-            if (!/^\d+\.\d+\.\d+(-[\w.]+)?(\+[\w.]+)?$/.test(v)) {
-              console.error("无效的版本号: " + v + "，需要形如 1.2.3 或 1.2.3-beta.1");
-              process.exit(1);
-            }
-          '
-          echo "config_arg=--config '{\"version\":\"$INPUT_VERSION\"}'" >> "$GITHUB_OUTPUT"
-          echo "本次发布版本: $INPUT_VERSION"
-
-      - name: 打包并上传到 Draft Release
-        uses: tauri-apps/tauri-action@v1
+      - uses: tauri-apps/tauri-action@v1
+        if: steps.gate.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # updater 签名私钥：在本地 `npm run tauri signer generate -w ~/.tauri/dsh-launcher.key`
-          # 生成后把私钥文件内容整段贴进仓库 secret；钥匙串留空就再配一个空密码 secret。
-          # 两个 secret 缺任意一个，产物都不会带 .sig，也不会生成 latest.json。
+          # ★2 签名私钥：本地 `npm run tauri signer generate -w ~/.tauri/dsh-launcher.key`
+          # 生成，私钥内容进仓库 secret（同名的 _PASSWORD 也要配，空密码就填空串）
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: v__VERSION__ # action 自动把 __VERSION__ 替换为应用版本号
+          tagName: v__VERSION__
           releaseName: 'DSH Launcher v__VERSION__'
-          releaseBody: '跨平台安装包，请从下方 Assets 下载：Linux（.deb / .rpm / .AppImage）、Windows（NSIS .exe 安装包 / .msi）、macOS（universal .dmg）。'
-          # 必须是 true：三个平台的 job 并发往「同一个草稿 release」里传产物。
-          # 设成 false 时，先跑完的那个 job 会把 release 直接发布出去，另外两个
-          # 再来找草稿就找不到了，于是尝试创建 → 422 already_exists（tag_name），
-          # 结果是整个平台产物缺失（踩过一次：v0.1.1 少了全部 Linux 包）。
-          # 草稿的发布动作交给最后的 publish-release 作业，仍是全自动、无需人工点击。
+          releaseBody: 'Windows：.exe / .msi　Linux：.deb / .rpm / .AppImage　macOS：universal .dmg'
           releaseDraft: true
           prerelease: false
-          # 生成 updater 清单 latest.json 并上传到同一个 Release —— 应用内自动更新的数据源。
-          # 注意输入名：v1 是 uploadUpdaterJson（v0 那版叫 includeUpdaterJson，写错会被静默忽略）
-          uploadUpdaterJson: true
-          args: ${{ matrix.args }} ${{ steps.ver.outputs.config_arg }}
+          args: ${{ matrix.args }}
 
-  # tauri-action 写进 latest.json 的下载地址是
-  # `https://api.github.com/repos/<owner>/<repo>/releases/assets/<id>` —— 这种形式
-  # 只有部分 GitHub 加速前端认（实测 gh-proxy 可以，ghfast.top 直接 403）。
-  # 这里统一改写成 `https://github.com/<repo>/releases/download/<tag>/<asset>`，
-  # 所有代理都支持，而且点开就是浏览器能直接下载的地址。
-  normalize-updater-json:
+  # ★3 官方模板到这里就结束了 —— release 停在 Draft，等你去网页点 Publish。
+  # 但 releases/latest 只认「非草稿 + 非预发布」，停在草稿或误勾 pre-release
+  # 都会让客户端一直「检查不到更新」，所以这里自动转正式。
+  # 之所以必须先草稿：三个平台是并发跑的，直接发布会让先跑完的那个把
+  # release 发出去，另外两个找不到草稿就去创建 → 422 already_exists，
+  # 结果整个平台的产物都缺失。
+  publish:
     needs: publish-tauri
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
-
-      - name: 把 latest.json 的下载地址改写成 canonical 形式
+      - name: 把草稿发布为正式 release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          set -euo pipefail
-          VERSION="${INPUT_VERSION:-$(node -p "require('./src-tauri/tauri.conf.json').version")}"
-          TAG="v$VERSION"
-          API="repos/$GITHUB_REPOSITORY"
-          echo "目标 Release: $TAG"
-
-          # 草稿 release 还没有创建 git tag，releases/tags/<tag> 一定 404，
-          # 只能从列表里按 tag_name 找（tauri-action 找草稿也是这么找的）。
-          gh api "$API/releases?per_page=100" > /tmp/rels.json
-          RID=$(python3 -c "
-          import json
-          rs = json.load(open('/tmp/rels.json'))
-          hit = [r for r in rs if r['tag_name'] == '$TAG']
-          print(hit[0]['id'] if hit else '')
-          ")
+          RID=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '[.[] | select(.draft)][0].id // empty')
           if [ -z "$RID" ]; then
-            echo "::error::找不到 tag $TAG 的 release"
-            exit 1
+            echo "没有草稿可发布（版本号未变时就是这样），结束"
+            exit 0
           fi
-          echo "release id = $RID"
-
-          gh api "$API/releases/$RID/assets?per_page=100" \
-            --jq '.[] | "\(.id)\t\(.name)"' > /tmp/assets.tsv
-          LID=$(awk -F'\t' '$2=="latest.json"{print $1}' /tmp/assets.tsv)
-          if [ -z "$LID" ]; then
-            echo "::error::Release $TAG 里没有 latest.json，无法改写"
-            exit 1
-          fi
-
-          # 资产要经 CDN 下载，偶尔 TLS 抖动，带重试
-          rm -f /tmp/latest.json
-          for i in 1 2 3 4 5; do
-            if gh api "$API/releases/assets/$LID" \
-                 -H "Accept: application/octet-stream" > /tmp/latest.json 2>/dev/null \
-               && [ -s /tmp/latest.json ]; then
-              echo "latest.json 下载成功（第 $i 次尝试）"
-              break
-            fi
-            echo "第 $i 次下载失败，重试…"
-            sleep 5
-          done
-          [ -s /tmp/latest.json ] || { echo "::error::latest.json 下载失败"; exit 1; }
-
-          python3 - "$GITHUB_REPOSITORY" "$TAG" <<'PY'
-          import json, sys
-          repo, tag = sys.argv[1], sys.argv[2]
-          assets = {}
-          for line in open("/tmp/assets.tsv"):
-              line = line.rstrip("\n")
-              if not line:
-                  continue
-              aid, _, name = line.partition("\t")
-              assets[aid] = name
-          with open("/tmp/latest.json") as f:
-              j = json.load(f)
-          n = 0
-          for p in j.get("platforms", {}).values():
-              url = p.get("url", "")
-              if "/releases/assets/" in url:
-                  aid = url.rsplit("/releases/assets/", 1)[1]
-                  if aid in assets:
-                      p["url"] = f"https://github.com/{repo}/releases/download/{tag}/{assets[aid]}"
-                      n += 1
-          with open("/tmp/latest.json", "w") as f:
-              json.dump(j, f, ensure_ascii=False, indent=2)
-          print(f"改写了 {n} 条平台地址")
-          PY
-
-          # --clobber 是「先删后传」：文件为空时 gh 会传成 400 Bad Content-Length，
-          # 而旧资产已经被删掉 —— 所以上面下载处才要重试 + 判空。
-          gh release upload "$TAG" /tmp/latest.json --clobber --repo "$GITHUB_REPOSITORY"
-
-          # 回读校验：一定要已经没有 /releases/assets/ 形式的地址才算成功
-          LID2=$(gh api "$API/releases/$RID/assets?per_page=100" \
-                 --jq '.[] | select(.name=="latest.json") | .id')
-          rm -f /tmp/verify.json
-          for i in 1 2 3 4 5; do
-            if gh api "$API/releases/assets/$LID2" \
-                 -H "Accept: application/octet-stream" > /tmp/verify.json 2>/dev/null \
-               && [ -s /tmp/verify.json ]; then break; fi
-            sleep 5
-          done
-          if grep -q "/releases/assets/" /tmp/verify.json; then
-            echo "::error::latest.json 里仍有 api.github.com 形式的地址，改写没生效"
-            exit 1
-          fi
-          python3 -c "
-          import json
-          j = json.load(open('/tmp/verify.json'))
-          print('version =', j['version'], '| 平台条目 =', len(j['platforms']))
-          assert 'linux-x86_64' in j['platforms'], '缺少 linux 条目'
-          "
-          echo "完成，latest.json 现在是 canonical 地址且含 linux 条目"
-
-  # 上一个作业跑完（latest.json 已规范化）再把草稿转成正式 release。
-  # 这样既避开了多平台并发创建 release 的竞态，又不需要人工去点 Publish，
-  # 也就不会有人误勾 "Set as a pre-release"（勾了 latest 会 404）。
-  publish-release:
-    needs: normalize-updater-json
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: 把草稿发布为正式 Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          VERSION="${INPUT_VERSION:-$(node -p "require('./src-tauri/tauri.conf.json').version")}"
-          TAG="v$VERSION"
-          API="repos/$GITHUB_REPOSITORY"
-
-          # 同上：草稿按 tag 查不到，从列表里按 tag_name 找 id，
-          # 再用 PATCH 改成 draft=false（这一步才会真正创建 git tag）。
-          gh api "$API/releases?per_page=100" > /tmp/rels2.json
-          RID=$(python3 -c "
-          import json
-          rs = json.load(open('/tmp/rels2.json'))
-          hit = [r for r in rs if r['tag_name'] == '$TAG']
-          print(hit[0]['id'] if hit else '')
-          ")
-          if [ -z "$RID" ]; then echo "::error::找不到 tag $TAG 的 release"; exit 1; fi
-
-          gh api -X PATCH "$API/releases/$RID" \
-            -F draft=false -F prerelease=false > /tmp/pub.json
-          python3 -c "
-          import json
-          j = json.load(open('/tmp/pub.json'))
-          print('已发布:', j['tag_name'], '| draft =', j['draft'], '| prerelease =', j['prerelease'])
-          print(j['html_url'])
-          assert not j['draft'] and not j['prerelease'], '状态不对：latest 会 404'
-          "
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RID" \
+            -F draft=false -F prerelease=false \
+            --jq '"已发布 \(.tag_name)  draft=\(.draft)  prerelease=\(.prerelease)"'
