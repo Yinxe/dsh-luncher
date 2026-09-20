@@ -302,6 +302,8 @@ export interface ProfileDetail {
   exists: boolean;
   bundles: BundleInfo[];
   packages: PackageDepInfo[];
+  /** package.json 原始内容（与 Rust package_raw 对齐） */
+  packageRaw: string;
   patchRaw: string;
   patchEntries: PatchEntryInfo[];
 }
@@ -387,6 +389,8 @@ export interface PluginJob {
   cancelled: boolean;
   /** 失败时的对症建议（首行适合直接放进 toast） */
   hint: string | null;
+  /** 本次任务实际执行的 dsh plugin 参数（与 Rust argv 对齐，「允许构建脚本并重试」原样重跑） */
+  argv: string[];
   /** 被 pnpm 拦下的构建脚本所属包（非空时显示「允许构建脚本并重试」） */
   pendingBuilds: string[];
   lines: PluginLogLine[];

@@ -104,6 +104,7 @@ export function usePluginJobs({ onFinished }: Options = {}): PluginJobsApi {
               exitCode: e.exitCode,
               cancelled: e.cancelled,
               hint: e.hint,
+              argv: [],
               pendingBuilds: e.pendingBuilds,
               lines: [],
               dropped: 0,
