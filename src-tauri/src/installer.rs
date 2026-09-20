@@ -213,8 +213,26 @@ fn run_install(
         std::thread::sleep(std::time::Duration::from_millis(200));
     };
 
-    for r in readers {
-        let _ = r.join();
+    // 排空两个日志管道。取消时只 kill 了直接子进程，--foreground-scripts 起的孙进程
+    // （runscript→sh→node）可能仍持有管道写端，无限 join 会永远卡住 → job_version 不清，
+    // 之后所有安装都被「已有安装任务正在进行」挡死。给排空设上限，超时即继续（读线程自然游离）。
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for r in readers {
+                let _ = r.join();
+            }
+            let _ = tx.send(());
+        });
+        let drained = if state.cancelled.load(Ordering::SeqCst) {
+            rx.recv_timeout(std::time::Duration::from_secs(3))
+        } else {
+            // 正常退出：子进程已死，管道很快 EOF，给足时间但仍设硬上限以防万一
+            rx.recv_timeout(std::time::Duration::from_secs(60))
+        };
+        if drained.is_err() {
+            emit_log(app, version, "日志管道排空超时（可能有后台脚本仍在收尾）", "info");
+        }
     }
 
     let cancelled = state.cancelled.load(Ordering::SeqCst) && status.is_none();
