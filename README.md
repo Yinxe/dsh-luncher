@@ -172,13 +172,15 @@ npm run release        # 同上（别名）
 
 > **别把 release 标成 pre-release**。GitHub 的 release 只有三种状态，而 `releases/latest` 只认「non-draft + non-prerelease」：
 >
-> | 状态 | `releases/latest` 指向它吗 | 客户端表现 |
+> | 状态 | 在 GitHub 界面上怎么得到 | `releases/latest` 指向它吗 |
 > | --- | --- | --- |
-> | Draft（新建 release 的默认状态） | ❌ 匿名访问不到 | 检查不到更新 |
-> | Pre-release（表单里那个勾选框） | ❌ 会被跳过 | 检查不到更新 |
-> | 正式 release（**不勾** pre-release，点 Publish） | ✅ | 正常 |
+> | Draft 草稿 | 新建 release 的默认状态；要点 **Publish release** 才离开 | ❌ 匿名访问不到 |
+> | Pre-release 预发布 | 「Release label」单选组里选 `Pre-release` | ❌ 会被跳过 |
+> | 正式 release | 「Release label」选 **`None`** —— 界面里**没有**叫 "Release" 的选项，因为「正式」就是不贴任何标签，`None` 就是它 | ✅ |
 >
-> 实测过一次：只标了 pre-release 的 v0.1.0 会让 `gh api repos/<你>/<仓库>/releases/latest` 返回 `Not Found`、`.../releases/latest/download/latest.json` 返回 404。想发测试版请用**单独的 tag + 单独的 endpoints**，不要动正式通道。包要是坏了，删掉 release 和 tag、重跑一次 CI 即可。
+> 也就是说那个单选组只是「贴标签」，「是不是草稿」由按钮决定（显示 `Update release` 就说明已经发布过了）。实测过一次：只标了 pre-release 的 v0.1.0 会让 `gh api repos/<你>/<仓库>/releases/latest` 返回 `Not Found`、`.../releases/latest/download/latest.json` 返回 404。
+>
+> 想发测试版请用**单独的 tag + 单独的 endpoints**，不要动正式通道。包要是坏了，删掉 release 和 tag、重跑一次 CI 即可。
 
 发完用这两条自查（第二条应能打印出版本号）：
 ```bash
