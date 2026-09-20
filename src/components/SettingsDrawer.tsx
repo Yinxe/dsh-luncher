@@ -10,7 +10,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import type { EnvironmentInfo, Settings } from "../types";
+import { api } from "../api";
+import type { EnvironmentInfo, GitHubRateLimit, Settings } from "../types";
 
 interface Props {
   open: boolean;
@@ -47,6 +48,12 @@ function SwitchRow({
 /** 设置侧边抽屉：分区展示；ESC / 遮罩点击关闭 */
 export default function SettingsDrawer({ open, initial, env, onSave, onClose, onReveal }: Props) {
   const [draft, setDraft] = useState<Settings>(initial);
+  const [rate, setRate] = useState<GitHubRateLimit | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    api.getGithubRateLimit().then(setRate).catch(() => setRate(null));
+  }, [open]);
 
   // 每次打开时以当前设置重置草稿（取消即丢弃修改）
   useEffect(() => {
@@ -55,6 +62,18 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
+
+  const rlText = rate
+    ? rate.remaining == null
+      ? ""
+      : rate.exhausted
+      ? ` 当前额度已用尽（${rate.remaining}/${rate.limit ?? 60}），${
+          rate.reset ? new Date(rate.reset * 1000).toLocaleTimeString() : "稍后"
+        } 重置。`
+      : ` 当前剩余 ${rate.remaining}/${rate.limit ?? 60}${
+          rate.reset ? `，${new Date(rate.reset * 1000).toLocaleTimeString()} 重置` : ""
+        }。`
+    : "";
 
   return (
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
@@ -79,6 +98,24 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
                 onChange={(e) => set("registry", e.target.value)}
               />
               <FieldDescription>拉取版本列表与安装源；国内可用 registry.npmmirror.com</FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="set-ghtoken">GitHub Token（可选）</FieldLabel>
+              <Input
+                id="set-ghtoken"
+                type="password"
+                className="font-mono"
+                value={draft.githubToken}
+                placeholder="ghp_… / github_pat_…（留空即匿名）"
+                onChange={(e) => set("githubToken", e.target.value)}
+              />
+              <FieldDescription>
+                只用于提高 api.github.com 额度：匿名 60 次/小时 → 带 token 5000 次/小时。
+                <span className="block">
+                  仓库探测与更新检测走 jsDelivr / git 免额度通道，<strong>不填也能正常用</strong>；
+                  也可用 GITHUB_TOKEN / GH_TOKEN 环境变量代替。{rlText}
+                </span>
+              </FieldDescription>
             </Field>
             <Field>
               <FieldLabel htmlFor="set-mirror">Node 运行时镜像站</FieldLabel>

@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub const PKG_SCOPE_ENCODED: &str = "@deepseek-ai%2Fdsh";
 
@@ -154,13 +156,69 @@ pub struct GitHubRepoInfo {
     pub pushed_at: Option<String>,
     pub html_url: String,
     pub license: Option<String>,
+    /// 实际用于探测/安装的 ref（缺省 = 仓库默认分支）
     pub git_ref: Option<String>,
-    /// 插件在仓库内的路径（插件根目录，规范要求其下必须有 lib/ 目录）
+    /// 仓库默认分支
+    pub default_branch: Option<String>,
+    /// 仓库是否是 monorepo（声明了 pnpm-workspace / workspaces）
+    pub is_monorepo: bool,
+    /// workspace 成员 glob（如 ["plugins/*"]）
+    pub workspace_globs: Vec<String>,
+    /// 探测到的插件候选包（含仓库根；monorepo 下逐个 workspace 子包）
+    pub candidates: Vec<PluginCandidate>,
+    /// 探测方式：tree（Git Trees API 全量扫描）| contents（降级为单目录校验）
+    pub probe: String,
+    /// 有候选的 package.json 因超时未读取（名称/版本/描述缺失，其余信息仍有效）
+    pub facts_pending: bool,
+    /// 仓库元数据（stars/license/描述）因 GitHub API 额度不可用而缺失
+    pub meta_degraded: bool,
+    /// 插件在仓库内的路径（首个候选，兼容旧字段）
     pub plugin_path: Option<String>,
     /// lib/ 目录校验：Some(true)=已确认存在 Some(false)=确认缺失 None=未校验（打包产物直装）
     pub lib_ok: Option<bool>,
     /// 最终交给 dsh plugin add 的安装规格（github:owner/repo#ref&path:xx 或打包产物 URL）
     pub install_spec: String,
+}
+
+/// 探测到的一个可安装插件包（仓库根 / monorepo 子包 / 本地目录子包共用）
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCandidate {
+    /// 相对插件根目录的路径；"" = 根目录
+    pub path: String,
+    /// package.json 的 name（读不到时为 None）
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    /// lib/ 目录存在且含构建产物（.js/.cjs/.mjs）
+    pub lib_ok: bool,
+    /// package.json 声明了 dsh.bundle.patch —— dsh 会把它并入 profile 层
+    pub has_bundle: bool,
+    /// 插件根目录内有 cordis.patch.yml
+    pub has_patch: bool,
+    /// 命中 pnpm-workspace / workspaces 成员 glob
+    pub workspace_member: bool,
+    /// 可以直接作为插件安装（声明了 dsh.bundle）
+    pub ready: bool,
+    /// 交给 dsh plugin add 的安装规格
+    pub install_spec: String,
+}
+
+impl PluginCandidate {
+    fn root() -> Self {
+        PluginCandidate {
+            path: String::new(),
+            name: None,
+            version: None,
+            description: None,
+            lib_ok: false,
+            has_bundle: false,
+            has_patch: false,
+            workspace_member: false,
+            ready: false,
+            install_spec: String::new(),
+        }
+    }
 }
 
 /// 解析出的 GitHub 插件来源
@@ -174,12 +232,530 @@ pub struct GitHubPluginSpec {
     pub tarball_url: Option<String>,
 }
 
+/// package.json 中与插件探测相关的字段
+#[derive(Clone, Debug, Default)]
+pub struct PkgFacts {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    /// dsh.bundle.patch 声明的补丁文件（相对路径）
+    pub bundle_patch: Option<String>,
+    /// package.json 里声明的 workspace 成员 glob（monorepo 根）
+    pub workspaces: Vec<String>,
+}
+
+/// 从 package.json 文本提取探测相关字段
+pub fn parse_pkg_facts(text: &str) -> PkgFacts {
+    let Ok(pkg) = serde_json::from_str::<serde_json::Value>(text) else {
+        return PkgFacts::default();
+    };
+    let str_at = |v: &serde_json::Value, k: &str| {
+        v.get(k).and_then(|x| x.as_str()).map(|s| s.to_string())
+    };
+    PkgFacts {
+        name: str_at(&pkg, "name"),
+        version: str_at(&pkg, "version"),
+        description: str_at(&pkg, "description"),
+        bundle_patch: pkg
+            .get("dsh")
+            .and_then(|d| d.get("bundle"))
+            .and_then(|b| b.get("patch"))
+            .and_then(|p| p.as_str())
+            .map(String::from),
+        workspaces: parse_workspaces_field(&pkg),
+    }
+}
+
+/// npm/yarn workspaces 字段：`["packages/*"]` 或 `{ "packages": [...] }`
+fn parse_workspaces_field(pkg: &serde_json::Value) -> Vec<String> {
+    let ws = pkg.get("workspaces");
+    let arr = match ws {
+        Some(serde_json::Value::Array(a)) => Some(a),
+        Some(serde_json::Value::Object(o)) => o.get("packages").and_then(|p| p.as_array()),
+        _ => None,
+    };
+    arr.map(|a| {
+        a.iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// 解析 pnpm-workspace.yaml 的 `packages:` 列表（忽略 ! 取反项以外的其他字段）
+pub fn parse_pnpm_workspace(text: &str) -> Vec<String> {
+    let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(text) else {
+        return Vec::new();
+    };
+    v.get("packages")
+        .and_then(|p| p.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|s| s.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ── glob 匹配（pnpm workspace 成员判定） ────────────────────
+
+/// 单段通配：`*` 任意字符、`?` 单字符
+fn match_segment(pat: &str, seg: &str) -> bool {
+    let p: Vec<char> = pat.chars().collect();
+    let s: Vec<char> = seg.chars().collect();
+    // 经典双指针回溯
+    let (mut pi, mut si) = (0usize, 0usize);
+    let (mut star, mut mark) = (usize::MAX, 0usize);
+    while si < s.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
+            pi += 1;
+            si += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = pi;
+            mark = si;
+            pi += 1;
+        } else if star != usize::MAX {
+            pi = star + 1;
+            mark += 1;
+            si = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// workspace glob 匹配：支持 `*` / `?` / `**`（跨目录）与结尾 `/`
+pub fn glob_match(pattern: &str, path: &str) -> bool {
+    let pat = pattern.trim().trim_end_matches('/');
+    let path = path.trim().trim_matches('/');
+    if pat.is_empty() {
+        return false;
+    }
+    let p: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
+    let s: Vec<&str> = if path.is_empty() {
+        Vec::new()
+    } else {
+        path.split('/').filter(|x| !x.is_empty()).collect()
+    };
+    fn rec(p: &[&str], s: &[&str]) -> bool {
+        match p.first() {
+            None => s.is_empty(),
+            Some(&"**") => {
+                // `**` 吃掉 0..n 段
+                (0..=s.len()).any(|k| rec(&p[1..], &s[k..]))
+            }
+            Some(&seg) => match s.first() {
+                Some(&first) if match_segment(seg, first) => rec(&p[1..], &s[1..]),
+                _ => false,
+            },
+        }
+    }
+    rec(&p, &s)
+}
+
+/// 相对路径是否命中任一 workspace glob（支持 `!` 取反）
+pub fn workspace_hit(globs: &[String], rel: &str) -> bool {
+    let mut hit = false;
+    for g in globs {
+        let g = g.trim();
+        if let Some(neg) = g.strip_prefix('!') {
+            if glob_match(neg, rel) {
+                return false;
+            }
+        } else if glob_match(g, rel) {
+            hit = true;
+        }
+    }
+    hit
+}
+
+#[cfg(test)]
+mod glob_tests {
+    use super::*;
+
+    #[test]
+    fn glob_matches_workspace_shapes() {
+        assert!(glob_match("plugins/*", "plugins/mcwiki-search"));
+        assert!(!glob_match("plugins/*", "plugins/a/b"));
+        assert!(glob_match("plugins/**", "plugins/a/b"));
+        assert!(glob_match("packages/*/plugins/*", "packages/a/plugins/b"));
+        assert!(glob_match("apps/**/plugins/**", "apps/a/x/plugins/b/c"));
+        // 目录本身（无子段）不构成 workspace 成员
+        assert!(!glob_match("plugins/*", "plugins/"));
+        assert!(!glob_match("plugins/*", "plugins"));
+        assert!(!glob_match("plugins/*", "other/x"));
+        assert!(glob_match("*", "root-pkg"));
+    }
+
+    #[test]
+    fn workspace_hit_honours_negation() {
+        let globs = vec!["plugins/*".to_string(), "!plugins/skip".to_string()];
+        assert!(workspace_hit(&globs, "plugins/keep"));
+        assert!(!workspace_hit(&globs, "plugins/skip"));
+        assert!(!workspace_hit(&globs, "elsewhere/x"));
+    }
+
+    #[test]
+    fn parses_pkg_and_workspace_files() {
+        let f = parse_pkg_facts(
+            r#"{"name":"@dshp/x","version":"1.0.0","description":"d","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        );
+        assert_eq!(f.name.as_deref(), Some("@dshp/x"));
+        assert_eq!(f.bundle_patch.as_deref(), Some("./cordis.patch.yml"));
+        let f2 = parse_pkg_facts(r#"{"workspaces":["packages/*"]}"#);
+        assert_eq!(f2.workspaces, vec!["packages/*".to_string()]);
+        let f3 = parse_pkg_facts(r#"{"workspaces":{"packages":["a","b"]}}"#);
+        assert_eq!(f3.workspaces.len(), 2);
+        assert_eq!(
+            parse_pnpm_workspace("packages:\n  - 'plugins/*'\n  - shared\n"),
+            vec!["plugins/*".to_string(), "shared".to_string()]
+        );
+    }
+}
+
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("初始化 HTTP 客户端失败: {e}"))
+}
+
+// ── GitHub REST 额度守卫 + 进程内缓存 ────────────────────────
+//
+// 高频动作（探测仓库、比提交）全部走**免额度通道**：
+//   * jsDelivr data API  → 整棵文件树
+//   * jsDelivr CDN / raw.githubusercontent → 文件内容
+//   * git ls-remote      → HEAD 提交、私有仓库判定
+// api.github.com 只用于元数据增强（stars / license / 描述），匿名额度 60/小时。
+// 每次响应都记录 x-ratelimit-*；额度用尽就**直接失败并给出重置时间**，
+// 不再白发请求（也就不会再看到一串 403）。
+
+/// 最近的 GitHub API 额度状态（设置页展示用）
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubRateLimit {
+    pub limit: Option<u32>,
+    pub remaining: Option<u32>,
+    /// 额度重置的 unix 秒（前端自己按本地时区格式化）
+    pub reset: Option<u64>,
+    /// 是否带了 token（带 token 时额度 5000/小时）
+    pub authenticated: bool,
+    pub exhausted: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RlState {
+    limit: Option<u32>,
+    remaining: Option<u32>,
+    reset: Option<u64>,
+    authenticated: bool,
+}
+
+static RL: Mutex<RlState> = Mutex::new(RlState {
+    limit: None,
+    remaining: None,
+    reset: None,
+    authenticated: false,
+});
+/// URL → (写入时刻, 值) 的简易内存缓存（进程级，重启即失效）
+static CACHE: Mutex<Option<std::collections::HashMap<String, (Instant, String)>>> = Mutex::new(None);
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn cache_get(key: &str, ttl: Duration) -> Option<String> {
+    let guard = CACHE.lock().ok()?;
+    let map = guard.as_ref()?;
+    let (at, val) = map.get(key)?;
+    if at.elapsed() > ttl {
+        return None;
+    }
+    Some(val.clone())
+}
+
+fn cache_put(key: &str, value: &str) {
+    let Ok(mut guard) = CACHE.lock() else { return };
+    let map = guard.get_or_insert_with(Default::default);
+    // 简易容量控制：超过 512 条就整体清掉（探测场景重复率低，不值得做 LRU）
+    if map.len() > 512 {
+        map.clear();
+    }
+    map.insert(key.to_string(), (Instant::now(), value.to_string()));
+}
+
+/// 从设置里的 token 或环境变量取 GitHub token（提高额度用，可选）
+pub fn github_token(explicit: Option<&str>) -> Option<String> {
+    if let Some(t) = explicit.map(str::trim).filter(|t| !t.is_empty()) {
+        return Some(t.to_string());
+    }
+    for key in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.trim().is_empty() {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn note_rl(resp: &reqwest::Response, authenticated: bool) {
+    let num = |k: &str| -> Option<u32> {
+        resp.headers()
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse().ok())
+    };
+    let Ok(mut rl) = RL.lock() else { return };
+    if let Some(l) = num("x-ratelimit-limit") {
+        rl.limit = Some(l);
+    }
+    if let Some(r) = num("x-ratelimit-remaining") {
+        rl.remaining = Some(r);
+    }
+    if let Some(t) = num("x-ratelimit-reset") {
+        rl.reset = Some(t as u64);
+    }
+    rl.authenticated = authenticated;
+}
+
+/// 当前额度快照
+pub fn rate_limit() -> GitHubRateLimit {
+    let rl = RL.lock().map(|g| *g).unwrap_or_default();
+    let exhausted = rl.remaining == Some(0) && rl.reset.map(|t| t > now_unix()).unwrap_or(false);
+    GitHubRateLimit {
+        limit: rl.limit,
+        remaining: rl.remaining,
+        reset: rl.reset,
+        authenticated: rl.authenticated,
+        exhausted,
+    }
+}
+
+/// 额度用尽时的统一话术（含剩余等待时间与提额办法）
+pub fn rate_limit_message() -> String {
+    let rl = rate_limit();
+    let wait = rl
+        .reset
+        .map(|t| t.saturating_sub(now_unix()))
+        .map(|s| if s >= 60 { format!("约 {} 分钟后", s / 60) } else { "不到 1 分钟".into() })
+        .unwrap_or_else(|| "稍后".into());
+    let scope = if rl.authenticated { "GitHub API（token）" } else { "GitHub 匿名 API" };
+    format!(
+        "{scope} 额度已用尽（{}/{}），{wait}重置。\
+         探测与更新检测已走免额度通道（jsDelivr / git），不受影响；\
+         想恢复元数据（stars / license）可在设置里填一个 GitHub Token（5000/小时）。",
+        rl.remaining.unwrap_or(0),
+        rl.limit.unwrap_or(60)
+    )
+}
+
+/// 额度守卫：已知用尽就直接失败，不发请求
+fn api_budget_guard() -> Result<(), String> {
+    let rl = rate_limit();
+    if rl.exhausted {
+        return Err(rate_limit_message());
+    }
+    Ok(())
+}
+
+/// 带额度守卫 + token 的 GitHub API GET，返回 (状态码, JSON)
+async fn api_get_json(url: &str, token: Option<&str>) -> Result<(u16, serde_json::Value), String> {
+    api_budget_guard()?;
+    let client = http_client()?;
+    let etag_key = format!("etag:{url}");
+    let body_key = format!("body:{url}");
+    let mut req = client
+        .get(url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    // 条件请求：带 If-None-Match，命中 304 时 GitHub **不计额度**（官方支持的省额度手段）
+    if let Some(etag) = cache_get(&etag_key, Duration::from_secs(7 * 24 * 3600)) {
+        req = req.header("If-None-Match", etag);
+    }
+    let resp = req.send().await.map_err(|e| format!("请求 GitHub API 失败: {e}"))?;
+    let status = resp.status().as_u16();
+    let etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    note_rl(&resp, token.is_some());
+    if status == 304 {
+        if let Some(body) = cache_get(&body_key, Duration::from_secs(7 * 24 * 3600)) {
+            let json = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+            return Ok((200, json));
+        }
+        return Ok((304, serde_json::Value::Null));
+    }
+    if status == 403 || status == 429 {
+        return Err(rate_limit_message());
+    }
+    let text = resp.text().await.unwrap_or_default();
+    if (200..300).contains(&status) {
+        if let Some(et) = &etag {
+            cache_put(&etag_key, et);
+        }
+        cache_put(&body_key, &text);
+    }
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    Ok((status, json))
+}
+
+// ── 免额度通道：jsDelivr 文件树 / CDN 内容 ──────────────────
+
+/// 一个仓库的文件树（文件集合 + 由文件名推导出的目录集合）
+#[derive(Default, Clone, Debug)]
+pub struct FileTree {
+    blobs: std::collections::HashSet<String>,
+    dirs: std::collections::HashSet<String>,
+}
+
+impl FileTree {
+    /// 由「文件路径列表」构建（jsDelivr 的 flat 列表只给文件）
+    pub fn from_paths<I: IntoIterator<Item = String>>(paths: I) -> Self {
+        let mut t = FileTree::default();
+        for p in paths {
+            let p = p.trim_start_matches('/').to_string();
+            if p.is_empty() {
+                continue;
+            }
+            // 每一级祖先目录都登记
+            let segs: Vec<&str> = p.split('/').collect();
+            for i in 1..segs.len() {
+                t.dirs.insert(segs[..i].join("/"));
+            }
+            t.blobs.insert(p);
+        }
+        t
+    }
+
+    pub fn has_blob(&self, path: &str) -> bool {
+        self.blobs.contains(path.trim_start_matches('/'))
+    }
+
+    pub fn has_dir(&self, path: &str) -> bool {
+        self.dirs.contains(path.trim_start_matches('/'))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blobs.is_empty()
+    }
+}
+
+/// jsDelivr data API：整棵文件树（免 GitHub 额度；@sha 时结果不可变、@分支时按 CDN 缓存）
+async fn jsdelivr_tree(
+    owner: &str,
+    repo: &str,
+    rev: &str,
+) -> Option<(FileTree, Option<String>)> {
+    let key = format!("jsd-tree:{owner}/{repo}@{rev}");
+    if let Some(hit) = cache_get(&key, Duration::from_secs(600)) {
+        // 缓存值 = default_branch 一行 + 路径行
+        let mut lines = hit.lines();
+        let default = lines.next().filter(|s| *s != "-").map(|s| s.to_string());
+        let paths: Vec<String> = lines.map(|s| s.to_string()).collect();
+        return Some((FileTree::from_paths(paths), default));
+    }
+    let client = http_client().ok()?;
+    let url =
+        format!("https://data.jsdelivr.com/v1/packages/gh/{owner}/{repo}@{rev}?structure=flat");
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let default = json
+        .get("default")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut paths: Vec<String> = json
+        .get("files")?
+        .as_array()?
+        .iter()
+        .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
+        .map(|s| s.trim_start_matches('/').to_string())
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+    paths.sort();
+    let mut cached = String::new();
+    cached.push_str(default.as_deref().unwrap_or("-"));
+    for p in &paths {
+        cached.push('\n');
+        cached.push_str(p);
+    }
+    cache_put(&key, &cached);
+    Some((FileTree::from_paths(paths), default))
+}
+
+/// 读取仓库内文件内容：jsDelivr CDN → raw.githubusercontent，两者都**不吃 API 额度**
+async fn fetch_file(client: &reqwest::Client, owner: &str, repo: &str, rev: &str, path: &str) -> Option<String> {
+    let key = format!("file:{owner}/{repo}@{rev}/{path}");
+    if let Some(hit) = cache_get(&key, Duration::from_secs(600)) {
+        return Some(hit);
+    }
+    let path = path.trim_start_matches('/');
+    let cdn = format!("https://cdn.jsdelivr.net/gh/{owner}/{repo}@{rev}/{path}");
+    // jsDelivr 会对并发突发限流（返回 429/空体），退避后重试一次再换源
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if let Some(t) = get_text(client, &cdn, None, None).await {
+            cache_put(&key, &t);
+            return Some(t);
+        }
+    }
+    let raw = format!("https://raw.githubusercontent.com/{owner}/{repo}/{rev}/{path}");
+    let t = get_text(client, &raw, None, None).await;
+    if let Some(t) = &t {
+        cache_put(&key, t);
+    }
+    t
+}
+
+/// 并发抓多个文件（jsDelivr 单文件约 1~2s，串行抓 20 个太慢）
+async fn fetch_files_concurrent(
+    owner: &str,
+    repo: &str,
+    rev: &str,
+    paths: Vec<String>,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for chunk in paths.chunks(4) {
+        let mut handles = Vec::new();
+        for p in chunk {
+            let (o, r, v, path) = (owner.to_string(), repo.to_string(), rev.to_string(), p.clone());
+            handles.push(tauri::async_runtime::spawn(async move {
+                let client = content_client();
+                let text = fetch_file(&client, &o, &r, &v, &path).await;
+                (path, text)
+            }));
+        }
+        for h in handles {
+            if let Ok((p, Some(t))) = h.await {
+                out.insert(p, t);
+            }
+        }
+    }
+    out
 }
 
 /// 解析 npm registry 搜索响应（/-/v1/search）。独立纯函数便于测试。
@@ -400,47 +976,318 @@ pub async fn npm_latest_version(registry_base: &str, name: &str) -> Result<Optio
         .map(String::from))
 }
 
-/// 查询 GitHub 仓库某 ref（缺省默认分支）的最新提交 SHA（仓库不存在返回 None）
+// ── 远端 ref 发现：自己实现 git 智能 HTTP，不依赖 git 二进制 ──
+//
+// 为什么要自己实现：本机实测 `github.com/<repo>.git/info/refs` 用普通 HTTPS GET
+// 只要 ~0.5s，而 `git ls-remote` 会卡 40s（git 的凭据/地址族协商）。探测与更新检测
+// 只需要「读出 refs 列表」这一件事，因此直接发这个请求并解析 pkt-line：
+// 快、免 GitHub API 额度、且对私有仓库会明确返回 401（不再有交互式登录）。
+
+/// 远端 refs 发现的结果
+#[derive(Debug, Clone)]
+pub enum RemoteRefs {
+    /// 成功拿到 refs：(sha, refname)，另外 HEAD 会以 ("<sha>", "HEAD") 形式出现
+    Refs(Vec<(String, String)>),
+    /// 需要凭据（私有仓库）或仓库不存在——GitHub 对两者都可能返回 401
+    NotPublic,
+    /// 网络不可达 / 其它异常，无法判定
+    Unknown(String),
+}
+
+/// 解析 git 智能 HTTP `info/refs` 的 pkt-line 响应
+pub fn parse_upload_pack_refs(body: &str) -> Vec<(String, String)> {
+    let bytes = body.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 4 <= bytes.len() {
+        let Ok(len) = usize::from_str_radix(&body[i..i + 4], 16) else {
+            break;
+        };
+        if len == 0 {
+            i += 4; // flush-pkt
+            continue;
+        }
+        if len < 5 {
+            break;
+        }
+        let end = (i + len).min(bytes.len());
+        let line = body[i + 4..end].trim_end_matches('\n');
+        if let Some((sha, name)) = line.split_once(' ') {
+            let name = name.split('\0').next().unwrap_or(name).trim();
+            if sha.len() == 40
+                && sha.chars().all(|c| c.is_ascii_hexdigit())
+                && !name.is_empty()
+            {
+                out.push((sha.to_string(), name.to_string()));
+            }
+        }
+        i += len;
+    }
+    out
+}
+
+fn git_base(owner: &str, repo: &str) -> String {
+    format!("https://github.com/{owner}/{repo}.git")
+}
+
+/// 读取远端 refs（等价 `git ls-remote`，0.5s 级、免额度、无交互登录）
+pub async fn discover_refs(owner: &str, repo: &str, token: Option<&str>) -> RemoteRefs {
+    let key = format!("refs:{owner}/{repo}");
+    if let Some(hit) = cache_get(&key, Duration::from_secs(60)) {
+        if hit == "401" {
+            return RemoteRefs::NotPublic;
+        }
+        if !hit.is_empty() {
+            let refs = parse_upload_pack_refs(&hit);
+            if !refs.is_empty() {
+                return RemoteRefs::Refs(refs);
+            }
+        }
+    }
+    let Ok(client) = http_client() else {
+        return RemoteRefs::Unknown("初始化 HTTP 客户端失败".into());
+    };
+    let url = format!("{}/info/refs?service=git-upload-pack", git_base(owner, repo));
+    let mut req = client
+        .get(&url)
+        .header("Accept", "application/x-git-upload-pack-advertisement");
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return RemoteRefs::Unknown(format!("访问 github.com 失败: {e}")),
+    };
+    let status = resp.status().as_u16();
+    if status == 401 || status == 403 || status == 404 {
+        cache_put(&key, "401");
+        return RemoteRefs::NotPublic;
+    }
+    if !(200..300).contains(&status) {
+        return RemoteRefs::Unknown(format!("github.com 返回 {status}"));
+    }
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => return RemoteRefs::Unknown(format!("读取 refs 失败: {e}")),
+    };
+    let refs = parse_upload_pack_refs(&body);
+    if refs.is_empty() {
+        return RemoteRefs::Unknown("refs 响应为空".into());
+    }
+    cache_put(&key, &body);
+    RemoteRefs::Refs(refs)
+}
+
+/// 在 refs 里解析某个 ref 指向的提交（缺省 = HEAD）
+pub fn ref_sha(refs: &[(String, String)], git_ref: Option<&str>) -> Option<String> {
+    let r = git_ref.map(str::trim).filter(|r| !r.is_empty());
+    match r {
+        None => refs
+            .iter()
+            .find(|(_, n)| n == "HEAD")
+            .or_else(|| refs.iter().find(|(_, n)| n.starts_with("refs/heads/")))
+            .map(|(s, _)| s.clone()),
+        Some(name) if name.len() == 40 && name.chars().all(|c| c.is_ascii_hexdigit()) => {
+            Some(name.to_string())
+        }
+        Some(name) => {
+            let candidates = [
+                name.to_string(),
+                format!("refs/heads/{name}"),
+                format!("refs/tags/{name}"),
+                format!("refs/tags/{name}^{{}}"),
+            ];
+            candidates
+                .iter()
+                .find_map(|c| refs.iter().find(|(_, n)| n == c).map(|(s, _)| s.clone()))
+        }
+    }
+}
+
+/// 查询 GitHub 仓库某 ref（缺省默认分支）的最新提交 SHA（不可匿名访问返回 None）。
+///
+/// 通道顺序（都要快，任何一条都不该让调用方等超过 ~6s）：
+/// 1. 自实现 git 智能 HTTP 的 ref 发现（~0.5s，免额度，不依赖 git 二进制）；
+/// 2. `api.github.com/commits`（额度守卫，结果混用也会被 60s 缓存吸收）；
+/// 3. `git ls-remote`（6s 上限，仅当前两者都不可用时兜底）。
 pub async fn github_head_commit(
     owner: &str,
     repo: &str,
     git_ref: Option<&str>,
+    token: Option<&str>,
 ) -> Result<Option<String>, String> {
-    let url = match git_ref {
+    if let Some(r) = git_ref {
+        if r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(Some(r.to_string()));
+        }
+    }
+    let key = format!("head:{owner}/{repo}#{}", git_ref.unwrap_or(""));
+    if let Some(hit) = cache_get(&key, Duration::from_secs(60)) {
+        return Ok(if hit == "-" { None } else { Some(hit) });
+    }
+    // ① 自实现 ref 发现
+    match discover_refs(owner, repo, token).await {
+        RemoteRefs::Refs(refs) => {
+            let sha = ref_sha(&refs, git_ref);
+            if let Some(s) = &sha {
+                cache_put(&key, s);
+                return Ok(Some(s.clone()));
+            }
+            // refs 拿到了但没有匹配的 ref（例如传了不存在的分支）
+            return Ok(None);
+        }
+        RemoteRefs::NotPublic => {
+            cache_put(&key, "-");
+            return Ok(None);
+        }
+        RemoteRefs::Unknown(_) => {}
+    }
+    // ② REST API
+    let api = match git_ref {
         Some(r) => format!("https://api.github.com/repos/{owner}/{repo}/commits/{r}"),
         None => format!("https://api.github.com/repos/{owner}/{repo}/commits?per_page=1"),
     };
-    let resp = http_client()?
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("请求 GitHub 提交信息失败: {e}"))?;
-    let status = resp.status();
-    if status.as_u16() == 404 {
-        return Ok(None);
+    if let Ok((status, json)) = api_get_json(&api, token).await {
+        if status == 404 {
+            return Ok(None);
+        }
+        if (200..300).contains(&status) {
+            let sha = match &json {
+                serde_json::Value::Array(arr) => arr
+                    .first()
+                    .and_then(|c| c.get("sha"))
+                    .and_then(|v| v.as_str()),
+                obj => obj.get("sha").and_then(|v| v.as_str()),
+            };
+            if let Some(s) = sha {
+                cache_put(&key, s);
+            }
+            return Ok(sha.map(String::from));
+        }
     }
-    if !status.is_success() {
-        return Err(format!("GitHub API 返回 {status}（可能有速率限制，稍后再试）"));
+    // ③ git 二进制兜底（6s 上限）
+    let url = format!("https://github.com/{owner}/{repo}.git");
+    match crate::plugin::git_remote_head(&url, git_ref) {
+        Ok(sha) => {
+            cache_put(&key, &sha);
+            Ok(Some(sha))
+        }
+        Err(e) => {
+            if crate::plugin::looks_like_auth_error(&e) || crate::plugin::looks_like_missing_repo(&e)
+            {
+                Ok(None)
+            } else {
+                Err(format!("无法读取远端提交：{}", e.lines().next().unwrap_or("")))
+            }
+        }
     }
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("解析 GitHub 提交响应失败: {e}"))?;
-    // /commits/{ref} 返回单对象；/commits?per_page=1 返回数组
-    let sha = match &json {
-        serde_json::Value::Array(arr) => arr
-            .first()
-            .and_then(|c| c.get("sha"))
-            .and_then(|v| v.as_str()),
-        obj => obj.get("sha").and_then(|v| v.as_str()),
-    };
-    Ok(sha.map(String::from))
 }
 
-/// 拉取 GitHub 仓库公开信息并校验插件根目录的 lib/（未认证 API，供安装前预览）。
-/// 打包产物链接跳过 API 直接返回直装规格。
-pub async fn fetch_github_repo(repo_input: &str) -> Result<GitHubRepoInfo, String> {
+/// 仓库可访问性判定（三态：可用 / 不可匿名访问 / 无法判定）
+#[derive(Debug, Clone)]
+pub enum RepoAccess {
+    Public,
+    /// 私有仓库或不存在（GitHub 对二者都要求凭据）
+    NotPublic,
+    /// 网络/额度等原因无法判定——**不应该阻止用户安装**
+    Unknown(String),
+}
+
+/// 判定仓库是否可匿名访问。三条通道依次尝试，任何一条给出确定答案即返回；
+/// 都判不出来时返回 Unknown，让上层「先装了再说」而不是报错卡住。
+pub async fn repo_access(owner: &str, repo: &str, token: Option<&str>) -> RepoAccess {
+    let key = format!("access:{owner}/{repo}");
+    if let Some(hit) = cache_get(&key, Duration::from_secs(600)) {
+        return match hit.as_str() {
+            "public" => RepoAccess::Public,
+            "private" => RepoAccess::NotPublic,
+            other => RepoAccess::Unknown(other.to_string()),
+        };
+    }
+    // ① ref 发现（~0.5s，免额度）
+    #[allow(unused_assignments)]
+    let mut first_reason: Option<String> = None;
+    match discover_refs(owner, repo, token).await {
+        RemoteRefs::Refs(_) => {
+            cache_put(&key, "public");
+            return RepoAccess::Public;
+        }
+        RemoteRefs::NotPublic => {
+            cache_put(&key, "private");
+            return RepoAccess::NotPublic;
+        }
+        RemoteRefs::Unknown(reason) => first_reason = Some(reason),
+    }
+    // ② REST API（额度守卫）
+    match api_get_json(&format!("https://api.github.com/repos/{owner}/{repo}"), token).await {
+        Ok((200..=299, _)) => {
+            cache_put(&key, "public");
+            RepoAccess::Public
+        }
+        Ok((404, _)) => {
+            cache_put(&key, "private");
+            RepoAccess::NotPublic
+        }
+        Ok((status, _)) => {
+            RepoAccess::Unknown(format!("GitHub API 返回 {status}（ref 发现：{}）", first_reason.unwrap_or_else(|| "未知".into())))
+        }
+        Err(e) => RepoAccess::Unknown(if first_reason.is_some() {
+            format!("{e}（ref 发现：{}）", first_reason.unwrap_or_default())
+        } else {
+            e
+        }),
+    }
+}
+
+/// 预检一个 git 远端地址（GitHub 走自实现 ref 发现 / 其它主机走 git ls-remote）
+pub async fn probe_remote_access(url: &str, token: Option<&str>) -> RepoAccess {
+    if let Some(spec) = parse_github_spec(url) {
+        if spec.tarball_url.is_none() && !spec.owner.is_empty() && !spec.repo.is_empty() {
+            return repo_access(&spec.owner, &spec.repo, token).await;
+        }
+    }
+    let owned = url.to_string();
+    match tauri::async_runtime::spawn_blocking(move || {
+        crate::plugin::git_remote_head(&owned, None)
+    })
+    .await
+    {
+        Ok(Ok(_)) => RepoAccess::Public,
+        Ok(Err(e)) => {
+            if crate::plugin::looks_like_auth_error(&e) || crate::plugin::looks_like_missing_repo(&e)
+            {
+                RepoAccess::NotPublic
+            } else {
+                RepoAccess::Unknown(crate::plugin::probe_error_hint(&e))
+            }
+        }
+        Err(e) => RepoAccess::Unknown(format!("预检失败: {e}")),
+    }
+}
+
+/// 私有仓库/不存在的仓库的统一拒绝话术（GitHub 对二者都返回 404）
+pub fn private_repo_reject(owner: &str, repo: &str) -> String {
+    format!(
+        "仓库 {owner}/{repo} 不存在或为私有仓库。\
+         暂不支持私有仓库：请手动 git clone 到本地后，用「链接 / 本地」标签页的 link 路径安装"
+    )
+}
+
+/// 拉取 GitHub 仓库公开信息并**全量探测**其中的插件包（安装前预览）。
+///
+/// 通道顺序（前两步完全不消耗 GitHub API 额度，60/小时 的限额因此基本不会被磨光）：
+/// 1. `git ls-remote` 解析用户指定的 ref 或默认分支的 HEAD sha（git 协议，免额度、最新）；
+/// 2. `data.jsdelivr.com` 按该 sha 取**整棵文件树** + `cdn.jsdelivr.net` 取各 package.json
+///    （CDN，免额度；按 sha 取还保证预览与安装到的是同一份提交）；
+/// 3. 仅在 jsDelivr 不可用时回落到 `api.github.com/git/trees`（额度守卫）；
+/// 4. 再不行才降级为单目录 contents 探测。
+///
+/// 仓库元数据（stars / license / 描述）本来就只有 REST API 有：额度用完时
+/// `meta_degraded = true`，候选列表照常给出。
+pub async fn fetch_github_repo(
+    repo_input: &str,
+    token: Option<&str>,
+) -> Result<GitHubRepoInfo, String> {
     let spec = parse_github_spec(repo_input)
         .ok_or_else(|| format!("无法识别 GitHub 来源：「{repo_input}」（示例 owner/repo 或打包产物链接）"))?;
     if let Some(url) = &spec.tarball_url {
@@ -451,75 +1298,553 @@ pub async fn fetch_github_repo(repo_input: &str) -> Result<GitHubRepoInfo, Strin
             lib_ok: None,
             plugin_path: None,
             git_ref: None,
+            default_branch: None,
+            is_monorepo: false,
+            workspace_globs: Vec::new(),
+            candidates: Vec::new(),
+            probe: "tarball".into(),
+            meta_degraded: false,
+            facts_pending: false,
             description: None,
             stars: 0,
             pushed_at: None,
             license: None,
         });
     }
-    let (owner, repo) = (&spec.owner, &spec.repo);
-    let client = http_client()?;
-    let resp = client
-        .get(format!("https://api.github.com/repos/{owner}/{repo}"))
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("请求 GitHub API 失败: {e}"))?;
-    let status = resp.status();
-    if status.as_u16() == 404 {
-        return Err(format!("仓库 {owner}/{repo} 不存在或为私有仓库"));
-    }
-    if !status.is_success() {
-        return Err(format!("GitHub API 返回 {status}（可能有速率限制，稍后再试）"));
-    }
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("解析 GitHub 响应失败: {e}"))?;
-    let license = json
-        .get("license")
-        .and_then(|l| l.get("spdx_id"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty() && *s != "NOASSERTION")
-        .map(String::from);
-    let full_name = json
-        .get("full_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&format!("{owner}/{repo}"))
-        .to_string();
-    let html_url = json
-        .get("html_url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("https://github.com/{owner}/{repo}"));
+    let (owner, repo) = (spec.owner.clone(), spec.repo.clone());
+    let content = content_client();
 
-    // 规范校验：插件根目录（子路径或仓库根）下必须有 lib/ 目录，否则 dsh 无法正常安装
-    let lib_ok = check_lib_dir(&client, owner, repo, spec.plugin_path.as_deref(), spec.git_ref.as_deref()).await;
-
-    // 安装规格：github:owner/repo[#ref][&path:xx]（与 pnpm parseGitParams 对齐）
-    let mut fragment: Vec<String> = Vec::new();
-    if let Some(r) = &spec.git_ref {
-        fragment.push(r.clone());
-    }
-    if let Some(p) = &spec.plugin_path {
-        fragment.push(format!("path:{p}"));
-    }
-    let install_spec = match fragment.is_empty() {
-        true => format!("github:{owner}/{repo}"),
-        false => format!("github:{owner}/{repo}#{}", fragment.join("&")),
+    // ── ① 解析 ref / HEAD sha（免额度） ──
+    let head = github_head_commit(&owner, &repo, spec.git_ref.as_deref(), token).await;
+    let (head_sha, head_known) = match head {
+        Ok(Some(s)) => (Some(s), true),
+        Ok(None) => (None, true),
+        Err(_) => (None, false),
     };
 
+    // ── ② 文件树：jsDelivr(sha) → jsDelivr(ref) → API → contents ──
+    let mut probe = String::from("jsdelivr");
+    let mut default_branch: Option<String> = None;
+    let mut tree: Option<FileTree> = None;
+    // 先用用户指定的 ref 或 HEAD sha（两者都拿不到时再试 main / master）
+    for cand in [spec.git_ref.clone(), head_sha.clone()].into_iter().flatten() {
+        if let Some((t, d)) = jsdelivr_tree(&owner, &repo, &cand).await {
+            default_branch = d.or(default_branch);
+            tree = Some(t);
+            break;
+        }
+    }
+    if tree.is_none() {
+        // 默认分支名可以从 jsDelivr 探一次（它自己的元数据），拿不到就试 main / master
+        for cand in ["main", "master"] {
+            if let Some((t, d)) = jsdelivr_tree(&owner, &repo, cand).await {
+                default_branch = d.or(Some(cand.to_string()));
+                tree = Some(t);
+                break;
+            }
+        }
+    }
+    if tree.is_none() {
+        if let Some(sha) = &head_sha {
+            if let Some((t, d)) = jsdelivr_tree(&owner, &repo, sha).await {
+                default_branch = d.or(default_branch);
+                tree = Some(t);
+            }
+        }
+    }
+    if tree.is_none() {
+        probe = "api".into();
+        if let Some(t) = fetch_tree_api(&owner, &repo, spec.git_ref.as_deref(), token).await {
+            tree = Some(t);
+        }
+    }
+
+    // ── ③ 元数据（额度用尽即降级，不影响探测结果） ──
+    let mut meta_degraded = false;
+    let mut meta = serde_json::Value::Null;
+    match api_get_json(&format!("https://api.github.com/repos/{owner}/{repo}"), token).await {
+        Ok((status, json)) if (200..300).contains(&status) => {
+            meta = json;
+            if default_branch.is_none() {
+                default_branch = meta
+                    .get("default_branch")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            }
+        }
+        Ok(_) => meta_degraded = true,
+        Err(_) => meta_degraded = true,
+    }
+    let git_ref = spec.git_ref.clone().or_else(|| default_branch.clone());
+    // 内容/树读取用的 rev：**优先分支名或标签**——jsDelivr 对 branch/tag 是稳定路径
+    // （实测 0.5~2s），而 github.com 与 commit 解析在本机会间歇性不可达，
+    // 走 sha 会把每个文件都拖到慢速兜底源上（一个探测 30s+）。
+    let rev = git_ref
+        .clone()
+        .or_else(|| head_sha.clone())
+        .unwrap_or_else(|| "main".into());
+
+    if tree.is_none() {
+        // ── ④ 彻底降级：单目录 contents 探测 ──
+        probe = "contents".into();
+        let target = spec.plugin_path.clone().unwrap_or_default();
+        let lib_ok = check_lib_dir(
+            &content,
+            &owner,
+            &repo,
+            if target.is_empty() { None } else { Some(target.as_str()) },
+            git_ref.as_deref(),
+            token,
+        )
+        .await;
+        let mut cand = PluginCandidate::root();
+        cand.path = target.clone();
+        cand.lib_ok = lib_ok.unwrap_or(false);
+        cand.install_spec = github_install_spec(&owner, &repo, git_ref.as_deref(), &target);
+        let spec_text = github_install_spec(&owner, &repo, git_ref.as_deref(), &target);
+        return Ok(GitHubRepoInfo {
+            full_name: format!("{owner}/{repo}"),
+            description: None,
+            stars: 0,
+            pushed_at: None,
+            html_url: format!("https://github.com/{owner}/{repo}"),
+            license: None,
+            plugin_path: Some(target),
+            lib_ok: lib_ok,
+            git_ref,
+            default_branch,
+            is_monorepo: false,
+            workspace_globs: Vec::new(),
+            candidates: vec![cand],
+            probe,
+            meta_degraded,
+            facts_pending: true,
+            install_spec: spec_text,
+        });
+    }
+    let tree = tree.expect("tree 已在上面的分支里保证存在");
+    if probe == "jsdelivr" && tree.is_empty() {
+        probe = "api".into();
+    }
+
+    // ── ⑤ monorepo：workspace 成员 glob ──
+    let mut workspace_globs: Vec<String> = Vec::new();
+    let mut root_facts = PkgFacts::default();
+    if tree.has_blob("package.json") {
+        if let Some(t) = fetch_file(&content, &owner, &repo, &rev, "package.json").await {
+            root_facts = parse_pkg_facts(&t);
+        }
+    }
+    for ws_file in ["pnpm-workspace.yaml", "pnpm-workspace.yml"] {
+        if tree.has_blob(ws_file) {
+            if let Some(text) = fetch_file(&content, &owner, &repo, &rev, ws_file).await {
+                workspace_globs = parse_pnpm_workspace(&text);
+                if !workspace_globs.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+    if workspace_globs.is_empty() {
+        workspace_globs = root_facts.workspaces.clone();
+    }
+
+    // ── ⑥ 候选包：workspace 成员优先，抓 package.json 判定 dsh.bundle ──
+    let mut ordered = dir_list_ordered(&tree, &workspace_globs);
+    if let Some(p) = &spec.plugin_path {
+        let p = p.trim().trim_matches('/').to_string();
+        ordered.retain(|(d, _)| *d == p);
+        if ordered.is_empty() {
+            ordered.push((p, true));
+        }
+    }
+    let cap = if spec.plugin_path.is_some() { 1 } else { 20 };
+    let take: Vec<(String, bool)> = ordered.into_iter().take(cap).collect();
+    let pkg_paths: Vec<String> = take
+        .iter()
+        .map(|(d, _)| {
+            if d.is_empty() {
+                "package.json".to_string()
+            } else {
+                format!("{d}/package.json")
+            }
+        })
+        .collect();
+    let fetched = fetch_files_concurrent(&owner, &repo, &rev, pkg_paths).await;
+
+    let mut facts_pending = false;
+    let mut candidates: Vec<PluginCandidate> = Vec::new();
+    for (dir, ws) in take {
+        let pkg_path = if dir.is_empty() {
+            "package.json".to_string()
+        } else {
+            format!("{dir}/package.json")
+        };
+        let facts = match fetched.get(&pkg_path) {
+            Some(t) => parse_pkg_facts(t),
+            None => {
+                facts_pending = true;
+                PkgFacts::default()
+            }
+        };
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        let lib_ok = lib_dir_in_tree(&tree, &prefix);
+        let has_patch = tree.has_blob(&format!("{prefix}cordis.patch.yml"))
+            || tree.has_blob(&format!("{prefix}cordis.patch.yaml"));
+        let has_bundle = facts.bundle_patch.is_some();
+        candidates.push(PluginCandidate {
+            path: dir.clone(),
+            name: facts.name.clone(),
+            version: facts.version.clone(),
+            description: facts.description.clone(),
+            lib_ok,
+            has_bundle,
+            has_patch,
+            workspace_member: ws,
+            ready: has_bundle,
+            install_spec: github_install_spec(&owner, &repo, git_ref.as_deref(), &dir),
+        });
+    }
+    candidates.sort_by(|a, b| {
+        b.ready
+            .cmp(&a.ready)
+            .then(b.lib_ok.cmp(&a.lib_ok))
+            .then(b.workspace_member.cmp(&a.workspace_member))
+            .then(depth_of(&a.path).cmp(&depth_of(&b.path)))
+            .then(a.path.cmp(&b.path))
+    });
+    candidates.dedup_by(|a, b| a.path == b.path);
+
+    let is_monorepo = !workspace_globs.is_empty();
+    let first = candidates.first().cloned().unwrap_or_else(PluginCandidate::root);
+    let install_spec = if first.install_spec.is_empty() {
+        github_install_spec(&owner, &repo, git_ref.as_deref(), "")
+    } else {
+        first.install_spec.clone()
+    };
+    let _ = head_known;
+
     Ok(GitHubRepoInfo {
-        full_name,
-        description: json.get("description").and_then(|v| v.as_str()).map(String::from),
-        stars: json.get("stargazers_count").and_then(|v| v.as_u64()).unwrap_or(0),
-        pushed_at: json.get("pushed_at").and_then(|v| v.as_str()).map(String::from),
-        html_url,
-        license,
-        git_ref: spec.git_ref,
-        plugin_path: spec.plugin_path,
-        lib_ok,
+        full_name: meta
+            .get("full_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&format!("{owner}/{repo}"))
+            .to_string(),
+        description: meta
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| root_facts.description.clone()),
+        stars: meta.get("stargazers_count").and_then(|v| v.as_u64()).unwrap_or(0),
+        pushed_at: meta.get("pushed_at").and_then(|v| v.as_str()).map(String::from),
+        html_url: meta
+            .get("html_url")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| format!("https://github.com/{owner}/{repo}")),
+        license: meta
+            .get("license")
+            .and_then(|l| l.get("spdx_id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && *s != "NOASSERTION")
+            .map(String::from),
+        plugin_path: Some(first.path.clone()),
+        lib_ok: if candidates.is_empty() { None } else { Some(first.lib_ok) },
+        git_ref,
+        default_branch,
+        is_monorepo,
+        workspace_globs,
+        candidates,
+        probe,
+        meta_degraded,
+        facts_pending,
         install_spec,
+    })
+}
+
+/// 由 (owner, repo, ref, 仓库内路径) 构造 pnpm 安装规格
+pub fn github_install_spec(owner: &str, repo: &str, git_ref: Option<&str>, path: &str) -> String {
+    let mut fragment: Vec<String> = Vec::new();
+    if let Some(r) = git_ref.filter(|r| !r.is_empty()) {
+        fragment.push(r.to_string());
+    }
+    let p = path.trim().trim_matches('/');
+    if !p.is_empty() {
+        fragment.push(format!("path:{p}"));
+    }
+    match fragment.is_empty() {
+        true => format!("github:{owner}/{repo}"),
+        false => format!("github:{owner}/{repo}#{}", fragment.join("&")),
+    }
+}
+
+fn depth_of(path: &str) -> usize {
+    if path.is_empty() {
+        0
+    } else {
+        path.split('/').filter(|s| !s.is_empty()).count()
+    }
+}
+
+/// 探测时忽略的目录片段（依赖 / 构建产物 / 版本库）
+fn is_ignored_path(path: &str) -> bool {
+    const BAD: &[&str] = &[
+        "node_modules",
+        ".git",
+        ".github",
+        "dist",
+        "build",
+        "coverage",
+        ".next",
+        ".cache",
+        ".turbo",
+        "tmp",
+        "__fixtures__",
+        "fixtures",
+    ];
+    path.split('/').any(|seg| BAD.contains(&seg))
+}
+
+/// 列出树中所有含 package.json 的目录（workspace 成员优先、浅层优先）
+fn dir_list_ordered(tree: &FileTree, globs: &[String]) -> Vec<(String, bool)> {
+    let mut dirs: Vec<String> = Vec::new();
+    for b in tree.blobs.iter() {
+        if !b.ends_with("/package.json") && b.as_str() != "package.json" {
+            continue;
+        }
+        let dir = match b.strip_suffix("/package.json") {
+            Some(d) => d.to_string(),
+            None => String::new(),
+        };
+        if is_ignored_path(&dir) {
+            continue;
+        }
+        dirs.push(dir);
+    }
+    dirs.sort();
+    dirs.dedup();
+    let mut out: Vec<(String, bool)> = dirs
+        .into_iter()
+        .map(|d| {
+            let ws = workspace_hit(globs, &d);
+            (d, ws)
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then(depth_of(&a.0).cmp(&depth_of(&b.0)))
+            .then(a.0.cmp(&b.0))
+    });
+    out
+}
+
+/// 树里 `<prefix>lib/` 是否存在且有构建产物（.js/.cjs/.mjs）
+fn lib_dir_in_tree(tree: &FileTree, prefix: &str) -> bool {
+    let lib = format!("{prefix}lib");
+    if !tree.has_dir(&lib) && !tree.blobs.iter().any(|b| b.starts_with(&format!("{lib}/"))) {
+        return false;
+    }
+    tree.blobs
+        .iter()
+        .any(|b| b.starts_with(&format!("{lib}/")) && is_js_file(b))
+}
+
+fn is_js_file(p: &str) -> bool {
+    p.ends_with(".js") || p.ends_with(".cjs") || p.ends_with(".mjs")
+}
+
+/// 兜底通道：GitHub REST 的文件树（额度守卫；jsDelivr 不可用时才走）
+async fn fetch_tree_api(
+    owner: &str,
+    repo: &str,
+    git_ref: Option<&str>,
+    token: Option<&str>,
+) -> Option<FileTree> {
+    let reference = git_ref.unwrap_or("HEAD");
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/git/trees/{reference}?recursive=1");
+    let (status, json) = api_get_json(&url, token).await.ok()?;
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    let arr = json.get("tree")?.as_array()?;
+    let files: Vec<String> = arr
+        .iter()
+        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("blob"))
+        .filter_map(|e| e.get("path").and_then(|v| v.as_str()))
+        .map(String::from)
+        .collect();
+    if files.is_empty() {
+        return None;
+    }
+    Some(FileTree::from_paths(files))
+}
+
+/// 带可选 query / Accept 的文本 GET（非 2xx 返回 None）
+async fn get_text(
+    client: &reqwest::Client,
+    url: &str,
+    query: Option<(&str, &str)>,
+    accept: Option<&str>,
+) -> Option<String> {
+    let mut req = client.get(url);
+    if let Some((k, v)) = query {
+        req = req.query(&[(k, v)]);
+    }
+    if let Some(a) = accept {
+        req = req.header("Accept", a);
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let text = resp.text().await.ok()?;
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// 内容/树抓取专用客户端：单请求 6s 上限，慢源快速失败切换到下一个源
+fn content_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap_or_default()
+}
+
+// ── 本地目录探测（本地 link 安装 / 克隆仓库清单共用） ──────
+
+/// 探测本地目录里的插件包：目录本身 + monorepo（pnpm-workspace / workspaces）子包。
+/// 与 GitHub 侧使用同一套判定规则（dsh.bundle / lib/ / cordis.patch.yml）。
+pub fn probe_local_plugins(root: &Path) -> Result<Vec<PluginCandidate>, String> {
+    if !root.is_dir() {
+        return Err(format!("目录不存在：{}", root.display()));
+    }
+    let root_pkg_path = root.join("package.json");
+    let root_facts = std::fs::read_to_string(&root_pkg_path)
+        .ok()
+        .map(|t| parse_pkg_facts(&t))
+        .unwrap_or_default();
+
+    // workspace glob：pnpm-workspace.yaml 优先，其次 package.json workspaces
+    let mut globs: Vec<String> = Vec::new();
+    for f in ["pnpm-workspace.yaml", "pnpm-workspace.yml"] {
+        if let Ok(text) = std::fs::read_to_string(root.join(f)) {
+            globs = parse_pnpm_workspace(&text);
+            if !globs.is_empty() {
+                break;
+            }
+        }
+    }
+    if globs.is_empty() {
+        globs = root_facts.workspaces.clone();
+    }
+
+    // 候选目录：根 + 深度 ≤ 4 内含 package.json 的目录（跳过依赖/产物）
+    let mut dirs: Vec<PathBuf> = vec![root.to_path_buf()];
+    collect_pkg_dirs(root, 0, 4, &mut dirs);
+    dirs.sort();
+    dirs.dedup();
+
+    let mut out = Vec::new();
+    for dir in dirs {
+        let rel = dir
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let rel_trim = rel.trim_matches('/').to_string();
+        if !rel_trim.is_empty() && is_ignored_path(&rel_trim) {
+            continue;
+        }
+        let facts = std::fs::read_to_string(dir.join("package.json"))
+            .ok()
+            .map(|t| parse_pkg_facts(&t))
+            .unwrap_or_default();
+        let lib_ok = lib_dir_ok(&dir);
+        let has_patch =
+            dir.join("cordis.patch.yml").is_file() || dir.join("cordis.patch.yaml").is_file();
+        let has_bundle = facts.bundle_patch.is_some();
+        let ws = (rel_trim.is_empty() && globs.is_empty()) || workspace_hit(&globs, &rel_trim);
+        // 根目录若是普通包（无 bundle、无 lib、无 name）且不是 workspace 成员，不算候选
+        if rel_trim.is_empty() && !has_bundle && !lib_ok && facts.name.is_none() {
+            continue;
+        }
+        out.push(PluginCandidate {
+            path: rel_trim.clone(),
+            name: facts.name.clone(),
+            version: facts.version.clone(),
+            description: facts.description.clone(),
+            lib_ok,
+            has_bundle,
+            has_patch,
+            workspace_member: ws,
+            ready: has_bundle,
+            install_spec: format!("link:{}", dir.to_string_lossy()),
+        });
+    }
+
+    out.sort_by(|a, b| {
+        b.ready
+            .cmp(&a.ready)
+            .then(b.lib_ok.cmp(&a.lib_ok))
+            .then(b.workspace_member.cmp(&a.workspace_member))
+            .then(depth_of(&a.path).cmp(&depth_of(&b.path)))
+            .then(a.path.cmp(&b.path))
+    });
+    Ok(out)
+}
+
+/// 递归收集含 package.json 的目录（跳过依赖/构建产物，限制深度与数量）
+fn collect_pkg_dirs(dir: &Path, depth: usize, max_depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > max_depth || out.len() > 400 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || is_ignored_path(&name) {
+            continue;
+        }
+        if p.join("package.json").is_file() {
+            out.push(p.clone());
+        }
+        collect_pkg_dirs(&p, depth + 1, max_depth, out);
+    }
+}
+
+/// 本地 lib/ 校验：目录存在且有 .js/.cjs/.mjs（导出给更新检测判断是否需要重新构建）
+pub fn local_lib_ok(dir: &Path) -> bool {
+    lib_dir_ok(dir)
+}
+
+/// 本地 lib/ 校验：目录存在且有 .js/.cjs/.mjs
+fn lib_dir_ok(dir: &Path) -> bool {
+    let lib = dir.join("lib");
+    if !lib.is_dir() {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(&lib) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let p = e.path();
+        p.is_file()
+            && p.extension()
+                .and_then(|x| x.to_str())
+                .map(|x| matches!(x, "js" | "cjs" | "mjs"))
+                .unwrap_or(false)
     })
 }
 
@@ -530,6 +1855,7 @@ async fn check_lib_dir(
     repo: &str,
     plugin_path: Option<&str>,
     git_ref: Option<&str>,
+    _token: Option<&str>,
 ) -> Option<bool> {
     let mut url = match plugin_path {
         Some(p) => format!("https://api.github.com/repos/{owner}/{repo}/contents/{}", 
@@ -560,10 +1886,77 @@ async fn check_lib_dir(
         .any(|e| e.get("name").and_then(|v| v.as_str()) == Some("lib")
             && e.get("type").and_then(|v| v.as_str()) == Some("dir")))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_repo_message_guides_manual_clone() {
+        let m = private_repo_reject("Yinxe", "dsh-qqbot");
+        assert!(m.contains("不存在或为私有仓库"));
+        assert!(m.contains("暂不支持私有仓库"));
+        assert!(m.contains("git clone"));
+        assert!(m.contains("link"));
+    }
+
+    /// 关键回归：GitHub API 额度耗尽时，探测必须仍然可用（走 jsDelivr + git 免额度通道）。
+    ///
+    /// 需要外网（jsDelivr）；网络不可达时跳过，不视为失败。
+    #[test]
+    fn probe_works_without_api_quota() {
+        let rl = rate_limit();
+        println!("额度状态: {rl:?}");
+        let info = match tauri::async_runtime::block_on(fetch_github_repo(
+            "Yinxe/deepseek-harness-plugins",
+            None,
+        )) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("跳过：探测失败（网络不可达？）{e}");
+                return;
+            }
+        };
+        if info.candidates.is_empty() {
+            eprintln!("跳过：CDN 未返回候选（网络不可达？）probe={}", info.probe);
+            return;
+        }
+        println!(
+            "probe={} meta_degraded={} mono={} globs={:?} 候选={}",
+            info.probe,
+            info.meta_degraded,
+            info.is_monorepo,
+            info.workspace_globs,
+            info.candidates.len()
+        );
+        for c in info.candidates.iter().take(12) {
+            println!("  {:?} {:?} v={:?} ready={} lib={}", c.path, c.name, c.version, c.ready, c.lib_ok);
+        }
+        assert!(!info.candidates.is_empty(), "额度耗尽也应探到候选包");
+        assert!(info.candidates.iter().any(|c| c.path == "plugins/token-meter"), "应含 token-meter");
+        assert_eq!(info.probe, "jsdelivr", "应走免额度通道");
+        // 元数据只依赖 GitHub API：额度已知耗尽时必须标记降级且照常出候选
+        if rl.exhausted {
+            assert!(info.meta_degraded, "额度耗尽时元数据应标记为降级");
+        }
+        // 首次探测里那次「元数据增强」撞上 403 后，额度状态即被记为耗尽；
+        // 之后的探测不会再发任何 API 请求（api_budget_guard 直接短路）
+        let after = rate_limit();
+        println!("探测后额度: {after:?}");
+        if after.exhausted {
+            let info2 = tauri::async_runtime::block_on(fetch_github_repo(
+                "Yinxe/deepseek-harness-plugins",
+                None,
+            ))
+            .expect("额度耗尽后第二次探测仍应成功");
+            assert_eq!(info2.probe, "jsdelivr");
+            assert!(!info2.candidates.is_empty());
+            assert_eq!(
+                rate_limit().remaining,
+                after.remaining,
+                "已知耗尽后不该再发 API 请求"
+            );
+        }
+    }
 
     #[test]
     fn parse_search_response_extracts_packages() {
@@ -654,5 +2047,64 @@ mod tests {
         ] {
             assert!(parse_github_spec(bad).is_none(), "bad={bad}");
         }
+    }
+
+    /// 本地探测：monorepo 的 pnpm-workspace 子包插件应被逐个发现并按「已就绪」排序
+    #[test]
+    fn probe_local_plugins_finds_monorepo_subpackages() {
+        let tmp = std::env::temp_dir().join(format!("dsh-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("package.json"),
+            r#"{"name":"monorepo","private":true}"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.join("pnpm-workspace.yaml"), "packages:\n  - 'plugins/*'\n").unwrap();
+
+        // 子包 A：完整插件（dsh.bundle + lib 产物 + patch）
+        let a = tmp.join("plugins/alpha");
+        std::fs::create_dir_all(a.join("lib")).unwrap();
+        std::fs::write(
+            a.join("package.json"),
+            r#"{"name":"@dshp/alpha","version":"1.2.3","description":"A","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(a.join("lib/host.js"), "export default {}").unwrap();
+        std::fs::write(a.join("cordis.patch.yml"), "- id: alpha\n").unwrap();
+
+        // 子包 B：只提交了源码，没有 lib（提示需要 clone+build）
+        let b = tmp.join("plugins/beta");
+        std::fs::create_dir_all(b.join("src")).unwrap();
+        std::fs::write(
+            b.join("package.json"),
+            r#"{"name":"@dshp/beta","version":"0.0.1","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        )
+        .unwrap();
+
+        // node_modules 里的包必须被忽略
+        let nm = tmp.join("node_modules/@x/y");
+        std::fs::create_dir_all(nm.join("lib")).unwrap();
+        std::fs::write(nm.join("package.json"), r#"{"name":"@x/y"}"#).unwrap();
+        std::fs::write(nm.join("lib/index.js"), "").unwrap();
+
+        let found = probe_local_plugins(&tmp).unwrap();
+        let paths: Vec<String> = found.iter().map(|c| c.path.clone()).collect();
+        assert!(paths.contains(&"plugins/alpha".to_string()), "paths={paths:?}");
+        assert!(paths.contains(&"plugins/beta".to_string()), "paths={paths:?}");
+        assert!(!paths.iter().any(|p| p.contains("node_modules")), "paths={paths:?}");
+
+        let alpha = found.iter().find(|c| c.path == "plugins/alpha").unwrap();
+        assert_eq!(alpha.name.as_deref(), Some("@dshp/alpha"));
+        assert_eq!(alpha.version.as_deref(), Some("1.2.3"));
+        assert!(alpha.has_bundle && alpha.lib_ok && alpha.ready && alpha.workspace_member);
+        assert!(alpha.install_spec.starts_with("link:"));
+
+        let beta = found.iter().find(|c| c.path == "plugins/beta").unwrap();
+        assert!(beta.has_bundle && !beta.lib_ok && beta.ready, "beta 应可安装但提示无 lib");
+        // 已就绪的排在前面
+        assert_eq!(found[0].path, "plugins/alpha");
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

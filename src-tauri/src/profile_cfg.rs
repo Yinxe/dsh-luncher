@@ -1,4 +1,3 @@
-use tauri::Emitter;
 use crate::settings::Settings;
 use crate::util;
 use serde::{Deserialize, Serialize};
@@ -77,14 +76,58 @@ fn profile_dir(profile: &str) -> Result<PathBuf, String> {
     Ok(profiles::profiles_dir().join(name))
 }
 
+/// 依赖来源分类（决定更新检测方式与前端徽标）
+/// npm=registry 包 / git=GitHub 等 git 规格 / tarball=打包产物直链 /
+/// git-clone=克隆到本地的仓库再 link / link=普通本地链接 / file / workspace
 fn source_of(version_value: Option<&str>) -> &'static str {
-    match version_value {
-        Some(v) if v.starts_with("link:") => "link",
-        Some(v) if v.starts_with("workspace:") => "workspace",
-        Some(v) if v.starts_with("file:") => "file",
-        Some(v) if v.starts_with("git+") || v.starts_with("github:") => "git",
-        _ => "npm",
+    let Some(v) = version_value else { return "npm" };
+    let v = v.trim();
+    if v.starts_with("workspace:") {
+        return "workspace";
     }
+    if v.starts_with("link:") || v.starts_with("file:") {
+        // 指向本地 git 工作树 = clone+link 安装 → 可用 git pull 更新
+        let is_git = crate::plugin::link_target(v)
+            .and_then(|p| find_git_root(&p))
+            .is_some();
+        return if is_git { "git-clone" } else { "link" };
+    }
+    if v.starts_with("http://") || v.starts_with("https://") {
+        if v.ends_with(".tgz")
+            || v.ends_with(".tar.gz")
+            || v.ends_with(".tar")
+            || v.contains("/releases/download/")
+        {
+            return "tarball";
+        }
+        return "link";
+    }
+    if v.starts_with("git+")
+        || v.starts_with("github:")
+        || v.starts_with("git@")
+        || v.contains(".git#")
+        || v.ends_with(".git")
+    {
+        return "git";
+    }
+    "npm"
+}
+
+/// 从某个本地路径向上查找 git 工作树根（含 .git 的最近祖先目录）
+pub fn find_git_root(path: &Path) -> Option<PathBuf> {
+    let start = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+    let mut cur: Option<&Path> = Some(&start);
+    while let Some(dir) = cur {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
 }
 
 /// 读取 profile 的插件与配置详情
@@ -694,85 +737,6 @@ pub fn resolve_dsh_bin(settings: &Settings) -> Result<(PathBuf, PathBuf), String
         .ok_or("该版本缺少 bin.js，无法执行插件命令")?;
     let node = util::find_node(settings).ok_or("未找到 Node.js，无法执行插件命令")?;
     Ok((node, PathBuf::from(bin_js)))
-}
-
-/// 后台执行官方插件命令（不阻塞），输出逐行以 plugin-log 事件回传
-pub fn start_plugin_cli(
-    app: tauri::AppHandle,
-    settings: &Settings,
-    profile: &str,
-    pnpm_args: &[&str],
-) -> Result<(), String> {
-    let (node, bin_js) = resolve_dsh_bin(settings)?;
-    let dir = profile_dir(profile)?;
-    if !dir.join("package.json").is_file() {
-        return Err("该 profile 尚未初始化（缺少 package.json），请先启动一次".into());
-    }
-    let profile = profile.to_string();
-    let args: Vec<String> = pnpm_args.iter().map(|s| s.to_string()).collect();
-    std::thread::spawn(move || {
-        use std::process::{Command, Stdio};
-        let emit_line = |line: &str, done: bool, ok: bool| {
-            let _ = app.emit(
-                "plugin-log",
-                serde_json::json!({ "profile": profile, "line": line, "done": done, "ok": ok }),
-            );
-        };
-        emit_line(&format!("$ dsh plugin --profile {} {}", profile, args.join(" ")), false, true);
-        let dsh_home = profiles::dsh_native_home().to_string_lossy().into_owned();
-        let mut child = Command::new(&node);
-        child
-            .arg(&bin_js)
-            .arg("plugin")
-            .arg("--profile")
-            .arg(&profile)
-            .args(&args)
-            .current_dir(&dir)
-            .env("DSH_HOME", dsh_home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        match child.output() {
-            Ok(o) => {
-                let text = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr)
-                );
-                for line in text.lines().filter(|l| !l.trim().is_empty()).take(40) {
-                    emit_line(line, false, true);
-                }
-                let ok = o.status.success();
-                emit_line(
-                    if ok { "✔ 完成" } else { "✘ 失败" },
-                    true,
-                    ok,
-                );
-            }
-            Err(e) => emit_line(&format!("✘ 执行失败: {e}"), true, false),
-        }
-    });
-    Ok(())
-}
-
-/// 卸载插件：官方命令 dsh plugin --profile <p> remove <pkg>（后台执行）
-pub fn uninstall_bundle(
-    app: tauri::AppHandle,
-    settings: &Settings,
-    profile: &str,
-    name: &str,
-) -> Result<(), String> {
-    start_plugin_cli(app, settings, profile, &["remove", name])
-}
-
-/// 安装插件：官方命令 dsh plugin --profile <p> add <pkg>（后台执行）
-pub fn install_bundle(
-    app: tauri::AppHandle,
-    settings: &Settings,
-    profile: &str,
-    name: &str,
-) -> Result<(), String> {
-    start_plugin_cli(app, settings, profile, &["add", name])
 }
 
 /// 读 profile 内的文本文件（cordis.patch.yml 可编辑；package.json 只读 —— 写入仍归 dsh plugin 命令管）
@@ -1512,7 +1476,7 @@ pub struct PluginUpdateInfo {
     /// package.json 里的原始规格（^1.2.3 / link:… / github:…）
     pub spec: String,
     pub has_update: bool,
-    /// 是否完成了检测（link/file/workspace 等本地源跳过）
+    /// 是否完成了检测（link/file/workspace 等无渠道来源为 false）
     pub checked: bool,
     /// npm：已安装版本 / registry latest
     pub installed_version: Option<String>,
@@ -1523,6 +1487,22 @@ pub struct PluginUpdateInfo {
     pub remote_commit: Option<String>,
     /// 可直接交给 `dsh plugin add` 的升级规格（npm=包名@latest；git=去 sha 的 github 规格）
     pub update_spec: Option<String>,
+    /// 升级方式：add（重新走 dsh plugin add）/ git-pull（先 pull 再重新 link）/ None（无渠道）
+    pub update_kind: Option<String>,
+    /// 本地 link 目标路径（link / git-clone 源）
+    pub local_path: Option<String>,
+    /// git 工作树根目录绝对路径（git-clone 源，更新走 git pull）
+    pub clone_dir: Option<String>,
+    /// 该 git 工作树是否由启动器克隆（落在 ~/.dsh-launcher/git-plugins 下）
+    pub managed_clone: Option<bool>,
+    /// 插件目录相对 git 根的路径（git-clone 源，重新 link 用）
+    pub sub_path: Option<String>,
+    /// git 工作树有未提交改动
+    pub dirty: Option<bool>,
+    /// link 目标目录里是否有构建产物（lib/*.js）；false = 升级时需要重新构建
+    pub lib_ok: Option<bool>,
+    /// 无渠道原因：no-channel（link/直链本就没有版本渠道）/ private-repo（私有仓库被拒绝）
+    pub blocked: Option<String>,
     pub note: Option<String>,
 }
 
@@ -1604,11 +1584,13 @@ pub fn find_git_commit_in_lock(lock_text: &str, dep_name: &str, repo_hint: &str)
 
 /// 检测 profile 全部直接依赖是否有新版本：
 /// - npm 源：已装版本（node_modules）vs registry `latest`，semver 比较；
-/// - GitHub 源：已解析提交（规格内嵌 sha → pnpm-lock.yaml 扫描）vs 远端 HEAD；
-/// - link/file/workspace 本地源跳过。
+/// - git 源（github:owner/repo）：已解析提交（规格内嵌 sha → pnpm-lock.yaml 扫描）vs 远端 HEAD；
+/// - git-clone 源（克隆到本地工作树再 link）：本地 HEAD vs 远端 HEAD，用 git pull 更新；
+/// - link/file/workspace/tarball：没有版本渠道，或私有仓库被拒绝（blocked 标明原因）。
 pub async fn check_plugin_updates(
     registry_base: &str,
     profile: &str,
+    github_token: Option<&str>,
 ) -> Result<Vec<PluginUpdateInfo>, String> {
     let deps = dependency_specs(profile)?;
     let lock = read_pnpm_lock(profile);
@@ -1624,6 +1606,7 @@ pub async fn check_plugin_updates(
             "npm" => {
                 info.installed_version = installed_version_of(profile, &d.name);
                 info.update_spec = Some(format!("{}@latest", d.name));
+                info.update_kind = Some("add".into());
                 match crate::registry::npm_latest_version(registry_base, &d.name).await {
                     Ok(latest) => {
                         info.latest_version = latest.clone();
@@ -1660,9 +1643,18 @@ pub async fn check_plugin_updates(
                         &spec.owner,
                         &spec.repo,
                         spec.git_ref.as_deref(),
+                        github_token,
                     )
                     .await
                     {
+                        // 404：私有仓库或不存在（GitHub API 对二者都返回 404）
+                        Ok(None) => {
+                            info.blocked = Some("private-repo".into());
+                            info.note = Some(format!(
+                                "{}/{} 不存在或为私有仓库：暂不支持私有仓库的更新检测；请在本地手动 clone + link 安装",
+                                spec.owner, spec.repo
+                            ));
+                        }
                         Ok(remote) => {
                             info.remote_commit = remote.clone();
                             info.checked = true;
@@ -1681,12 +1673,140 @@ pub async fn check_plugin_updates(
                         Err(e) => info.note = Some(e),
                     }
                     info.update_spec = crate::registry::github_upgrade_spec(&d.spec);
+                    info.update_kind = Some("add".into());
                 } else {
                     info.note = Some("非 GitHub 规格（通用 git 链接暂不支持检测）".into());
                 }
             }
+            "git-clone" => {
+                // 克隆到本地工作树再 link：本地 HEAD vs 远端 HEAD，更新方式 git pull
+                match crate::plugin::link_target(&d.spec) {
+                    None => info.note = Some("无法解析 link 目标路径".into()),
+                    Some(local) => {
+                        info.local_path = Some(local.to_string_lossy().into_owned());
+                        match find_git_root(&local) {
+                            None => info.note = Some("link 目标不是 git 工作树，跳过".into()),
+                            Some(git_root) => {
+                                info.clone_dir = Some(git_root.to_string_lossy().into_owned());
+                                info.managed_clone =
+                                    Some(crate::plugin::in_git_plugins(&git_root));
+                                info.sub_path = local
+                                    .strip_prefix(&git_root)
+                                    .ok()
+                                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                                    .filter(|s| !s.is_empty());
+                                info.update_spec = Some(format!("link:{}", local.to_string_lossy()));
+                                info.update_kind = Some("git-pull".into());
+                                info.dirty =
+                                    crate::plugin::git_output(&git_root, &["status", "--porcelain"])
+                                        .map(|s| !s.is_empty());
+                                // 本地工作树里没有构建产物 → 升级时要重新 install+build
+                                info.lib_ok = Some(crate::registry::local_lib_ok(&local));
+                                info.installed_commit =
+                                    crate::plugin::git_output(&git_root, &["rev-parse", "HEAD"]);
+                                let branch = crate::plugin::git_output(
+                                    &git_root,
+                                    &["rev-parse", "--abbrev-ref", "HEAD"],
+                                );
+                                let url = crate::plugin::git_output(
+                                    &git_root,
+                                    &["config", "--get", "remote.origin.url"],
+                                );
+                                if let Some(u) = &url {
+                                    info.repo = Some(github_repo_of(u));
+                                }
+                                match (&url, &branch) {
+                                    (Some(u), b) => {
+                                        // 远端最新提交：GitHub 走未认证 API（快、不受 git 网络挂起影响），
+                                        // 其它主机走非交互 git ls-remote（缺凭据立即失败，不弹登录）
+                                        let github = crate::registry::parse_github_spec(u).filter(
+                                            |sp| sp.tarball_url.is_none() && !sp.owner.is_empty(),
+                                        );
+                                        let remote: Result<Option<String>, String> = match &github {
+                                            Some(sp) => {
+                                                crate::registry::github_head_commit(
+                                                    &sp.owner,
+                                                    &sp.repo,
+                                                    b.as_deref(),
+                                                    github_token,
+                                                )
+                                                .await
+                                            }
+                                            None => crate::plugin::git_remote_head(u, b.as_deref())
+                                                .map(Some),
+                                        };
+                                        match remote {
+                                            Ok(Some(r)) => {
+                                                info.remote_commit = Some(r.clone());
+                                                info.checked = true;
+                                                match &info.installed_commit {
+                                                    Some(a) => {
+                                                        info.has_update = !r
+                                                            .to_ascii_lowercase()
+                                                            .starts_with(&a.to_ascii_lowercase())
+                                                    }
+                                                    None => {
+                                                        info.note = Some(
+                                                            "本地仓库没有提交记录".into(),
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            // GitHub API 404：私有仓库或仓库不存在，一律拒绝检测
+                                            Ok(None) => {
+                                                info.blocked = Some("private-repo".into());
+                                                info.note = Some(format!(
+                                                    "远端不可匿名访问（私有仓库或不存在）：暂不支持私有仓库的更新检测；\
+                                                     请在本地仓库手动 git pull 后重启实例（{}）",
+                                                    u
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                let line =
+                                                    e.lines().next().unwrap_or("").trim().to_string();
+                                                if crate::plugin::looks_like_auth_error(&e) {
+                                                    info.blocked = Some("private-repo".into());
+                                                    info.note = Some(format!(
+                                                        "{}（{}）",
+                                                        crate::plugin::PRIVATE_REPO_REJECT, line
+                                                    ));
+                                                } else if crate::plugin::looks_like_missing_repo(&e) {
+                                                    info.blocked = Some("private-repo".into());
+                                                    info.note = Some(format!(
+                                                        "远端不可匿名访问（私有仓库或不存在）：暂不支持私有仓库的更新检测；\
+                                                         请在本地仓库手动 git pull 后重启实例（{}）",
+                                                        line
+                                                    ));
+                                                } else {
+                                                    info.note =
+                                                        Some(format!("无法读取远端：{line}"));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    (None, _) => {
+                                        info.note = Some("本地仓库缺少 origin 远端".into())
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "tarball" => {
+                info.note = Some("打包产物直链没有版本渠道：需要重新安装同一链接（手动）".into());
+                info.blocked = Some("no-channel".into());
+                info.update_spec = Some(d.spec.clone());
+            }
+            "link" | "file" | "workspace" => {
+                info.local_path = crate::plugin::link_target(&d.spec)
+                    .map(|p| p.to_string_lossy().into_owned());
+                info.note = Some("本地源（link/file/workspace）不检测更新，改代码即时生效".into());
+                info.blocked = Some("no-channel".into());
+                info.update_spec = Some(d.spec.clone());
+            }
             _ => {
-                info.note = Some("本地源（link/file/workspace）不检测更新".into());
+                info.note = Some("未知来源，跳过检测".into());
             }
         }
         out.push(info);
@@ -1694,11 +1814,96 @@ pub async fn check_plugin_updates(
     Ok(out)
 }
 
+/// 从 git remote url 里提取 owner/repo（非 GitHub 返回原 url）
+fn github_repo_of(url: &str) -> String {
+    if let Some(spec) = crate::registry::parse_github_spec(url) {
+        if !spec.owner.is_empty() && !spec.repo.is_empty() {
+            return format!("{}/{}", spec.owner, spec.repo);
+        }
+    }
+    url.to_string()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::util::DSH_ENV_LOCK;
+
+    /// 回归：`link:` 指向一个**远端是私有仓库**的本地 clone 时，
+    /// 更新检测必须直接给出「私有仓库不支持」，既不能挂起也不能弹登录。
+    #[test]
+    fn private_clone_source_is_rejected() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-upd-priv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let clone = tmp.join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+
+        // 造一个本地 git 仓库，远端指向一个私有 GitHub 仓库（git ls-remote 会要凭据、API 会 404）
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&clone)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?} 失败");
+        };
+        git(&["init", "-q"]);
+        git(&["remote", "add", "origin", "https://github.com/Yinxe/dsh-qqbot.git"]);
+        std::fs::write(
+            clone.join("package.json"),
+            r#"{"name":"@dshp-inx/qqbot","version":"0.0.1","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(clone.join("cordis.patch.yml"), "- id: qqbot\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+
+        let dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("DSH_HOME", &tmp);
+        std::fs::write(
+            dir.join("package.json"),
+            format!(
+                r#"{{"name":"dsh-profile-web","dependencies":{{"@dshp-inx/qqbot":"link:{}"}},"dsh":{{"profile":{{"bundles":["@dshp-inx/qqbot"]}}}}}}"#,
+                clone.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let list = tauri::async_runtime::block_on(check_plugin_updates(
+            "https://registry.npmjs.org",
+            "web",
+            None,
+        ))
+        .unwrap();
+        let q = list.iter().find(|u| u.name == "@dshp-inx/qqbot").expect("应有该依赖");
+        assert_eq!(q.source, "git-clone");
+        let note = q.note.clone().unwrap_or_default();
+        // API 配额耗尽/网络不可达时跳过：这不代表分类逻辑坏了
+        if crate::plugin::api_unavailable(&note) {
+            eprintln!("跳过：GitHub API 不可用/被限流（{note}）");
+            std::env::remove_var("DSH_HOME");
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+        assert_eq!(q.blocked.as_deref(), Some("private-repo"), "note={note}");
+        assert!(!q.checked, "私有仓库不该被当成已检测");
+        assert!(note.contains("私有仓库"), "note={note}");
+        assert!(!note.contains("Username"), "不能把登录提示透出去：{note}");
+        // 给出可执行的下一步：本地手动 git pull
+        assert!(note.contains("git pull"), "note={note}");
+
+        std::env::remove_var("DSH_HOME");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 
     #[test]
     fn parse_dump_layers_extracts_bundle_ids() {

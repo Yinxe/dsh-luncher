@@ -31,6 +31,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Windows 走 IP Helper。纯 Rust 依赖、无 build.rs；刻意不用 netstat2 0.10+，
 # 因为它会在 Linux/macOS 引入 bindgen 构建依赖（要求装 libclang）。
 listeners = "0.6"
+# pnpm 失败分类用（dshmarket 的 pnpm-compat 思路；锁定文件里已有 1.13）
+regex = "1"
+
+[dev-dependencies]
+# mock_app：给插件任务运行器做「真起进程 + 真流式事件」的集成测试
+tauri = { version = "2", features = ["test"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

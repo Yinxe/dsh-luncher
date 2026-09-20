@@ -5,6 +5,8 @@ mod installer;
 mod launcher;
 mod modelcfg;
 mod netports;
+mod plugin;
+mod pnpm;
 mod profiles;
 mod procs;
 mod profile_cfg;
@@ -14,6 +16,7 @@ mod semver;
 mod settings;
 mod tray;
 mod update_check;
+mod verify;
 mod util;
 
 use tauri::{Manager, WindowEvent};
@@ -31,6 +34,7 @@ pub fn run() {
         })
         .manage(installer::InstallState::default())
         .manage(procs::ProcState::default())
+        .manage(plugin::PluginJobState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_environment,
             commands::get_settings,
@@ -57,8 +61,18 @@ pub fn run() {
             commands::get_profile_detail,
             commands::get_patch_reload,
             commands::set_bundle_enabled,
-            commands::uninstall_bundle,
-            commands::install_bundle,
+            commands::plugin_install,
+            commands::plugin_uninstall,
+            commands::plugin_pull_update,
+            commands::plugin_clone_install,
+            commands::list_plugin_jobs,
+            commands::cancel_plugin_job,
+            commands::clear_plugin_jobs,
+            commands::export_plugin_job_log,
+            commands::list_cloned_plugins,
+            commands::probe_local_plugins,
+            commands::delete_cloned_plugin,
+            commands::reveal_git_plugins_dir,
             commands::read_profile_file,
             commands::write_profile_file,
             commands::get_web_quick_config,
@@ -72,6 +86,7 @@ pub fn run() {
             commands::purge_deleted_profile,
             commands::search_registry_packages,
             commands::fetch_github_repo,
+            commands::get_github_rate_limit,
             commands::check_plugin_updates,
             commands::read_global_config,
             commands::write_global_config,

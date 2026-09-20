@@ -17,7 +17,13 @@ import type {
   PackageSearchItem,
   PluginUpdateInfo,
   GitHubRepoInfo,
+  GitHubRateLimit,
+  PluginCandidate,
+  PluginJob,
   PluginJobEvent,
+  PluginLogEvent,
+  ClonedPlugin,
+  CloneInstallInput,
   RegistryInfo,
   RuntimeFinishedEvent,
   RuntimeProgressEvent,
@@ -68,10 +74,50 @@ export const api = {
   getPatchReload: (profile: string) => invoke<string>("get_patch_reload", { profile }),
   setBundleEnabled: (profile: string, name: string, enabled: boolean) =>
     invoke<void>("set_bundle_enabled", { profile, name, enabled }),
-  uninstallBundle: (profile: string, name: string) =>
-    invoke<boolean>("uninstall_bundle", { profile, name }),
-  installBundle: (profile: string, name: string) =>
-    invoke<boolean>("install_bundle", { profile, name }),
+  // ── 插件管理：全部走官方 dsh plugin 命令，输出实时回流到内置终端 ──
+  /** 安装/升级插件（dsh plugin add，可一次多个规格），返回任务 id */
+  pluginInstall: (profile: string, specs: string[], mode: "install" | "upgrade" = "install") =>
+    invoke<number>("plugin_install", { profile, specs, mode }),
+  /** 卸载插件（dsh plugin remove），可选顺带删除本地克隆目录 */
+  pluginUninstall: (profile: string, name: string, purgeCloneDir?: string | null) =>
+    invoke<number>("plugin_uninstall", {
+      profile,
+      name,
+      purgeCloneDir: purgeCloneDir ?? null,
+    }),
+  /** 升级本地克隆插件：git pull →（可选）构建 → dsh plugin add link:… */
+  pluginPullUpdate: (
+    profile: string,
+    name: string,
+    cloneRoot: string,
+    subPath: string | null,
+    build: boolean,
+  ) =>
+    invoke<number>("plugin_pull_update", {
+      profile,
+      name,
+      cloneRoot,
+      subPath,
+      build,
+    }),
+  /** clone 仓库 + 本地 link 安装 */
+  pluginCloneInstall: (profile: string, input: CloneInstallInput) =>
+    invoke<number>("plugin_clone_install", { profile, input }),
+  /** 当前会话的全部插件任务（含日志尾部，用于重挂载恢复） */
+  listPluginJobs: () => invoke<PluginJob[]>("list_plugin_jobs"),
+  cancelPluginJob: (jobId: number) => invoke<boolean>("cancel_plugin_job", { jobId }),
+  clearPluginJobs: () => invoke<number>("clear_plugin_jobs"),
+  /** 导出某个任务的完整日志，返回文件路径 */
+  exportPluginJobLog: (jobId: number) =>
+    invoke<string>("export_plugin_job_log", { jobId }),
+  /** ~/.dsh-launcher/git-plugins 下的克隆仓库清单 */
+  listClonedPlugins: () => invoke<ClonedPlugin[]>("list_cloned_plugins"),
+  /** 探测本地目录里的插件包（monorepo 子包一并列出） */
+  probeLocalPlugins: (path: string) => invoke<PluginCandidate[]>("probe_local_plugins", { path }),
+  deleteClonedPlugin: (dirName: string) =>
+    invoke<void>("delete_cloned_plugin", { dirName }),
+  /** 取（并创建）git-plugins 目录路径，供在文件管理器中打开 */
+  gitPluginsDir: () => invoke<string>("reveal_git_plugins_dir"),
   readProfileFile: (profile: string, file: string) =>
     invoke<string>("read_profile_file", { profile, file }),
   writeProfileFile: (profile: string, file: string, content: string) =>
@@ -104,6 +150,8 @@ export const api = {
     invoke<PluginUpdateInfo[]>("check_plugin_updates", { profile }),
   fetchGithubRepo: (repo: string) =>
     invoke<GitHubRepoInfo>("fetch_github_repo", { repo }),
+  /** 当前 GitHub API 额度（元数据增强用；探测与更新检测走免额度通道） */
+  getGithubRateLimit: () => invoke<GitHubRateLimit>("get_github_rate_limit"),
   readGlobalConfig: () => invoke<string>("read_global_config"),
   writeGlobalConfig: (content: string) => invoke<void>("write_global_config", { content }),
   getModelConfig: () => invoke<ModelConfigInfo>("get_model_config"),
@@ -143,8 +191,10 @@ export const events = {
     listen<RuntimeProgressEvent>("runtime-progress", (e) => cb(e.payload)),
   onRuntimeFinished: (cb: (e: RuntimeFinishedEvent) => void): Promise<UnlistenFn> =>
     listen<RuntimeFinishedEvent>("runtime-finished", (e) => cb(e.payload)),
-  onPluginLog: (cb: (e: PluginJobEvent) => void): Promise<UnlistenFn> =>
-    listen<PluginJobEvent>("plugin-log", (e) => cb(e.payload)),
+  onPluginLog: (cb: (e: PluginLogEvent) => void): Promise<UnlistenFn> =>
+    listen<PluginLogEvent>("plugin-log", (e) => cb(e.payload)),
+  onPluginJob: (cb: (e: PluginJobEvent) => void): Promise<UnlistenFn> =>
+    listen<PluginJobEvent>("plugin-job", (e) => cb(e.payload)),
   onToast: (cb: (text: string) => void): Promise<UnlistenFn> =>
     listen<string>("toast", (e) => cb(e.payload)),
 };

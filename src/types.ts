@@ -74,6 +74,18 @@ export interface Settings {
   closeToTray: boolean;
   /** Profile 启动方式：child=子进程（随启动器退出）| detached=独立进程（后台常驻） */
   launchMode: string;
+  /** 可选 GitHub Token：只用于把 api.github.com 额度从 60/小时 提到 5000/小时 */
+  githubToken: string;
+}
+
+/** GitHub API 额度状态（探测/更新检测走免额度通道，这里只反映元数据额度） */
+export interface GitHubRateLimit {
+  limit: number | null;
+  remaining: number | null;
+  /** 额度重置的 unix 秒 */
+  reset: number | null;
+  authenticated: boolean;
+  exhausted: boolean;
 }
 
 export interface InstallLogEvent {
@@ -241,7 +253,29 @@ export interface PackageSearchItem {
   link: string | null;
 }
 
-/** GitHub 插件来源预览（安装前校验：插件根目录必须含 lib/） */
+/** 探测到的一个可安装插件包（仓库根 / monorepo 子包 / 本地目录子包共用） */
+export interface PluginCandidate {
+  /** 相对插件根目录的路径；"" = 根目录 */
+  path: string;
+  /** package.json 的 name（读不到时为 null） */
+  name: string | null;
+  version: string | null;
+  description: string | null;
+  /** lib/ 目录存在且含构建产物（.js/.cjs/.mjs） */
+  libOk: boolean;
+  /** package.json 声明了 dsh.bundle.patch —— dsh 会把它并入 profile 层 */
+  hasBundle: boolean;
+  /** 插件根目录内有 cordis.patch.yml */
+  hasPatch: boolean;
+  /** 命中 pnpm-workspace / workspaces 成员 glob */
+  workspaceMember: boolean;
+  /** 可以直接作为插件安装（声明了 dsh.bundle） */
+  ready: boolean;
+  /** 交给 dsh plugin add 的安装规格 */
+  installSpec: string;
+}
+
+/** GitHub 插件来源预览（安装前全量探测插件包：仓库根 + monorepo 子包） */
 export interface GitHubRepoInfo {
   fullName: string;
   description: string | null;
@@ -249,18 +283,33 @@ export interface GitHubRepoInfo {
   pushedAt: string | null;
   htmlUrl: string;
   license: string | null;
+  /** 实际用于探测/安装的 ref（缺省 = 仓库默认分支） */
   gitRef: string | null;
-  /** 插件在仓库内的路径（插件根目录） */
+  defaultBranch: string | null;
+  /** 仓库是否 monorepo（声明了 pnpm-workspace / workspaces） */
+  isMonorepo: boolean;
+  /** workspace 成员 glob（如 ["plugins/*"]） */
+  workspaceGlobs: string[];
+  /** 探测到的插件候选包 */
+  candidates: PluginCandidate[];
+  /** 探测方式：tree（全量扫描）| contents（限流降级）| tarball */
+  probe: string;
+  /** 有候选的 package.json 因超时未读取（名称/描述缺失，其余信息仍有效） */
+  factsPending: boolean;
+  /** 仓库元数据（stars/license/描述）因 GitHub API 额度不可用而缺失 */
+  metaDegraded: boolean;
+  /** 首个候选的路径（兼容字段） */
   pluginPath: string | null;
   /** lib/ 目录校验：true=已确认存在 false=确认缺失 null=未校验（打包产物直装） */
   libOk: boolean | null;
-  /** 最终交给 dsh plugin add 的安装规格（github:owner/repo#ref&path:xx 或打包产物 URL） */
+  /** 首个候选的安装规格（github:owner/repo#ref&path:xx 或打包产物 URL） */
   installSpec: string;
 }
 
-/** 插件更新检测结果（npm 比对版本号；GitHub 比对提交哈希；本地源跳过） */
+/** 插件更新检测结果（npm 比对版本号；GitHub 比对提交；本地克隆比对 git HEAD；纯本地/直链无渠道） */
 export interface PluginUpdateInfo {
   name: string;
+  /** npm | git | git-clone | tarball | link | file | workspace */
   source: string;
   spec: string;
   hasUpdate: boolean;
@@ -270,9 +319,97 @@ export interface PluginUpdateInfo {
   repo: string | null;
   installedCommit: string | null;
   remoteCommit: string | null;
-  /** 可直接交给 dsh plugin add 的升级规格（npm=包名@latest；git=去 sha 的 github 规格） */
+  /** 可交给 dsh plugin add 的升级规格（npm=包名@latest；git=去 sha 的 github 规格；clone=link:路径） */
   updateSpec: string | null;
+  /** 升级方式：add（重新走 dsh plugin add）/ git-pull（先 pull 再重新 link）/ null（无渠道） */
+  updateKind: "add" | "git-pull" | null;
+  /** 本地 link 目标路径 */
+  localPath: string | null;
+  /** git 工作树根绝对路径（git-clone 源） */
+  cloneDir: string | null;
+  /** 该工作树是否由启动器克隆（~/.dsh-launcher/git-plugins 下） */
+  managedClone: boolean | null;
+  /** 插件目录相对 git 根的路径（重新 link 用） */
+  subPath: string | null;
+  /** git 工作树有未提交改动 */
+  dirty: boolean | null;
+  /** 无渠道/被拒绝的原因：no-channel（link 或直链本就没有渠道）/ private-repo（私有仓库，暂不支持） */
+  blocked: "no-channel" | "private-repo" | null;
+  /** link 目标目录里是否有构建产物（lib/*.js）；false = 升级时需要重新构建 */
+  libOk: boolean | null;
   note: string | null;
+}
+
+/** 插件管理任务（内置终端里的一条记录） */
+export interface PluginJob {
+  id: number;
+  profile: string;
+  /** install | uninstall | upgrade | pull | clone */
+  kind: string;
+  label: string;
+  command: string;
+  startedAt: number;
+  finishedAt: number | null;
+  running: boolean;
+  ok: boolean | null;
+  exitCode: number | null;
+  cancelled: boolean;
+  /** 失败时的对症建议（首行适合直接放进 toast） */
+  hint: string | null;
+  lines: PluginLogLine[];
+  /** 因缓冲上限被丢弃的行数 */
+  dropped: number;
+}
+
+export interface PluginLogLine {
+  /** stdout | stderr | info */
+  stream: string;
+  text: string;
+  at: number;
+}
+
+/** 一条流式输出（内置终端实时追加） */
+export interface PluginLogEvent {
+  jobId: number;
+  profile: string;
+  stream: string;
+  line: string;
+}
+
+/** 任务状态变化（开始 / 结束） */
+export interface PluginJobEvent {
+  jobId: number;
+  profile: string;
+  kind: string;
+  label: string;
+  running: boolean;
+  ok: boolean | null;
+  exitCode: number | null;
+  cancelled: boolean;
+  /** 失败时的对症建议 */
+  hint: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+}
+
+/** 本地克隆仓库（clone + link 安装的落点） */
+export interface ClonedPlugin {
+  dirName: string;
+  path: string;
+  url: string | null;
+  branch: string | null;
+  commit: string | null;
+  subject: string | null;
+  dirty: boolean;
+  candidates: PluginCandidate[];
+}
+
+/** clone + link 安装输入 */
+export interface CloneInstallInput {
+  url: string;
+  gitRef: string | null;
+  subPath: string | null;
+  build: boolean;
 }
 
 /** web 快捷配置当前值（解析自 cordis.patch.yml；条目不存在 = *Present=false，键缺失 = null） */
@@ -296,13 +433,6 @@ export interface WebQuickConfigInput {
   openBrowser: boolean;
   surfaceContext: boolean;
   cookieMaxAgeDays: number;
-}
-
-export interface PluginJobEvent {
-  profile: string;
-  line: string;
-  done: boolean;
-  ok: boolean;
 }
 
 /** 凭据文件 ~/.dsh/.credentials.yaml 中 refs 的一条命名凭据 */

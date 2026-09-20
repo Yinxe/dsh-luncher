@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { PackageX, Plus, RefreshCw, RotateCcw, Save } from "lucide-react";
+import {
+  Braces, Cloud, FileArchive, GitBranch, Link2, PackageX, Plus, RefreshCw, RotateCcw, Save,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -9,16 +11,47 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import ClonedReposCard from "@/components/ClonedReposCard";
 import InstallPluginDialog from "@/components/InstallPluginDialog";
+import PluginTerminal from "@/components/PluginTerminal";
 import YamlEditor from "@/components/YamlEditor";
-import { api, events } from "../api";
-import type { PluginUpdateInfo, ProfileDetail } from "../types";
+import { usePluginJobs } from "../hooks/use-plugin-jobs";
+import { api } from "../api";
+import type { ClonedPlugin, PluginUpdateInfo, ProfileDetail } from "../types";
 
 interface Props {
   profiles: string[];
   /** 从 Profile 实例页跳转过来时预选中的 profile（仅挂载时生效） */
   initialProfile?: string | null;
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
+}
+
+/** 来源徽标：决定「怎么更新」的视觉线索 */
+const SOURCE_META: Record<string, { label: string; icon: typeof Cloud; tip: string }> = {
+  npm: { label: "npm", icon: Cloud, tip: "registry 包：按版本号检测更新（dsh plugin add 包名@latest）" },
+  git: { label: "git 仓库", icon: GitBranch, tip: "GitHub 规格安装：按提交哈希检测更新" },
+  "git-clone": { label: "clone+link", icon: GitBranch, tip: "本地克隆 + link：更新方式 git pull" },
+  tarball: { label: "tgz 直链", icon: FileArchive, tip: "打包产物直链：无版本渠道，只能手动重装同一链接" },
+  link: { label: "本地 link", icon: Link2, tip: "本地软链：改代码即时生效，无版本渠道" },
+  file: { label: "本地 file", icon: Link2, tip: "本地文件依赖：无版本渠道" },
+  workspace: { label: "workspace", icon: Braces, tip: "workspace 依赖：跟随工作区" },
+};
+
+function SourceBadge({ source }: { source: string }) {
+  const meta = SOURCE_META[source] ?? { label: source, icon: Cloud, tip: source };
+  const Icon = meta.icon;
+  return (
+    <Badge variant="outline" className="gap-1 text-[10px]" title={meta.tip}>
+      <Icon /> {meta.label}
+    </Badge>
+  );
+}
+
+/** git-clone 依赖的克隆目录名（仅启动器托管的克隆可一键删除） */
+function managedCloneName(u: PluginUpdateInfo | undefined): string | null {
+  if (!u?.cloneDir || !u.managedClone) return null;
+  const parts = u.cloneDir.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts[parts.length - 1] || null;
 }
 
 export default function PluginsView({ profiles, initialProfile, onToast }: Props) {
@@ -31,12 +64,14 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
   const [editFile] = useState<string>("cordis.patch.yml");
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [jobLine, setJobLine] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [updates, setUpdates] = useState<Record<string, PluginUpdateInfo> | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
-  const [pendingUninstall, setPendingUninstall] = useState<{ name: string; isBundle: boolean } | null>(null);
+  const [pendingUninstall, setPendingUninstall] = useState<
+    { name: string; isBundle: boolean; cloneName: string | null } | null
+  >(null);
+  const [purgeClone, setPurgeClone] = useState(false);
 
   useEffect(() => {
     // profiles 晚于挂载加载时，同样默认选中 web
@@ -66,29 +101,26 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
     reload();
   }, [reload]);
 
-  // 后台插件命令（dsh plugin）输出流
-  useEffect(() => {
-    let un: (() => void) | undefined;
-    events
-      .onPluginLog?.((e) => {
-        if (e.profile !== profile) return;
-        if (e.done) {
-          setBusy(false);
-          setJobLine(null);
-          onToast(e.ok ? "ok" : "err", e.ok ? "插件命令执行完成" : `插件命令失败：${e.line}`);
-          reload();
-        } else {
-          setJobLine(e.line);
-        }
-      })
-      ?.then((u) => (un = u))
-      .catch(() => undefined);
-    return () => un?.();
-  }, [profile, reload, onToast]);
+  // 插件任务流（内置终端数据源）；任务结束自动刷新插件列表
+  const { jobs, activeId, setActiveId, runningCount, cancel, clear } = usePluginJobs({
+    onFinished: (e) => {
+      const tag = e.cancelled ? "已取消" : e.ok ? "完成" : "失败";
+      // 失败时优先显示对症建议（供应链策略 / 构建脚本 / 鉴权 / 404…），而不是笼统的「看终端」
+      const detail = e.ok
+        ? ""
+        : e.hint
+        ? `：${e.hint.split("\n")[0]}`
+        : "：展开内置终端查看输出";
+      onToast(e.cancelled ? "info" : e.ok ? "ok" : "err", `${e.label} ${tag}${detail}`);
+      reload();
+    },
+  });
+
+  /** 有插件任务在跑或正在保存配置时，禁用会互踩的操作 */
+  const busy = runningCount > 0 || saving;
 
   const toggleBundle = useCallback(
     async (name: string, enabled: boolean) => {
-      setBusy(true);
       try {
         await api.setBundleEnabled(profile, name, enabled);
         onToast(
@@ -100,31 +132,23 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
         await reload();
       } catch (e) {
         onToast("err", String(e));
-      } finally {
-        setBusy(false);
       }
     },
     [profile, reloadMode, reload, onToast]
   );
 
   const uninstall = useCallback(
-    async (name: string) => {
-      setBusy(true);
-      try {
-        await api.uninstallBundle(profile, name);
-        onToast("ok", `插件 ${name} 已卸载`);
-        await reload();
-      } catch (e) {
-        onToast("err", String(e));
-      } finally {
-        setBusy(false);
-      }
+    (name: string, cloneDir: string | null) => {
+      api
+        .pluginUninstall(profile, name, cloneDir)
+        .then(() => onToast("info", `已开始卸载 ${name}（输出见内置终端）`))
+        .catch((e) => onToast("err", String(e)));
     },
-    [profile, reload, onToast]
+    [profile, onToast]
   );
 
   const saveFile = useCallback(async () => {
-    setBusy(true);
+    setSaving(true);
     try {
       await api.writeProfileFile(profile, editFile, draft);
       onToast("ok", `${editFile} 已保存（原文件已备份）`);
@@ -132,7 +156,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
     } catch (e) {
       onToast("err", String(e));
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   }, [profile, editFile, draft, onToast, reload]);
 
@@ -148,9 +172,9 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
       onToast(
         n > 0 ? "info" : "ok",
         n > 0
-          ? `${n} 个包有新版本可用${skipped > 0 ? `（${skipped} 个本地源/无法检测已跳过）` : ""}`
+          ? `${n} 个包有新版本可用${skipped > 0 ? `（${skipped} 个无更新渠道/无法检测已跳过）` : ""}`
           : skipped > 0
-          ? `全部已最新（${skipped} 个本地源/无法检测已跳过）`
+          ? `全部已最新（${skipped} 个无更新渠道/无法检测已跳过）`
           : "全部已最新"
       );
     } catch (e) {
@@ -160,52 +184,106 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
     }
   }, [profile, onToast]);
 
-  const install = useCallback(
-
-    async (spec: string) => {
-      const name = spec.trim();
-      if (!name) return;
-      setBusy(true);
-      try {
-        const tail = await api.installBundle(profile, name);
-        onToast("ok", `插件 ${name} 已安装（官方 dsh plugin 命令）\n${tail}`);
-        await reload();
-      } catch (e) {
-        onToast("err", String(e));
-      } finally {
-        setBusy(false);
-      }
+  /** 批量安装（一个任务里顺序执行多条 dsh plugin add） */
+  const installMany = useCallback(
+    (specs: string[], mode: "install" | "upgrade") => {
+      api
+        .pluginInstall(profile, specs, mode)
+        .then(() =>
+          onToast(
+            "info",
+            `${mode === "upgrade" ? "升级" : "安装"} ${specs.length} 个包：输出见内置终端`
+          )
+        )
+        .catch((e) => onToast("err", String(e)));
     },
-    [profile, reload, onToast]
+    [profile, onToast]
+  );
+
+  /** clone 仓库 + 本地 link 安装 */
+  const cloneInstall = useCallback(
+    (input: { url: string; gitRef: string | null; subPath: string | null; build: boolean }) => {
+      api
+        .pluginCloneInstall(profile, input)
+        .then(() => onToast("info", "已开始 clone + link 安装：进度见内置终端"))
+        .catch((e) => onToast("err", String(e)));
+    },
+    [profile, onToast]
+  );
+
+  /** git pull 更新本地克隆（再重新 link） */
+  const pullClone = useCallback(
+    (repo: ClonedPlugin, subPath: string | null, build: boolean) => {
+      const name = repo.candidates.find((c) => c.path === subPath)?.name ?? repo.dirName;
+      api
+        .pluginPullUpdate(profile, name, repo.path, subPath, build)
+        .then(() => onToast("info", `已开始 git pull 更新 ${name}：输出见内置终端`))
+        .catch((e) => onToast("err", String(e)));
+    },
+    [profile, onToast]
+  );
+
+  /** 升级按钮：npm/git 源走 add，clone 源走 git pull */
+  const runUpgrade = useCallback(
+    (u: PluginUpdateInfo) => {
+      setUpdates(null);
+      if (u.updateKind === "git-pull" && u.cloneDir) {
+        api
+          .pluginPullUpdate(profile, u.name, u.cloneDir, u.subPath, u.libOk === false)
+          .then(() => onToast("info", `已开始 git pull 升级 ${u.name}：输出见内置终端`))
+          .catch((e) => onToast("err", String(e)));
+        return;
+      }
+      if (u.updateSpec) installMany([u.updateSpec], "upgrade");
+    },
+    [profile, installMany, onToast]
   );
 
   const updateBadge = (name: string) => {
     const u = updates?.[name];
-    if (!u?.hasUpdate) return null;
+    if (!u) return null;
+    if (!u.checked) {
+      if (!u.note) return null;
+      // 私有仓库（远端不可匿名访问）单独标出来：这是被明确拒绝的场景，可手动 clone/pull
+      const privateRepo = u.blocked === "private-repo";
+      return (
+        <Badge
+          variant={privateRepo ? "warning" : "outline"}
+          className="max-w-[220px] truncate text-[10px]"
+          title={u.note}
+        >
+          {privateRepo ? "私有仓库 · 不支持" : "无更新渠道"}
+        </Badge>
+      );
+    }
+    if (!u.hasUpdate) return null;
     const tip =
-      u.source === "git"
+      u.source === "git-clone"
+        ? `本地 ${u.installedCommit?.slice(0, 7) ?? "?"} → 远端 ${u.remoteCommit?.slice(0, 7) ?? "?"}${
+            u.dirty ? "（本地有未提交改动，pull 前请留意）" : ""
+          }`
+        : u.source === "git"
         ? `远端提交 ${u.remoteCommit?.slice(0, 7) ?? "?"} ≠ 已装 ${u.installedCommit?.slice(0, 7) ?? "?"}`
         : `已装 ${u.installedVersion ?? "?"} → 最新 ${u.latestVersion ?? "?"}`;
     return (
       <div className="flex shrink-0 items-center gap-1.5">
         <Badge variant="warning" title={tip}>
-          {u.source === "git" ? "有新提交" : `可升级 ${u.latestVersion ?? ""}`}
+          {u.source === "git" ? "有新提交" : u.source === "git-clone" ? "有新提交" : `可升级 ${u.latestVersion ?? ""}`}
         </Badge>
-        {u.updateSpec && (
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-6 px-2 text-[11px]"
-            disabled={busy || checkingUpdates}
-            title={`执行 dsh plugin add ${u.updateSpec}`}
-            onClick={() => {
-              setUpdates(null);
-              install(u.updateSpec!);
-            }}
-          >
-            升级
-          </Button>
-        )}
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 px-2 text-[11px]"
+          disabled={busy || checkingUpdates}
+          title={
+            u.updateKind === "git-pull"
+              ? `git -C ${u.cloneDir} pull --ff-only && dsh plugin add ${u.updateSpec}`
+              : `dsh plugin add ${u.updateSpec}`
+          }
+          onClick={() => runUpgrade(u)}
+        >
+          升级
+        </Button>
       </div>
     );
   };
@@ -222,11 +300,6 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-base font-semibold">插件管理</h2>
-        {jobLine && (
-          <Badge variant="info" className="max-w-md truncate font-mono" title={jobLine}>
-            {jobLine}
-          </Badge>
-        )}
         <Select value={profile} onValueChange={setProfile}>
           <SelectTrigger className="w-52 font-mono">
             <SelectValue placeholder="选择 profile" />
@@ -244,6 +317,17 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
           {reloadMode === "live" ? "（保存后即时生效）" : "（需重启实例生效）"}
         </Badge>
       </div>
+
+      {/* 内置终端：安装/卸载/升级的实时输出 */}
+      <PluginTerminal
+        jobs={jobs}
+        activeId={activeId}
+        onSelect={setActiveId}
+        onCancel={cancel}
+        onClear={clear}
+        profile={profile}
+        onToast={onToast}
+      />
 
       <Card className="p-4">
         <div className="mb-2.5 flex flex-wrap items-center gap-2.5">
@@ -264,7 +348,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
             variant="outline"
             disabled={checkingUpdates || busy}
             onClick={doCheckUpdates}
-            title="npm 包比对 registry 最新版本；GitHub 仓库比对最新提交（本地 link 源跳过）"
+            title="npm 包比对 registry 最新版本；GitHub 规格比对最新提交；本地克隆比对 git HEAD；纯 link/tgz 无渠道"
           >
             <RefreshCw className={checkingUpdates ? "animate-spin" : ""} /> 检查更新
           </Button>
@@ -272,7 +356,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
             size="sm"
             disabled={busy}
             onClick={() => setInstallOpen(true)}
-            title="搜索 npm / GitHub 仓库，看描述后安装"
+            title="npm / GitHub 仓库 / 链接 / Clone 仓库 四种安装方式"
           >
             <Plus /> 安装插件
           </Button>
@@ -287,9 +371,12 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
             >
               <span className={`h-2 w-2 shrink-0 rounded-full ${b.enabled ? "bg-emerald-500" : "bg-muted-foreground/40"}`} />
               <div className="min-w-0 flex-1">
-                <div className="truncate font-mono text-[12.5px] font-medium">{b.name}</div>
-                <div className="truncate text-[10.5px] text-muted-foreground">
-                  {b.version ?? "—"} · {b.source}
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate font-mono text-[12.5px] font-medium">{b.name}</span>
+                  <SourceBadge source={b.source} />
+                </div>
+                <div className="truncate text-[10.5px] text-muted-foreground" title={b.version ?? ""}>
+                  {b.version ?? "—"}
                   {b.pluginIds.length > 0 && ` · 插件 ID: ${b.pluginIds.join(", ")}`}
                 </div>
               </div>
@@ -299,8 +386,15 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
                 variant="ghost"
                 className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                 disabled={busy}
-                onClick={() => setPendingUninstall({ name: b.name, isBundle: true })}
-                title="通过官方 dsh plugin 命令卸载（remove）"
+                onClick={() => {
+                  setPurgeClone(false);
+                  setPendingUninstall({
+                    name: b.name,
+                    isBundle: true,
+                    cloneName: managedCloneName(updates?.[b.name]),
+                  });
+                }}
+                title="通过官方 dsh plugin 命令卸载（remove），输出进内置终端"
               >
                 卸载
               </Button>
@@ -340,9 +434,12 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
               >
                 <span className="h-2 w-2 shrink-0 rounded-full bg-muted-foreground/40" />
                 <div className="min-w-0 flex-1">
-                  <div className="truncate font-mono text-[12.5px] font-medium">{p.name}</div>
-                  <div className="truncate text-[10.5px] text-muted-foreground">
-                    {p.version ?? "—"} · {p.source}
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate font-mono text-[12.5px] font-medium">{p.name}</span>
+                    <SourceBadge source={p.source} />
+                  </div>
+                  <div className="truncate text-[10.5px] text-muted-foreground" title={p.version ?? ""}>
+                    {p.version ?? "—"}
                   </div>
                 </div>
                 {updateBadge(p.name)}
@@ -351,7 +448,14 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
                   variant="ghost"
                   className="text-destructive hover:bg-destructive/10 hover:text-destructive"
                   disabled={busy}
-                  onClick={() => setPendingUninstall({ name: p.name, isBundle: false })}
+                  onClick={() => {
+                    setPurgeClone(false);
+                    setPendingUninstall({
+                      name: p.name,
+                      isBundle: false,
+                      cloneName: managedCloneName(updates?.[p.name]),
+                    });
+                  }}
                   title="手动卸载（官方 dsh plugin remove 命令）"
                 >
                   <PackageX /> 卸载
@@ -365,6 +469,14 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
           )}
         </div>
       </Card>
+
+      {/* clone + link 的本地仓库清单（git pull 更新入口） */}
+      <ClonedReposCard
+        busy={busy}
+        onToast={onToast}
+        onPull={pullClone}
+        onLinkInstall={(spec) => installMany([spec], "install")}
+      />
 
       <Card className="p-4">
         <div className="mb-2.5 flex flex-wrap items-center gap-3">
@@ -389,7 +501,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
         </div>
       </Card>
 
-      {/* 卸载确认（bundle 插件 / 手动依赖共用） */}
+      {/* 卸载确认（bundle 插件 / 手动依赖共用；clone 源可顺带删除本地目录） */}
       <AlertDialog open={pendingUninstall != null} onOpenChange={(o) => !o && setPendingUninstall(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -400,18 +512,37 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
             </AlertDialogTitle>
             <AlertDialogDescription>
               {pendingUninstall?.isBundle
-                ? `将从 profile「${profile}」同时移除 bundles 与依赖声明（本地 link 插件目录不会被删除）。`
+                ? `将执行 dsh plugin remove，从 profile「${profile}」同时移除 bundles 与依赖声明（本地 link 插件目录不会被删除）。输出会实时显示在内置终端。`
                 : `「${pendingUninstall?.name}」在 package.json 依赖中但未声明为插件 bundle，可能是误装或残留依赖。将从 profile「${profile}」中移除，其他插件若依赖它则会受影响。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {pendingUninstall?.cloneName && (
+            <div className="flex items-start gap-2.5 rounded-lg border border-border px-3 py-2.5">
+              <Switch
+                id="purge-clone"
+                checked={purgeClone}
+                onCheckedChange={setPurgeClone}
+                className="mt-0.5"
+              />
+              <div className="min-w-0 flex-1">
+                <label htmlFor="purge-clone" className="text-[11.5px] font-medium">
+                  同时删除本地克隆目录 <span className="font-mono">{pendingUninstall.cloneName}</span>
+                </label>
+                <p className="text-[10.5px] leading-relaxed text-muted-foreground">
+                  该依赖来自 clone+link 安装，删除后 ~/.dsh-launcher/git-plugins 下的这份克隆
+                  （含未提交改动）会一并移除；不勾选则保留，可在「本地克隆仓库」里单独管理。
+                </p>
+              </div>
+            </div>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
               onClick={() => {
-                const name = pendingUninstall?.name;
+                const target = pendingUninstall;
                 setPendingUninstall(null);
-                if (name) uninstall(name);
+                if (target) uninstall(target.name, purgeClone ? target.cloneName : null);
               }}
             >
               卸载
@@ -420,12 +551,13 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* 安装插件对话框：搜索/预览 → 描述 → 安装 */}
+      {/* 安装插件对话框：npm / GitHub / 链接 / Clone 四种方式 */}
       <InstallPluginDialog
         profile={profile}
         open={installOpen}
         onClose={() => setInstallOpen(false)}
-        onInstall={install}
+        onInstallMany={installMany}
+        onCloneInstall={cloneInstall}
       />
     </div>
   );

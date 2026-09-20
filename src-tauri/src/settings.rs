@@ -33,6 +33,9 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// Profile 启动方式：child=子进程（随启动器退出）| detached=独立进程（后台常驻）
     pub launch_mode: String,
+    /// 可选的 GitHub Token：只用于提高 api.github.com 额度（匿名 60/小时 → 5000/小时）。
+    /// 探测与更新检测走免额度通道（jsDelivr / git），留空也能正常用。
+    pub github_token: String,
 }
 
 impl Default for Settings {
@@ -51,6 +54,7 @@ impl Default for Settings {
             node_mirror: "https://npmmirror.com/mirrors/node".into(),
             close_to_tray: true,
             launch_mode: "child".into(),
+            github_token: String::new(),
         }
     }
 }

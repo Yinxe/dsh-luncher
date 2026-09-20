@@ -612,28 +612,252 @@ pub fn set_bundle_enabled(
     crate::profile_cfg::set_bundle_enabled(&settings, &profile, &name, enabled)
 }
 
+// ── 插件管理（全部走官方 dsh plugin 命令，输出实时进内置终端） ──────
+
+/// 安装 / 升级插件：`dsh plugin --profile <p> add <spec>`（可一次给多个规格，
+/// 在同一个任务里按顺序执行，输出合并进同一段终端记录）
+/// mode: install | upgrade（只影响终端里的任务标签，命令完全一致）
 #[tauri::command]
-pub fn uninstall_bundle(
+pub fn plugin_install(
     app: AppHandle,
     state: State<'_, AppState>,
+    jobs: State<'_, crate::plugin::PluginJobState>,
+    profile: String,
+    specs: Vec<String>,
+    mode: Option<String>,
+) -> Result<u64, String> {
+    let specs: Vec<String> = specs
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if specs.is_empty() {
+        return Err("安装规格为空".into());
+    }
+    // github:owner/repo（含去 sha 的升级规格）在任务里先做匿名可读预检：
+    // 私有仓库直接拒绝；判不出来就放行（不让网络问题挡住安装）
+    let is_github = |s: &str| {
+        crate::registry::parse_github_spec(s)
+            .map(|sp| sp.tarball_url.is_none() && !sp.owner.is_empty() && !sp.repo.is_empty())
+            .unwrap_or(false)
+    };
+    let settings = state.settings.lock().unwrap().clone();
+    let upgrade = mode.as_deref() == Some("upgrade");
+    let mut steps = vec![crate::plugin::Step::Note {
+        text: format!(
+            "{}：{}",
+            if upgrade { "升级（重新走官方安装命令）" } else { "安装" },
+            specs.join(" + ")
+        ),
+    }];
+    for spec in &specs {
+        if is_github(spec) {
+            steps.push(crate::plugin::Step::ProbeRemote { url: spec.clone() });
+        }
+        steps.push(crate::plugin::Step::Dsh {
+            args: vec!["add".into(), spec.clone()],
+        });
+    }
+    let label = if specs.len() == 1 {
+        format!("{} {}", if upgrade { "升级" } else { "安装" }, specs[0])
+    } else {
+        format!("{} {} 个包", if upgrade { "升级" } else { "安装" }, specs.len())
+    };
+    crate::plugin::start_job(
+        app,
+        &jobs,
+        settings,
+        crate::plugin::JobRequest {
+            profile,
+            kind: if upgrade { "upgrade".into() } else { "install".into() },
+            label,
+            steps,
+        },
+    )
+}
+
+/// 卸载插件：`dsh plugin --profile <p> remove <name>`（可选顺带删除本地克隆目录）
+#[tauri::command]
+pub fn plugin_uninstall(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    jobs: State<'_, crate::plugin::PluginJobState>,
     profile: String,
     name: String,
-) -> Result<bool, String> {
+    purge_clone_dir: Option<String>,
+) -> Result<u64, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("插件名为空".into());
+    }
     let settings = state.settings.lock().unwrap().clone();
-    crate::profile_cfg::uninstall_bundle(app, &settings, &profile, &name)?;
-    Ok(true)
+    let mut steps = vec![
+        crate::plugin::Step::Note {
+            text: format!(
+                "卸载 {name}：dsh plugin remove（同时从 dsh.profile.bundles 与依赖声明移除）"
+            ),
+        },
+        crate::plugin::Step::Dsh {
+            args: vec!["remove".into(), name.clone()],
+        },
+    ];
+    let mut label = format!("卸载 {name}");
+    if let Some(dir) = purge_clone_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let path = crate::plugin::clone_dir_path(dir)?;
+        label = format!("卸载 {name} + 删除克隆");
+        steps.push(crate::plugin::Step::RmDir { path });
+    }
+    crate::plugin::start_job(
+        app,
+        &jobs,
+        settings,
+        crate::plugin::JobRequest {
+            profile,
+            kind: "uninstall".into(),
+            label,
+            steps,
+        },
+    )
+}
+
+/// 升级本地克隆插件：git pull --ff-only →（可选）重新构建 → dsh plugin add link:<dir>
+#[tauri::command]
+pub fn plugin_pull_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    jobs: State<'_, crate::plugin::PluginJobState>,
+    profile: String,
+    name: String,
+    clone_root: String,
+    sub_path: Option<String>,
+    build: Option<bool>,
+) -> Result<u64, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let root = std::path::PathBuf::from(clone_root.trim());
+    if clone_root.trim().is_empty() {
+        return Err("缺少本地仓库路径".into());
+    }
+    let (steps, _root) =
+        crate::plugin::steps_for_pull_update_root(&root, sub_path.as_deref(), build.unwrap_or(false))?;
+    crate::plugin::start_job(
+        app,
+        &jobs,
+        settings,
+        crate::plugin::JobRequest {
+            profile,
+            kind: "pull".into(),
+            label: format!("git pull 升级 {name}"),
+            steps,
+        },
+    )
+}
+
+/// clone 仓库 + 本地 link 安装：git clone →（可选）构建 → dsh plugin add link:<dir>
+///
+/// 起任务前先做**匿名可读预检**：私有仓库 / 不存在的仓库直接拒绝（不在终端里弹登录、
+/// 也不产生注定失败的任务），指引用户手动 clone 后走 link 安装。
+#[tauri::command]
+pub fn plugin_clone_install(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    jobs: State<'_, crate::plugin::PluginJobState>,
+    profile: String,
+    input: crate::plugin::CloneInstallInput,
+) -> Result<u64, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let (mut steps, root) = crate::plugin::steps_for_clone_install(&input)?;
+    // 预检放任务第一步：点击后立刻出现任务与输出，不再让界面干等网络
+    steps.insert(
+        0,
+        crate::plugin::Step::ProbeRemote {
+            url: input.url.clone(),
+        },
+    );
+    let label = format!(
+        "clone 安装 {}",
+        root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    );
+    crate::plugin::start_job(
+        app,
+        &jobs,
+        settings,
+        crate::plugin::JobRequest {
+            profile,
+            kind: "clone".into(),
+            label,
+            steps,
+        },
+    )
 }
 
 #[tauri::command]
-pub fn install_bundle(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    profile: String,
-    name: String,
-) -> Result<bool, String> {
-    let settings = state.settings.lock().unwrap().clone();
-    crate::profile_cfg::install_bundle(app, &settings, &profile, &name)?;
-    Ok(true)
+pub fn list_plugin_jobs(jobs: State<'_, crate::plugin::PluginJobState>) -> Vec<crate::plugin::PluginJob> {
+    jobs.snapshot()
+}
+
+#[tauri::command]
+pub fn cancel_plugin_job(jobs: State<'_, crate::plugin::PluginJobState>, job_id: u64) -> bool {
+    jobs.cancel(job_id)
+}
+
+#[tauri::command]
+pub fn clear_plugin_jobs(jobs: State<'_, crate::plugin::PluginJobState>) -> usize {
+    jobs.clear_finished()
+}
+
+/// 把某个插件任务的完整日志导出到 ~/.dsh-launcher/logs/，返回文件路径
+#[tauri::command]
+pub fn export_plugin_job_log(
+    jobs: State<'_, crate::plugin::PluginJobState>,
+    job_id: u64,
+) -> Result<String, String> {
+    let text = jobs
+        .job_log_text(job_id)
+        .ok_or_else(|| format!("任务 {job_id} 不存在（可能已被清理）"))?;
+    let dir = settings::launcher_home().join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("dsh-plugin-job-{job_id}-{ts}.log"));
+    std::fs::write(&path, text).map_err(|e| format!("写日志失败: {e}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// 列出 ~/.dsh-launcher/git-plugins 下的克隆仓库（git 状态 + 插件候选）
+#[tauri::command]
+pub async fn list_cloned_plugins() -> Result<Vec<crate::plugin::ClonedPlugin>, String> {
+    tauri::async_runtime::spawn_blocking(crate::plugin::list_cloned)
+        .await
+        .map_err(|e| format!("读取克隆仓库失败: {e}"))
+}
+
+/// 探测本地目录里的插件包（monorepo 子包一并列出）
+#[tauri::command]
+pub async fn probe_local_plugins(
+    path: String,
+) -> Result<Vec<crate::registry::PluginCandidate>, String> {
+    let p = path.trim().to_string();
+    if p.is_empty() {
+        return Err("目录为空".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || crate::registry::probe_local_plugins(std::path::Path::new(&p)))
+        .await
+        .map_err(|e| format!("探测失败: {e}"))?
+}
+
+#[tauri::command]
+pub fn delete_cloned_plugin(dir_name: String) -> Result<(), String> {
+    crate::plugin::remove_clone_dir(&dir_name)
+}
+
+/// 返回 git-plugins 目录路径（不存在则创建），供前端在文件管理器里打开
+#[tauri::command]
+pub fn reveal_git_plugins_dir() -> Result<String, String> {
+    let dir = crate::plugin::git_plugins_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -683,8 +907,19 @@ pub async fn search_registry_packages(
 }
 
 #[tauri::command]
-pub async fn fetch_github_repo(repo: String) -> Result<crate::registry::GitHubRepoInfo, String> {
-    crate::registry::fetch_github_repo(&repo).await
+pub async fn fetch_github_repo(
+    state: State<'_, AppState>,
+    repo: String,
+) -> Result<crate::registry::GitHubRepoInfo, String> {
+    let token = state.settings.lock().unwrap().github_token.clone();
+    let token = crate::registry::github_token(Some(&token));
+    crate::registry::fetch_github_repo(&repo, token.as_deref()).await
+}
+
+/// 当前 GitHub API 额度（探测/更新检测已走免额度通道，这里只用于展示元数据额度）
+#[tauri::command]
+pub fn get_github_rate_limit() -> crate::registry::GitHubRateLimit {
+    crate::registry::rate_limit()
 }
 
 #[tauri::command]
@@ -693,7 +928,8 @@ pub async fn check_plugin_updates(
     profile: String,
 ) -> Result<Vec<crate::profile_cfg::PluginUpdateInfo>, String> {
     let settings = state.settings.lock().unwrap().clone();
-    crate::profile_cfg::check_plugin_updates(&settings.registry, &profile).await
+    let token = crate::registry::github_token(Some(&settings.github_token));
+    crate::profile_cfg::check_plugin_updates(&settings.registry, &profile, token.as_deref()).await
 }
 
 #[tauri::command]

@@ -211,6 +211,59 @@ pub fn run_captured(program: &Path, args: &[String], timeout: Duration) -> Optio
     }
 }
 
+/// 运行短命令并捕获 stdout+stderr（可指定工作目录，带超时）。
+/// 与非 `_in` 版本不同，这里**不因退出码非 0 而丢弃输出**：git 之类的命令
+/// 失败信息本身就是要展示给用户的内容。返回 (是否成功, 合并输出)。
+pub fn run_captured_in(
+    program: &Path,
+    args: &[String],
+    cwd: Option<&Path>,
+    envs: &[(String, String)],
+    timeout: Duration,
+) -> Option<(bool, String)> {
+    let mut cmd = spawn_command(program, args);
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = BufReader::new(stdout).read_to_end(&mut buf);
+        let mut err = Vec::new();
+        let _ = BufReader::new(stderr).read_to_end(&mut err);
+        (
+            String::from_utf8_lossy(&buf).trim().to_string(),
+            String::from_utf8_lossy(&err).trim().to_string(),
+        )
+    });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let (out, err) = reader.join().ok()?;
+                let text = if status.success() || err.is_empty() { out } else { err };
+                return Some((status.success(), text));
+            }
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// 追加 PATH（把 node 目录放进子进程 PATH，保证 npm 生命周期脚本可用）
 pub fn with_node_on_path(cmd: &mut Command, node: Option<&Path>) {
     if let Some(dir) = node.and_then(|n| n.parent()) {
