@@ -410,17 +410,15 @@ export default function ModelConfigView({ onToast }: Props) {
     setProvs((ps) =>
       ps.map((p, i) => (i === pIdx ? { ...p, models: p.models.filter((_, j) => j !== mIdx) } : p)),
     );
-    setDm((cur) => {
-      if (!cur) return cur;
-      const p = provs[pIdx];
-      const removed = p?.models[mIdx];
-      if (removed && cur.provider === p.id && cur.model === removed.id.trim()) {
-        onToast("info", "默认模型已被删除，默认模型一并清除");
-        return null;
-      }
-      return cur;
-    });
-  }, [provs, onToast]);
+    // 不能在 setDm 的 updater 里调用 onToast：StrictMode 下 updater 会跑两次 → 重复 toast，
+    // 且属于渲染阶段的副作用。直接用当前 provs/dm 判断，命中才清默认并提示。
+    const p = provs[pIdx];
+    const removed = p?.models[mIdx];
+    if (removed && dm && dm.provider === p.id && dm.model === removed.id.trim()) {
+      setDm(null);
+      onToast("info", "默认模型已被删除，默认模型一并清除");
+    }
+  }, [provs, dm, onToast]);
 
   const addProvider = useCallback(() => {
     const id = newId.trim();

@@ -226,8 +226,11 @@ export default function App() {
   // ── 事件订阅 ────────────────────────────────
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
+    // StrictMode/重挂载时，清理可能在 listen() Promise resolve 之前跑完；用 alive 兜住，
+    // 晚到的 unlisten 立即调用，避免监听器重复订阅（proc-log 重复行、双 toast）。
+    let alive = true;
     const track = (p?: Promise<() => void>) =>
-      p?.then((u) => unlisteners.push(u)).catch(() => undefined);
+      p?.then((u) => { if (alive) unlisteners.push(u); else u(); }).catch(() => undefined);
     track(events.onInstallLog?.((e) => {
       setInstallJob((job) =>
         job && job.version === e.version ? { ...job, logs: [...job.logs.slice(-400), e.line] } : job
@@ -370,7 +373,10 @@ export default function App() {
       await api.saveSettings(next);
       setEnv(await api.getEnvironment());
       addToast("ok", `Node 来源已切换为 ${v === "auto" ? "自动" : v === "system" ? "系统级" : "隔离（内置）"}`);
-    } catch (e) { addToast("err", `切换失败: ${e}`); }
+    } catch (e) {
+      setSettings(s); // 保存失败时回滚乐观更新，避免 UI 与实际配置不一致
+      addToast("err", `切换失败: ${e}`);
+    }
   }, [addToast]);
 
   const doSetLaunchMode = useCallback(async (v: "child" | "detached") => {

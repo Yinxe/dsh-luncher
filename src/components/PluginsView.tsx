@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Braces, Cloud, FileArchive, GitBranch, Layers, Link2, PackageX, Plus, RefreshCw, RotateCcw,
   Save, ShieldCheck,
@@ -66,6 +66,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [bundleBusy, setBundleBusy] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [updates, setUpdates] = useState<Record<string, PluginUpdateInfo> | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -81,6 +82,10 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
     }
   }, [profiles, profile]);
 
+  // 始终指向「当前选中」的 profile，用于丢弃过期的 reload 响应
+  const latestProfileRef = useRef(profile);
+  latestProfileRef.current = profile;
+
   const reload = useCallback(async () => {
     if (!profile) return;
     try {
@@ -88,12 +93,15 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
         api.getProfileDetail(profile),
         api.getPatchReload(profile),
       ]);
+      // 快速切换 profile 时，旧请求可能后返回：不能覆盖新 profile 的 detail/draft，否则 saveFile 会写错文件
+      if (latestProfileRef.current !== profile) return;
       setDetail(d);
       setReloadMode(mode);
       setDraft(d.patchRaw);
       setDirty(false);
       setUpdates(null);
     } catch (e) {
+      if (latestProfileRef.current !== profile) return;
       onToast("err", `读取 profile 配置失败: ${e}`);
     }
   }, [profile, onToast]);
@@ -117,11 +125,13 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
     },
   });
 
-  /** 有插件任务在跑或正在保存配置时，禁用会互踩的操作 */
-  const busy = runningCount > 0 || saving;
+  /** 有插件任务在跑、正在保存配置、或正在切换 bundle 时，禁用会互踩的操作 */
+  const busy = runningCount > 0 || saving || bundleBusy;
 
   const toggleBundle = useCallback(
     async (name: string, enabled: boolean) => {
+      if (bundleBusy) return;
+      setBundleBusy(true);
       try {
         await api.setBundleEnabled(profile, name, enabled);
         onToast(
@@ -133,9 +143,11 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
         await reload();
       } catch (e) {
         onToast("err", String(e));
+      } finally {
+        setBundleBusy(false);
       }
     },
-    [profile, reloadMode, reload, onToast]
+    [profile, reloadMode, reload, onToast, bundleBusy]
   );
 
   const uninstall = useCallback(

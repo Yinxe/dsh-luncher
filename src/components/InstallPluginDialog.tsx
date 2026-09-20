@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Cable, ExternalLink, FolderGit2, GitBranch, Layers, Loader2, Plus, Search, TriangleAlert, Zap,
 } from "lucide-react";
@@ -202,18 +202,25 @@ export default function InstallPluginDialog({
   }, [open]);
 
   // ── npm 搜索 ──
+  const searchSeq = useRef(0);
   const search = useCallback(async () => {
     const q = query.trim();
     if (!q) return;
+    // 连点/连按回车会并发多次搜索，慢的那个响应会后到并覆盖结果，
+    // 用递增序号只让「最后一次」写入，避免装到没搜过的包。
+    const mySeq = ++searchSeq.current;
     setSearching(true);
     setSearchErr(null);
     try {
-      setResults(await api.searchPackages(q));
+      const r = await api.searchPackages(q);
+      if (searchSeq.current === mySeq) setResults(r);
     } catch (e) {
-      setResults([]);
-      setSearchErr(String(e));
+      if (searchSeq.current === mySeq) {
+        setResults([]);
+        setSearchErr(String(e));
+      }
     } finally {
-      setSearching(false);
+      if (searchSeq.current === mySeq) setSearching(false);
     }
   }, [query]);
 
