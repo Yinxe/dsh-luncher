@@ -13,6 +13,8 @@ import { api } from "../api";
 import type { ClonedPlugin } from "../types";
 
 interface Props {
+  /** 当前 profile：link 安装会装进它，卡片上要说清 */
+  profile: string;
   /** 父级 busy（有任务在跑时禁用操作） */
   busy: boolean;
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
@@ -26,7 +28,7 @@ interface Props {
  * 本地克隆仓库（clone + link 安装的落点 ~/.dsh-launcher/git-plugins）。
  * 更新方式就是 git pull：这里一键执行 pull →（可选）构建 → 重新 link。
  */
-export default function ClonedReposCard({ busy, onToast, onPull, onLinkInstall }: Props) {
+export default function ClonedReposCard({ profile, busy, onToast, onPull, onLinkInstall }: Props) {
   const [repos, setRepos] = useState<ClonedPlugin[]>([]);
   const [loading, setLoading] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<ClonedPlugin | null>(null);
@@ -74,7 +76,7 @@ export default function ClonedReposCard({ busy, onToast, onPull, onLinkInstall }
         <div className="text-[13px] font-semibold">
           本地克隆仓库
           <span className="ml-2 text-xs font-normal text-muted-foreground">
-            ~/.dsh-launcher/git-plugins · 更新方式 git pull
+            ~/.dsh-launcher/git-plugins · link 安装会装进 <span className="font-mono text-foreground">{profile}</span> · 更新方式 git pull
           </span>
         </div>
         <span className="flex-1" />
@@ -139,7 +141,7 @@ export default function ClonedReposCard({ busy, onToast, onPull, onLinkInstall }
                       <button
                         className="text-[10px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
                         disabled={busy}
-                        title={`dsh plugin add ${c.installSpec}`}
+                        title={`dsh plugin --profile ${profile} add ${c.installSpec}（装进 ${profile}）`}
                         onClick={() => onLinkInstall(c.installSpec)}
                       >
                         <PackagePlus className="inline h-3 w-3" /> link

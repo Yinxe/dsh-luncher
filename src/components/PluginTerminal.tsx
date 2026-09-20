@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ChevronDown, Copy, Download, Eraser, Loader2, RotateCcw, ShieldCheck, Square,
+  ChevronDown, Copy, Download, Eraser, Layers, Loader2, RotateCcw, ShieldCheck, Square,
   Terminal as TerminalIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -60,11 +60,21 @@ export default function PluginTerminal({
   const [follow, setFollow] = useState(true);
   const bodyRef = useRef<HTMLDivElement>(null);
 
-  const active = useMemo(
-    () => jobs.find((j) => j.id === activeId) ?? jobs[0] ?? null,
-    [jobs, activeId],
+  // 隔离：终端默认只显示**当前 profile** 的任务。跨 profile 的任务混在一起，
+  // 是"以为在给 A 装、其实是在 B 上操作"的另一处来源；要看别的 profile
+  // 得显式展开（按钮上会带数量与运行中数量）。
+  const [showAll, setShowAll] = useState(false);
+  const foreign = useMemo(() => jobs.filter((j) => j.profile !== profile), [jobs, profile]);
+  const visible = useMemo(
+    () => (showAll ? jobs : jobs.filter((j) => j.profile === profile)),
+    [jobs, profile, showAll],
   );
-  const running = jobs.filter((j) => j.running).length;
+  const active = useMemo(
+    () => visible.find((j) => j.id === activeId) ?? visible[0] ?? null,
+    [visible, activeId],
+  );
+  const running = visible.filter((j) => j.running).length;
+  const foreignRunning = foreign.filter((j) => j.running).length;
   const lineCount = active?.lines.length ?? 0;
 
   // 自动滚到底（除非用户手动上滑）
@@ -144,15 +154,40 @@ export default function PluginTerminal({
         </div>
 
         <CollapsibleContent>
-          {jobs.length === 0 ? (
+          {visible.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-1.5 px-6 py-8 text-center text-[11.5px] text-muted-foreground">
               <TerminalIcon className="h-4 w-4 opacity-40" />
-              安装、升级或卸载插件后，命令输出会实时显示在这里
+              {foreign.length > 0 ? (
+                <>
+                  <span>当前 profile「{profile}」还没有任务</span>
+                  <Button size="xs" variant="outline" onClick={() => setShowAll(true)}>
+                    查看其他 profile 的 {foreign.length} 个任务
+                    {foreignRunning > 0 ? `（${foreignRunning} 个运行中）` : ""}
+                  </Button>
+                </>
+              ) : (
+                "安装、升级或卸载插件后，命令输出会实时显示在这里"
+              )}
             </div>
           ) : (
             <>
               {/* 任务标签 */}
-              <div className="border-b border-border px-4 py-2">
+              <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
+                {foreign.length > 0 && (
+                  <Button
+                    size="xs"
+                    variant={showAll ? "secondary" : "outline"}
+                    className="shrink-0"
+                    title={
+                      showAll
+                        ? "只看当前 profile 的任务"
+                        : `其他 profile 还有 ${foreign.length} 个任务（${foreignRunning} 个运行中）`
+                    }
+                    onClick={() => setShowAll((v) => !v)}
+                  >
+                    <Layers /> {showAll ? `只看 ${profile}` : `+${foreign.length} 其他 profile`}
+                  </Button>
+                )}
                 <ToggleGroup
                   type="single"
                   spacing={6}
@@ -160,7 +195,7 @@ export default function PluginTerminal({
                   value={active ? String(active.id) : ""}
                   onValueChange={(v) => v && onSelect(Number(v))}
                 >
-                  {jobs.map((j) => (
+                  {visible.map((j) => (
                     <ToggleGroupItem
                       key={j.id}
                       value={String(j.id)}

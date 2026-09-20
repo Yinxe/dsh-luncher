@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Cable, ExternalLink, FolderGit2, GitBranch, Loader2, Plus, Search, TriangleAlert,
+  Cable, ExternalLink, FolderGit2, GitBranch, Layers, Loader2, Plus, Search, TriangleAlert,
 } from "lucide-react";
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
@@ -213,11 +213,19 @@ export default function InstallPluginDialog({
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="flex max-h-[88vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
-        <DialogHeader className="shrink-0 gap-1.5 border-b border-border px-5 py-3.5 pr-12">
+        <DialogHeader className="shrink-0 gap-2 border-b border-border px-5 py-3.5 pr-12">
           <DialogTitle>安装插件</DialogTitle>
+          {/* 目标 profile 单独做成一条：安装最常见的事故就是装到别的 profile 上，
+              所以这里把它从说明文字里提出来，用主色底 + 等宽加粗，每个标签页都看得见 */}
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-primary/25 bg-primary/[0.05] px-2.5 py-1.5">
+            <Layers className="h-3.5 w-3.5 shrink-0 text-primary" />
+            <span className="text-[11.5px]">目标 profile</span>
+            <span className="font-mono text-[12.5px] font-semibold text-foreground">{profile}</span>
+            <span className="flex-1" />
+            <span className="text-[10.5px] text-muted-foreground">只影响这个 profile</span>
+          </div>
           <DialogDescription className="text-[11.5px] leading-relaxed">
-            安装到 profile「{profile}」——全部通过官方 <span className="font-mono">dsh plugin add</span> 执行，
-            输出实时显示在插件页的内置终端里。
+            全部通过官方 <span className="font-mono">dsh plugin add</span> 执行，输出实时显示在插件页的内置终端里。
           </DialogDescription>
         </DialogHeader>
 
@@ -729,7 +737,7 @@ export default function InstallPluginDialog({
                 onClose();
               }}
             >
-              <FolderGit2 /> Clone 并 link 安装
+              <FolderGit2 /> Clone 并 link 安装到 {profile}
             </Button>
           )}
           <span className="flex-1" />

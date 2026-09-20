@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  Braces, Cloud, FileArchive, GitBranch, Link2, PackageX, Plus, RefreshCw, RotateCcw, Save,
+  Braces, Cloud, FileArchive, GitBranch, Layers, Link2, PackageX, Plus, RefreshCw, RotateCcw,
+  Save, ShieldCheck,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -298,25 +299,72 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-base font-semibold">插件管理</h2>
-        <Select value={profile} onValueChange={setProfile}>
-          <SelectTrigger className="w-52 font-mono">
-            <SelectValue placeholder="选择 profile" />
-          </SelectTrigger>
-          <SelectContent>
-            {profiles.map((p) => (
-              <SelectItem key={p} value={p}>
-                {p}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Badge variant={reloadMode === "live" ? "success" : "warning"}>
-          patchReload = {reloadMode}
-          {reloadMode === "live" ? "（保存后即时生效）" : "（需重启实例生效）"}
-        </Badge>
-      </div>
+      {/* ── 工作区头：当前 profile 是这一页的**主语**，不是顺带的一个下拉 ──
+          原来它只是标题旁边一个 w-52 的下拉框，很容易在操作别的东西时忘了自己是哪个
+          profile，从而把插件装错地方。这里改成一张带主色的"工作区卡"：
+          左边说清范围，右边是加大的选择器 + 该 profile 的关键状态。 */}
+      <Card className="gap-3 border-primary/25 bg-primary/[0.04] p-4 ring-primary/20">
+        <div className="flex flex-wrap items-start gap-3">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+            <Layers className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base font-semibold">插件管理</h2>
+              <Badge variant="outline" className="text-[10px]">按 profile 隔离</Badge>
+              {detail && (
+                <span className="text-[10.5px] text-muted-foreground">
+                  {detail.bundles.length} 个插件 · {detail.packages.length} 个依赖
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-[11.5px] leading-relaxed text-muted-foreground">
+              本页的安装 / 卸载 / 升级 / 克隆 / 终端输出<strong className="font-medium text-foreground">只作用于右侧选中的 profile</strong>；
+              其他 profile 的依赖、<span className="font-mono">dsh.profile.bundles</span> 与
+              <span className="font-mono"> cordis.patch.yml</span> 不会被改动。
+            </p>
+          </div>
+          <div className="flex shrink-0 items-end gap-2">
+            <div className="flex flex-col gap-1">
+              <span className="text-[10.5px] font-medium text-muted-foreground">当前 profile</span>
+              <Select value={profile} onValueChange={setProfile}>
+                <SelectTrigger className="h-9 w-60 font-mono text-[13px] font-semibold">
+                  <SelectValue placeholder="选择 profile" />
+                </SelectTrigger>
+                <SelectContent>
+                  {profiles.map((p) => (
+                    <SelectItem key={p} value={p} className="font-mono">
+                      {p}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Badge
+              variant={reloadMode === "live" ? "success" : "warning"}
+              className="mb-1.5"
+              title={
+                reloadMode === "live"
+                  ? "该 profile 的 patchReload = live：保存 cordis.patch.yml 后即时生效"
+                  : "该 profile 的 patchReload = startup：改完需要重启实例才生效"
+              }
+            >
+              {reloadMode === "live" ? "live 即时生效" : "startup 需重启"}
+            </Badge>
+          </div>
+        </div>
+      </Card>
+
+      {/* ── 隔离边界：以下所有区块都属于上面选中的 profile ──
+          一条可见的左侧主色边框 + 一段极淡底色，把"作用范围"画出来，
+          避免在长页面里滚动到一半就忘了自己正在操作哪个 profile。 */}
+      <div className="space-y-4 rounded-xl border border-border/70 border-l-2 border-l-primary/60 bg-muted/20 p-3">
+        <div className="flex flex-wrap items-center gap-2 px-0.5 text-[10.5px] text-muted-foreground">
+          <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-primary/80" />
+          <span>隔离边界</span>
+          <span className="font-mono text-[11px] font-semibold text-foreground">{profile}</span>
+          <span className="hidden sm:inline">· 以下区块只读写这个 profile</span>
+        </div>
 
       {/* 内置终端：安装/卸载/升级的实时输出 */}
       <PluginTerminal
@@ -504,6 +552,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
 
       {/* clone + link 的本地仓库清单（git pull 更新入口） */}
       <ClonedReposCard
+        profile={profile}
         busy={busy}
         onToast={onToast}
         onPull={pullClone}
@@ -582,6 +631,9 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      </div>
+      {/* ── 隔离边界结束 ── */}
 
       {/* 安装插件对话框：npm / GitHub / 链接 / Clone 四种方式 */}
       <InstallPluginDialog
