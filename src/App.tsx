@@ -434,7 +434,7 @@ export default function App() {
       const r = await api.createRecoveryProfile();
       addToast(
         "ok",
-        `已创建恢复模式「${r.name}」（端口 ${r.port}）：只保留官方 base + web-app 插件，可在 Profile 实例页启动`
+        `已创建恢复模式「${r.name}」（端口 ${r.port}）：由 dsh 自带的 web 模板新建，只有官方 base + web-app 插件，可在 Profile 实例页启动`
       );
       refreshProfiles();
       refreshInstances();
@@ -1194,13 +1194,13 @@ export default function App() {
                               <ExternalLink /> 打开
                             </Button>
                           )}
-                          {/* 恢复模式入口：只挂在原版 dsh 内置的 web profile 上（恢复模式以它为模板），
-                              已经存在 web-Recovery 就不再显示 */}
+                          {/* 恢复模式入口：恢复模式以官方 web 模板新建（不再复制当前 web），
+                              入口仍挂在原版 dsh 内置的 web profile 行上；已存在就不再显示 */}
                           {row.reserved && row.target === "web" && !recoveryExists && (
                             <Button
                               size="sm"
                               variant="outline"
-                              title={`基于官方 web 复制一份只含官方插件、换邻近端口的「${RECOVERY_PROFILE}」`}
+                              title={`用 dsh 的 --from-default-profile web 新建一份只含官方插件、换邻近端口的「${RECOVERY_PROFILE}」`}
                               onClick={() => setRecoveryOpen(true)}
                             >
                               <ShieldPlus /> 恢复模式
@@ -1452,10 +1452,12 @@ export default function App() {
           <AlertDialogHeader>
             <AlertDialogTitle>创建恢复模式「{RECOVERY_PROFILE}」？</AlertDialogTitle>
             <AlertDialogDescription>
-              以官方 <span className="font-mono">web</span> 为模板复制一份独立 profile：内置插件只保留官方{" "}
-              <span className="font-mono">base</span> 与 <span className="font-mono">web-app</span>
-              （第三方插件全部移除），并自动换一个邻近的空闲端口。相当于「原版 web 换个端口运行」，
-              用于排查第三方插件把 web 跑挂的情况。不会改动官方 web 本身，也不会自动创建。
+              让 dsh 用它自带 <span className="font-mono">web</span> 模板新建一份独立 profile
+              （<span className="font-mono">--from-default-profile web</span>，不复制你当前的 web）：
+              内置插件只有官方 <span className="font-mono">base</span> 与{" "}
+              <span className="font-mono">web-app</span>，随后自动写入快捷配置并换一个邻近的空闲端口。
+              相当于「原版 web 换个端口运行」，用于排查第三方插件把 web 跑挂的情况。
+              不会改动官方 web 本身，也不会自动创建。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

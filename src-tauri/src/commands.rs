@@ -559,11 +559,15 @@ pub fn purge_deleted_profile(dir_name: String) -> Result<(), String> {
     crate::profile_cfg::purge_deleted_profile(&dir_name)
 }
 
-/// 生成「恢复模式」profile（基于官方 web 复制、只留官方插件、换邻近空闲端口）。
+/// 生成「恢复模式」profile（用 dsh 的 `--profile web-Recovery --from-default-profile web`
+/// 从随附模板新建，再把端口等快捷配置写进它自己的 cordis.patch.yml）。
 /// 只在用户显式点击并确认后调用，启动器不会自动创建。
 #[tauri::command]
-pub fn create_recovery_profile() -> Result<crate::profile_cfg::RecoveryCreated, String> {
-    crate::profile_cfg::create_recovery_profile()
+pub fn create_recovery_profile(
+    state: State<'_, AppState>,
+) -> Result<crate::profile_cfg::RecoveryCreated, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    crate::profile_cfg::create_recovery_profile(&settings)
 }
 
 /// 把运行日志导出到 ~/.dsh-launcher/logs/
@@ -976,7 +980,7 @@ pub fn set_web_quick_config(
     crate::profile_cfg::set_web_quick_config(&profile, &config)
 }
 
-/// 复制 profile。复制后**自动错开 web 端口**（复用恢复模式那套「邻近空闲端口」逻辑），
+/// 复制 profile。复制后**自动错开 web 端口**（复用「邻近空闲端口」那套逻辑），
 /// 否则两个实例配置同一个端口、无法并行启动。返回新端口（null = 该 profile 没有 webserver 配置）。
 #[tauri::command]
 pub fn copy_profile(source: String, new_name: String) -> Result<Option<u16>, String> {

@@ -1226,7 +1226,7 @@ pub fn delete_profile(name: &str) -> Result<String, String> {
     Ok(dst.to_string_lossy().into_owned())
 }
 
-/// 恢复模式只保留这两个官方内置插件，其余第三方插件全部摘掉
+/// 恢复模式只允许这两个官方内置插件（= dsh 随附 web 模板的内容）
 const OFFICIAL_BUNDLES: &[&str] = &["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"];
 
 /// dsh 宿主自带（in-box）的插件包：**不允许卸载、不允许停用**。
@@ -1260,8 +1260,9 @@ pub fn inbox_bundle_reject(name: &str, action: &str) -> String {
     )
 }
 
-/// 把 package.json 的 bundles 收敛到官方两个，并同步移除对应的 dependencies，
-/// 这样恢复模式不会加载也不会安装任何第三方插件。
+/// 把 package.json 的 bundles 收敛到官方两个，并同步移除对应的 dependencies。
+/// 恢复模式的骨架由 dsh 的 `--from-default-profile web` 生成、本来就是这两个；
+/// 这里是防呆兜底（模板被本地改过时），保证它永远不加载也不安装第三方插件。
 fn prune_to_official_bundles(dir: &Path) -> Result<(), String> {
     let path = dir.join("package.json");
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
@@ -1299,7 +1300,7 @@ fn prune_to_official_bundles(dir: &Path) -> Result<(), String> {
 }
 
 /// 在 base 之上找一个「邻近、当前空闲、也没被别的 profile 配置占用」的端口
-/// （复制实例、恢复模式共用同一套错开逻辑）
+/// （复制实例、恢复模式共用这一套错开逻辑）
 fn pick_free_nearby_port(host: &str, base: u16) -> Result<u16, String> {
     let used: Vec<u16> = profiles::scan_profiles()
         .iter()
@@ -1341,38 +1342,137 @@ pub fn assign_free_web_port(profile: &str) -> Result<Option<u16>, String> {
     Ok(Some(port))
 }
 
-/// 恢复模式 profile 名：目前只支持以官方 `web` 为模板（web-Recovery）
+/// 恢复模式 profile 名：用 dsh 随附的 `web` 模板新建（web-Recovery）
 pub const RECOVERY_PROFILE: &str = "web-Recovery";
 
-#[derive(Clone, Serialize)]
+/// 恢复模式取自 dsh 随附模板里的 `web`（= 官方 base + web-app）
+const RECOVERY_TEMPLATE: &str = "web";
+
+/// dsh web 的默认端口：连官方 web profile 都还没落 webserver 配置时，以它作错开基准
+const DEFAULT_WEB_PORT: u16 = 3080;
+
+#[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryCreated {
     pub name: String,
     pub port: u16,
 }
 
-/// 生成「恢复模式」profile：以官方 `web` 为模板复制出 `Recovery`，
-/// 内置插件只留官方 base + web-app，端口换成邻近空闲端口 ——
-/// 相当于「原版 web 换个端口运行」，用于排查第三方插件把 web 跑挂的情况。
+/// 恢复模式的目标目录。dsh 只认 `$DSH_HOME/profiles`（单数 `profile` 是历史兼容），
+/// 所以这里不跟 `profiles_dir()` 的单数回退走。
+fn recovery_dir() -> PathBuf {
+    profiles::dsh_native_home()
+        .join("profiles")
+        .join(RECOVERY_PROFILE)
+}
+
+/// 让 dsh 自己按随附模板初始化 profile 骨架：
+/// `dsh --profile <name> --from-default-profile <template> --dump-default-config`
+///
+/// `--from-default-profile` 负责从随附模板建出 package.json / cordis.patch.yml /
+/// pnpm-workspace.yaml；后面接 `--dump-default-config` 而不是真的 boot，是为了让它
+/// 打印完配置树就退出 —— 建完不启动服务，也不去解析（可能正是被第三方插件弄坏的）
+/// 用户补丁层。骨架天生只有官方 bundle，所以不再需要「先复制 web 再裁剪」。
+fn init_profile_from_template(
+    settings: &Settings,
+    name: &str,
+    template: &str,
+) -> Result<(), String> {
+    let (node, bin_js) = resolve_dsh_bin(settings)?;
+    let out = std::process::Command::new(&node)
+        .arg(&bin_js)
+        .arg("--profile")
+        .arg(name)
+        .arg("--from-default-profile")
+        .arg(template)
+        .arg("--dump-default-config")
+        .env(
+            "DSH_HOME",
+            profiles::dsh_native_home().to_string_lossy().into_owned(),
+        )
+        .output()
+        .map_err(|e| format!("无法执行 dsh（{}）: {e}", bin_js.display()))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let err = err.trim();
+    Err(if err.is_empty() {
+        format!("dsh 初始化 profile 失败（退出码 {:?}）", out.status.code())
+    } else {
+        format!("dsh 初始化 profile 失败：{err}")
+    })
+}
+
+/// 防呆：骨架必须就是「官方 base + web-app」。模板被本地改过（或 dsh 换了模板）时
+/// 裁回官方两个，保证恢复模式永远只跑官方插件。骨架正常时一个字节都不动。
+fn ensure_official_bundles(dir: &Path) -> Result<(), String> {
+    let raw = std::fs::read_to_string(dir.join("package.json"))
+        .map_err(|e| format!("读取 package.json 失败: {e}"))?;
+    let bundles: Vec<String> = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.pointer("/dsh/profile/bundles").and_then(|b| b.as_array()).cloned())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if bundles.iter().map(String::as_str).eq(OFFICIAL_BUNDLES.iter().copied()) {
+        return Ok(());
+    }
+    prune_to_official_bundles(dir)
+}
+
+/// 给刚建出来的恢复模式写「快捷配置」：端口取官方 web 端口（没配就用 dsh 默认端口）
+/// 之后的邻近空闲端口，其余项（openBrowser / surfaceContext / cookieMaxAgeDays）
+/// 沿用官方 web 当前配置、缺项用默认值。写的是它自己的 cordis.patch.yml。
+fn write_recovery_quick_config(profile: &str) -> Result<u16, String> {
+    let seed = get_web_quick_config(RECOVERY_TEMPLATE).unwrap_or_default();
+    let (host, base) = match web_addr(RECOVERY_TEMPLATE) {
+        Some(v) => v,
+        // 官方 web 还没配 webserver（甚至没建过）也要能生成恢复模式：退到 dsh 默认端口
+        None => ("127.0.0.1".to_string(), DEFAULT_WEB_PORT),
+    };
+    let port = pick_free_nearby_port(&host, base)?;
+    set_web_quick_config(
+        profile,
+        &WebQuickConfigInput {
+            host,
+            port: port as u64,
+            open_browser: seed.open_browser.unwrap_or(true),
+            surface_context: seed.surface_context.unwrap_or(true),
+            cookie_max_age_days: seed.cookie_max_age_days.unwrap_or(36500),
+        },
+    )?;
+    Ok(port)
+}
+
+/// 生成「恢复模式」profile：用 dsh 自己的 `--from-default-profile web` 从随附模板新建
+/// `web-Recovery` —— 不复制用户当前的 web，因此天生只有官方 base + web-app；随后把端口
+/// 等快捷配置写进它自己的 cordis.patch.yml。相当于「原版 web 换个端口运行」，
+/// 用于排查第三方插件把 web 跑挂的情况。
 ///
 /// 只在显式调用时创建，启动器**永远不会**自动创建它。
-pub fn create_recovery_profile() -> Result<RecoveryCreated, String> {
-    let root = profiles::profiles_dir();
-    if existing_profile_path(RECOVERY_PROFILE).is_some() {
+pub fn create_recovery_profile(settings: &Settings) -> Result<RecoveryCreated, String> {
+    create_recovery_profile_with(settings, init_profile_from_template)
+}
+
+/// `create_recovery_profile` 的可测内核：`init` 注入，测试不必依赖真实 dsh 安装。
+fn create_recovery_profile_with<F>(settings: &Settings, init: F) -> Result<RecoveryCreated, String>
+where
+    F: FnOnce(&Settings, &str, &str) -> Result<(), String>,
+{
+    let dir = recovery_dir();
+    // existing_profile_path 覆盖单数 profile 目录的回退，dir 覆盖 dsh 真正会写的复数目录
+    if dir.exists() || existing_profile_path(RECOVERY_PROFILE).is_some() {
         return Err(format!("恢复模式 profile「{RECOVERY_PROFILE}」已存在"));
     }
-    if !root.join("web").is_dir() {
-        return Err("找不到官方 web profile，无法生成恢复模式".into());
-    }
-    if web_addr("web").is_none() {
-        return Err("官方 web profile 没有配置 webserver 端口，无法生成恢复模式".into());
-    }
-    copy_profile("web", RECOVERY_PROFILE)?;
-    // 后面任何一步失败都回滚，避免留下一个「只复制了一半」的 profile
+    // dsh 自己就不会覆盖已有 profile：失败时它要么没建目录，要么已自行清理
+    init(settings, RECOVERY_PROFILE, RECOVERY_TEMPLATE)?;
+    // 骨架就位后的任何一步失败都回滚，避免留下一个「建了一半」的 profile
     let built = (|| -> Result<u16, String> {
-        prune_to_official_bundles(&root.join(RECOVERY_PROFILE))?;
-        assign_free_web_port(RECOVERY_PROFILE)?
-            .ok_or_else(|| "恢复模式没能取到可用的 web 端口".to_string())
+        if !dir.join("package.json").is_file() {
+            return Err("dsh 没有生成 profile 骨架（package.json 缺失）".into());
+        }
+        ensure_official_bundles(&dir)?;
+        write_recovery_quick_config(RECOVERY_PROFILE)
     })();
     match built {
         Ok(port) => Ok(RecoveryCreated {
@@ -1380,7 +1480,7 @@ pub fn create_recovery_profile() -> Result<RecoveryCreated, String> {
             port,
         }),
         Err(e) => {
-            let _ = std::fs::remove_dir_all(root.join(RECOVERY_PROFILE));
+            let _ = std::fs::remove_dir_all(&dir);
             Err(e)
         }
     }
@@ -2433,7 +2533,8 @@ mod tests {
     }
 
     /// 改名 / 删除 / 恢复模式：dsh 内置保留 profile 必须全部拒绝，
-    /// 普通 profile 可改名、删除进回收站；恢复模式只留官方插件并换邻近空闲端口。
+    /// 普通 profile 可改名、删除进回收站；恢复模式用 dsh 的 `--from-default-profile web`
+    /// 新建（只有官方插件）并换邻近空闲端口。
     #[test]
     fn rename_delete_and_recovery_profile() {
         let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2480,8 +2581,27 @@ mod tests {
         assert!(!profiles.join("mine2").exists());
         assert!(std::path::Path::new(&trash).exists(), "删除应移入回收目录");
 
-        // 3) 恢复模式：基于 web 复制、只留官方两个插件、换邻近空闲端口
-        let rec = create_recovery_profile().unwrap();
+        // 3) 恢复模式：走 dsh 的 `--from-default-profile web`（这里注入 stub 代替真实 dsh），
+        //    骨架天生只有官方两个插件，随后写入端口等快捷配置
+        let calls = std::cell::RefCell::new(Vec::new());
+        let rec = create_recovery_profile_with(&crate::settings::Settings::default(), |_s, name, template| {
+            calls.borrow_mut().push(format!("{name}<-{template}"));
+            let dir = profiles.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("package.json"),
+                r#"{"name":"dsh-profile-web-Recovery","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"],"patchReload":"live"}}}"#,
+            )
+            .unwrap();
+            std::fs::write(dir.join("cordis.patch.yml"), "# 模板自带的空补丁层\n[]\n").unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            calls.borrow().as_slice(),
+            ["web-Recovery<-web"],
+            "恢复模式必须用 dsh 的 --from-default-profile web 建骨架"
+        );
         assert_eq!(rec.name, RECOVERY_PROFILE);
         assert!(
             rec.port > 3080 && rec.port <= 3080 + 200,
@@ -2500,25 +2620,21 @@ mod tests {
             ],
             "恢复模式只应保留官方 base + web-app"
         );
-        assert!(
-            pkg.get("dependencies")
-                .and_then(|d| d.as_object())
-                .map(|d| d.is_empty())
-                .unwrap_or(true),
-            "第三方依赖应一并移除"
-        );
         assert_eq!(
             get_web_quick_config(RECOVERY_PROFILE).unwrap().port,
             Some(rec.port as u64),
             "新 profile 的 webserver 端口应指向新端口"
         );
-        // 官方 web 本体不受影响
+        // 官方 web 本体不受影响（恢复模式不再读它、更不会改它）
         assert_eq!(web_addr("web").unwrap().1, 3080);
         assert!(std::fs::read_to_string(web.join("package.json"))
             .unwrap()
             .contains("third-party"));
         // 已存在时二次创建应拒绝
-        assert!(create_recovery_profile().is_err());
+        assert!(create_recovery_profile_with(&crate::settings::Settings::default(), |_, _, _| {
+            panic!("已存在时不得再调用 dsh 初始化")
+        })
+        .is_err());
 
         // 4) 复制实例：web 类副本必须自动错开端口，否则两个实例抢同一个端口
         copy_profile("web", "web-copy").unwrap();
@@ -2565,6 +2681,87 @@ mod tests {
         std::fs::create_dir_all(profiles.join("dup")).unwrap();
         assert!(restore_deleted_profile(&dup.dir_name).is_err());
         assert!(purge_deleted_profile("../evil").is_err(), "回收站条目名要挡路径穿越");
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+        std::env::remove_var("DSH_LAUNCHER_HOME");
+    }
+
+    /// 恢复模式的另外两种情况：本地没有任何 web profile 时也要能建（端口退到 dsh 默认端口）；
+    /// 模板被改出第三方 bundle 时裁回官方两个；dsh 建骨架失败时回滚干净。
+    #[test]
+    fn recovery_profile_falls_back_and_prunes() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-rec-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let home = tmp.join("launcher-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("DSH_HOME", &tmp);
+        std::env::set_var("DSH_LAUNCHER_HOME", &home);
+        let profiles = tmp.join("profiles");
+
+        // 1) 完全没有官方 web profile：端口基准退到 3080，用 dsh 默认值补齐快捷配置
+        let rec = create_recovery_profile_with(&crate::settings::Settings::default(), |_s, name, _t| {
+            let dir = profiles.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            // 模拟「模板漂移」：多出一个第三方 bundle + 一条依赖
+            std::fs::write(
+                dir.join("package.json"),
+                r#"{"dependencies":{"third-party":"1.0.0"},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app","third-party"]}}}"#,
+            )
+            .unwrap();
+            std::fs::write(dir.join("cordis.patch.yml"), "[]\n").unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            rec.port > 3080 && rec.port <= 3080 + 200,
+            "没有 web profile 时也应以 3080 为基准错开，实际 {}",
+            rec.port
+        );
+        let pkg: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(profiles.join(RECOVERY_PROFILE).join("package.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            pkg.pointer("/dsh/profile/bundles").unwrap().as_array().unwrap(),
+            &vec![
+                serde_json::Value::String("@deepseek-ai/dsh-base".into()),
+                serde_json::Value::String("@deepseek-ai/dsh-web-app".into()),
+            ],
+            "漂移出来的第三方 bundle 应被裁掉"
+        );
+        assert!(
+            pkg.get("dependencies")
+                .and_then(|d| d.as_object())
+                .map(|d| d.is_empty())
+                .unwrap_or(true),
+            "第三方依赖应一并移除"
+        );
+        let cfg = get_web_quick_config(RECOVERY_PROFILE).unwrap();
+        assert_eq!(cfg.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(cfg.port, Some(rec.port as u64));
+        assert_eq!(cfg.open_browser, Some(true));
+        assert_eq!(cfg.surface_context, Some(true));
+        assert_eq!(cfg.cookie_max_age_days, Some(36500));
+
+        // 2) dsh 没建出骨架：报错且不留残骸
+        delete_profile(RECOVERY_PROFILE).unwrap();
+        let err = create_recovery_profile_with(&crate::settings::Settings::default(), |_s, _n, _t| Ok(()))
+            .unwrap_err();
+        assert!(err.contains("package.json"), "应指出骨架缺失，实际：{err}");
+        assert!(
+            !profiles.join(RECOVERY_PROFILE).exists(),
+            "建了一半的 profile 必须回滚"
+        );
+
+        // 3) dsh 自身失败：错误原样上抛
+        let err = create_recovery_profile_with(
+            &crate::settings::Settings::default(),
+            |_s, _n, _t| Err("dsh 初始化 profile 失败：unknown default profile".into()),
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown default profile"));
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");
