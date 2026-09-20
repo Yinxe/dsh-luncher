@@ -71,7 +71,8 @@ export default function VersionTableRow({
         </div>
         {upgradeTo && (
           <button
-            className="mt-0.5 text-[11px] font-semibold text-amber-500 underline-offset-2 hover:underline"
+            className="mt-0.5 text-[11px] font-semibold text-amber-500 underline-offset-2 hover:underline disabled:pointer-events-none disabled:opacity-50"
+            disabled={busy}
             onClick={() => onUpgrade(upgradeTo)}
             title={`已安装 ${row.version}，点击安装 ${upgradeTo}`}
           >
