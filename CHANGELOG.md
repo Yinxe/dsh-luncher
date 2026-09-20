@@ -10,6 +10,11 @@ DSH Launcher 每个版本的用户可见变化。格式参考 [Keep a Changelog]
 
 ## [Unreleased]
 
+### 修复
+
+- **插件「检查更新」不再串 profile**：检查更新还在跑的时候切换 profile，此前旧 profile 的结果晚到会盖到新 profile 的列表上，「升级」按钮可能拿着旧 profile 的规格把包装错地方；现在切换后旧结果直接丢弃。
+- **内置终端切 profile 自动收回隔离视图**：展开「查看其他 profile 的任务」后切到一个没有跨 profile 任务的 profile，此前开关按钮会消失、视图卡在混合模式回不去；现在切换 profile 会自动收起。
+
 ## [0.1.3] - 2026-09-21
 
 ### 安全

@@ -64,6 +64,9 @@ export default function PluginTerminal({
   // 是"以为在给 A 装、其实是在 B 上操作"的另一处来源；要看别的 profile
   // 得显式展开（按钮上会带数量与运行中数量）。
   const [showAll, setShowAll] = useState(false);
+  // 切换 profile 时收起「全部」：展开按钮只挂在"存在其他 profile 任务"上，
+  // 切到一个没有外部任务的 profile 后按钮消失，视图会卡在跨 profile 模式回不来
+  useEffect(() => { setShowAll(false); }, [profile]);
   const foreign = useMemo(() => jobs.filter((j) => j.profile !== profile), [jobs, profile]);
   const visible = useMemo(
     () => (showAll ? jobs : jobs.filter((j) => j.profile === profile)),

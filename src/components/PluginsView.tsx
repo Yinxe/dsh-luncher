@@ -174,9 +174,11 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
   }, [profile, editFile, draft, onToast, reload]);
 
   const doCheckUpdates = useCallback(async () => {
+    const target = profile; // 检查在途时可切 profile，旧结果不能写进新 profile 的视图
     setCheckingUpdates(true);
     try {
-      const list = await api.checkPluginUpdates(profile);
+      const list = await api.checkPluginUpdates(target);
+      if (latestProfileRef.current !== target) return;
       const map: Record<string, PluginUpdateInfo> = {};
       for (const u of list) map[u.name] = u;
       setUpdates(map);
@@ -191,6 +193,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
           : "全部已最新"
       );
     } catch (e) {
+      if (latestProfileRef.current !== target) return;
       onToast("err", `检查更新失败: ${e}`);
     } finally {
       setCheckingUpdates(false);
