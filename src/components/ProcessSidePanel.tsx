@@ -74,11 +74,11 @@ export default function ProcessSidePanel({
 
   useEffect(() => {
     setFileLog(null);
-    if (externalId == null) return;
+    if (externalId == null || !open) return; // 抽屉关闭后不再后台 tail 日志文件
     pull();
     const t = setInterval(pull, 1500);
     return () => clearInterval(t);
-  }, [externalId, pull]);
+  }, [externalId, pull, open]);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
