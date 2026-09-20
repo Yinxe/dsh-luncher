@@ -9,6 +9,38 @@
   </head>
   <body>
     <div id="root"></div>
+    <!--
+      兜底：入口模块图加载失败时（例如资源被当成 JS 模块加载、MIME 不匹配），
+      #root 会永久为空 —— 这里给一个可行动的提示，避免无声白屏。
+    -->
+    <div
+      id="boot-fallback"
+      hidden
+      style="position:fixed;inset:auto 12px 12px 12px;z-index:9999;padding:10px 12px;border-radius:8px;border:1px solid rgba(220,120,60,.5);background:rgba(60,30,10,.92);color:#f5e6da;font:12px/1.6 system-ui,sans-serif"
+    >
+      前端界面尚未渲染（可能仍在编译，或入口脚本加载失败）。
+      <a href="#" id="boot-reload" style="color:#ffb37a">重新加载</a>
+    </div>
+    <script>
+      (function () {
+        var box = document.getElementById("boot-fallback");
+        document.getElementById("boot-reload").addEventListener("click", function (e) {
+          e.preventDefault();
+          location.reload();
+        });
+        function report(text) {
+          box.hidden = false;
+          box.insertAdjacentText("beforeend", " " + text);
+        }
+        window.addEventListener("error", function (e) {
+          report(String(e.message || e.error || "脚本错误"));
+        });
+        setTimeout(function () {
+          var root = document.getElementById("root");
+          if (root && root.childElementCount === 0) report("入口脚本未执行");
+        }, 8000);
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

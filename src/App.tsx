@@ -8,7 +8,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
-import dshLogo from "./assets/dsh-logo.svg";
 import { useTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -711,7 +710,8 @@ export default function App() {
         {/* 侧栏导航 */}
         <nav className="flex w-56 shrink-0 flex-col gap-0.5 border-r border-border bg-card/70 p-2.5">
           <div className="mb-3 flex items-center gap-2.5 px-1.5 pb-2 pt-0.5">
-            <img src={dshLogo} alt="DSH" className="h-8 w-8" draggable={false} />
+            {/* 走 public/ 静态资源，避免把 SVG 当 JS 模块加载（见 index.html 的 favicon） */}
+            <img src="/dsh-logo.svg" alt="DSH" className="h-8 w-8" draggable={false} />
             <div className="leading-tight">
               <div className="text-[13px] font-bold tracking-tight">DSH Launcher</div>
               <div className="text-[10px] text-muted-foreground">@deepseek-ai/dsh · v{env.appVersion}</div>
