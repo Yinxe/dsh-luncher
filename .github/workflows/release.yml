@@ -100,7 +100,13 @@ jobs:
           tagName: v__VERSION__ # action 自动把 __VERSION__ 替换为应用版本号
           releaseName: 'DSH Launcher v__VERSION__'
           releaseBody: '跨平台安装包，请从下方 Assets 下载：Linux（.deb / .rpm / .AppImage）、Windows（NSIS .exe 安装包 / .msi）、macOS（universal .dmg）。'
-          releaseDraft: true
+          # 直接发布成正式 Release（非 draft、非 pre-release）。
+          # GitHub 的三种状态里只有「non-draft + non-prerelease」才会被
+          # releases/latest 指到；草稿和预发布都会让 latest.json 变成 404，
+          # 客户端只表现为「检查不到更新」。所以这里不留人工步骤。
+          # 想先审一遍再发就把 releaseDraft 改回 true，然后在 Releases 页面点
+          # Publish release（注意别勾 "Set as a pre-release"）。
+          releaseDraft: false
           prerelease: false
           # 生成 updater 清单 latest.json 并上传到同一个 Release —— 应用内自动更新的数据源。
           # 注意输入名：v1 是 uploadUpdaterJson（v0 那版叫 includeUpdaterJson，写错会被静默忽略）

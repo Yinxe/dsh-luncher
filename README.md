@@ -168,16 +168,23 @@ npm run release        # 同上（别名）
 
 1. 改 `src-tauri/tauri.conf.json` 的 `version` 和 `src-tauri/Cargo.toml` 的 `version`（两者保持一致）；
 2. 触发 `.github/workflows/release.yml`：手动 `workflow_dispatch`（可填版本号覆盖）或 push 到 `release` 分支；
-3. CI 产出三端安装包 + `.sig` 签名 + `latest.json`，全部挂到一个 **Draft Release**；
-4. **把 Draft Release 点「Publish release」，并且不要勾「Set as a pre-release」**。两个都会让 `releases/latest/download/latest.json` 直接 404，而客户端只会表现为「检查不到更新」：
-   - **Draft（草稿）**：匿名访问不到，必须 Publish；
-   - **Pre-release（预发布）**：GitHub 的 `releases/latest` **会跳过预发布**。实测过：一个只标了 pre-release 的 v0.1.0 会让 `https://github.com/<你>/<仓库>/releases/latest/download/latest.json` 返回 404，`gh api repos/<你>/<仓库>/releases/latest` 也是 `Not Found`。想发测试版就用单独的 tag + 单独的 endpoints，不要动正式通道的这个 release。
+3. CI 产出三端安装包 + `.sig` 签名 + `latest.json`，**直接发布成正式 Release**（`releaseDraft: false`），并把 `latest.json` 的下载地址改写成 canonical 形式。**不需要任何手动步骤**。
 
-   发布后用这两条命令自查（第二条应能打印出版本号）：
-   ```bash
-   gh api repos/<你的账号>/<仓库名>/releases/latest --jq .tag_name
-   curl -sL https://github.com/<你的账号>/<仓库名>/releases/latest/download/latest.json | head -c 80
-   ```
+> **别把 release 标成 pre-release**。GitHub 的 release 只有三种状态，而 `releases/latest` 只认「non-draft + non-prerelease」：
+>
+> | 状态 | `releases/latest` 指向它吗 | 客户端表现 |
+> | --- | --- | --- |
+> | Draft（新建 release 的默认状态） | ❌ 匿名访问不到 | 检查不到更新 |
+> | Pre-release（表单里那个勾选框） | ❌ 会被跳过 | 检查不到更新 |
+> | 正式 release（**不勾** pre-release，点 Publish） | ✅ | 正常 |
+>
+> 实测过一次：只标了 pre-release 的 v0.1.0 会让 `gh api repos/<你>/<仓库>/releases/latest` 返回 `Not Found`、`.../releases/latest/download/latest.json` 返回 404。想发测试版请用**单独的 tag + 单独的 endpoints**，不要动正式通道。包要是坏了，删掉 release 和 tag、重跑一次 CI 即可。
+
+发完用这两条自查（第二条应能打印出版本号）：
+```bash
+gh api repos/<你的账号>/<仓库名>/releases/latest --jq .tag_name
+curl -sL https://github.com/<你的账号>/<仓库名>/releases/latest/download/latest.json | head -c 80
+```
 
 本地打包（不走 CI）则 `npm run build:release`，前提是当前 shell 里有 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。
 
