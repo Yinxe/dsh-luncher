@@ -391,6 +391,28 @@ fn ensure_profile_free(
             ));
         }
     }
+    // 端口冲突预检：profile 的 web 端口已经有人在监听时直接给出可操作的错误。
+    // 否则要等 dsh 拉起、bind 失败、秒退，日志里只剩一行难懂的报错。
+    // 同时这也是「cmdline 认不出、但端口占着」的外部实例的兜底守卫。
+    if let Some((host, port)) = crate::profile_cfg::web_addr(prof) {
+        use crate::procs::PortOwner;
+        let who = match crate::procs::port_owner(&host, port, prof) {
+            None => None,
+            Some(PortOwner::ThisProfile(pid)) => Some(format!(
+                "profile「{prof}」已有的实例（PID {pid}）"
+            )),
+            Some(PortOwner::OtherProfile { pid, profile: other }) => {
+                Some(format!("profile「{other}」的 dsh 实例（PID {pid}）"))
+            }
+            Some(PortOwner::OtherProcess(pid)) => Some(format!("其它进程（PID {pid}）")),
+            Some(PortOwner::Unknown) => Some("另一个进程".to_string()),
+        };
+        if let Some(who) = who {
+            return Err(format!(
+                "profile「{prof}」的 web 端口 {port} 已被{who}占用，无法启动；请先停止它，或到「快捷配置」改用其它端口"
+            ));
+        }
+    }
     Ok(())
 }
 

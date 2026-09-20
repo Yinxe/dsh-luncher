@@ -131,6 +131,17 @@ pub fn refresh(app: &AppHandle) {
     let _ = tray.set_menu(Some(menu));
 }
 
+/// 把菜单刷新挪到独立线程再执行。
+/// 事件监听器是**同步**回调（Tauri 在 emit 的线程上直接调用），而 `refresh`
+/// 会枚举系统进程（Windows 走 PowerShell、约 1s）并重建菜单；命令线程（主线程）
+/// 上 emit 时会直接把界面卡住。同理，emit 方也绝不能在持锁状态下回调进来。
+fn refresh_async(app: &AppHandle) {
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("tray-refresh-event".into())
+        .spawn(move || refresh(&app));
+}
+
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     app.manage(MenuState::default());
 
@@ -165,9 +176,9 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
 
     // 内嵌进程启停即时刷新
     let app_exit = app.clone();
-    app.listen("proc-exit", move |_| refresh(&app_exit));
+    app.listen("proc-exit", move |_| refresh_async(&app_exit));
     let app_start = app.clone();
-    app.listen("proc-started", move |_| refresh(&app_start));
+    app.listen("proc-started", move |_| refresh_async(&app_start));
 
     // 终端等外部启动的 dsh 没有事件可订阅，定时轮询兜底
     let app_poll = app.clone();

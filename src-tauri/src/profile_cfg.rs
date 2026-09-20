@@ -926,6 +926,23 @@ pub fn get_web_quick_config(profile: &str) -> Result<WebQuickConfig, String> {
     Ok(web_quick_from_patch(&raw))
 }
 
+/// 该 profile 的 web 监听地址 `(host, port)`；仅当 patch 里存在**启用**的
+/// webserver 条目且带 port 时返回。
+///
+/// 用途：端口是 web 实例的稳定身份。启动器重启 / `detached.json` 丢失 / 终端外部
+/// 启动，只要端口还在监听就能重新发现实例（见 `crate::netports`）。
+/// 没配 webserver 条目时返回 `None`——此时不得猜默认端口，否则别的程序占着 3080
+/// 会被误判成该 profile 在运行。
+pub fn web_addr(profile: &str) -> Option<(String, u16)> {
+    let cfg = get_web_quick_config(profile).ok()?;
+    let port = u16::try_from(cfg.port?).ok()?;
+    let host = cfg
+        .host
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    Some((host, port))
+}
+
 /// YAML 单引号标量：内部单引号翻倍转义
 fn yaml_single_quoted(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))

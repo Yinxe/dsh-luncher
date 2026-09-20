@@ -4,6 +4,7 @@ mod installed;
 mod installer;
 mod launcher;
 mod modelcfg;
+mod netports;
 mod profiles;
 mod procs;
 mod profile_cfg;

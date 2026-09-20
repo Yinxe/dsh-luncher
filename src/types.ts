@@ -149,7 +149,7 @@ export interface ProfileInstance {
   profile: string;
   running: boolean;
   pid: number | null;
-  /** embedded=启动器子进程 | external=终端/外部启动 | detached=启动器派生的独立进程 */
+  /** embedded=启动器子进程 | external=终端/外部启动 | detached=启动器派生的独立进程 | port=按端口探测发现 */
   source: string | null;
   version: string | null;
 }

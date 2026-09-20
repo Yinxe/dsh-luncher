@@ -1017,7 +1017,9 @@ export default function App() {
                     : row.phase === "ready" ? "启动成功"
                     : row.phase === "failed" ? `启动失败${row.code != null ? `（退出码 ${row.code}）` : ""}`
                     : row.phase === "external"
-                    ? row.source === "detached" ? "运行中（独立进程）" : "运行中（外部启动）"
+                    ? row.source === "detached" ? "运行中（独立进程）"
+                    : row.source === "port" ? "运行中（端口探测）"
+                    : "运行中（外部启动）"
                     : "未运行";
                   const canStop = row.phase === "starting" || row.phase === "ready" || row.phase === "external";
                   const canOpen = row.phase === "ready" && !!row.webUrl;
