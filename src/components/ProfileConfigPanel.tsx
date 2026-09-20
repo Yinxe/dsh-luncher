@@ -149,7 +149,8 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             保存后启动器在 <span className="font-mono">cordis.patch.yml</span> 中整块接管
             webserver / web-runtime / connection 三个条目（自动备份）。patch 条目会整体替换该行
-            config，所以键由启动器成套生成；两条 <span className="font-mono">trustedHosts</span> 固定用
+            config，所以键必须成套写全——漏写会退回 schema 默认值（例如 --no-open
+            失效）；两条 <span className="font-mono">trustedHosts</span> 固定用
             <span className="font-mono"> !!js </span>表达式联动 webStartup → webRuntime 信任链
             （局域网信任随绑定网卡与 --trusted-host 自动推导，无需手改）。
           </p>
@@ -196,8 +197,8 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
               <PresentBadge present={quick?.webRuntimePresent ?? false} />
             </div>
             {([
-              ["openBrowser", "启动后自动打开浏览器", "关闭后等价于每次都加 --no-open"],
-              ["surfaceContext", "surface 上下文注入", "向会话暴露 web surface 上下文"],
+              ["openBrowser", "启动后自动打开浏览器", "关闭后等价于每次都加 --no-open，且 --open 无法反向覆盖"],
+              ["surfaceContext", "Web GUI 上下文告知", "默认开：模型知道自己在 GUI 里、shell 有 $DSH_WEB_URL；仅影响 Web 会话"],
             ] as const).map(([key, label, desc]) => (
               <div key={key} className="flex items-center gap-3">
                 <Switch
