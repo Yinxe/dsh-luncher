@@ -1,0 +1,39 @@
+name: diag-token
+
+# 临时探针：定位 GITHUB_TOKEN 创建 release 被 403 的原因，用完即删。
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: 探测 token 身份 / 权限 / 创建 release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY"
+
+          echo "=== 1. token 对仓库的 permissions 字段 ==="
+          curl -sS -o /tmp/repo.json -H "Authorization: Bearer $GH_TOKEN" "$API"
+          python3 -c "import json;d=json.load(open('/tmp/repo.json'));print(d.get('permissions'))"
+
+          echo "=== 2. POST /releases 的真实响应 ==="
+          code=$(curl -sS -o /tmp/rel.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API/releases" \
+            -d '{"tag_name":"diag-probe","name":"diag-probe","draft":true}')
+          echo "HTTP $code"
+          cat /tmp/rel.json
+
+          echo "=== 3. 清理 ==="
+          if [ "$code" = "201" ]; then
+            rid=$(python3 -c "import json;print(json.load(open('/tmp/rel.json'))['id'])")
+            curl -sS -X DELETE -H "Authorization: Bearer $GH_TOKEN" "$API/releases/$rid" > /dev/null
+            curl -sS -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/git/refs/tags/diag-probe" > /dev/null
+            echo "已删除探针 release 与 tag"
+          fi
