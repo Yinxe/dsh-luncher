@@ -5,6 +5,7 @@ import {
   Package, Rocket, Puzzle, FileCog, RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
   TriangleAlert, ChevronDown, CopyPlus, KeyRound, Info, RotateCw, Bot, FileText,
+  Pencil, Trash2, ShieldPlus,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
@@ -19,6 +20,7 @@ import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/u
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import ProfileConfigPanel from "./components/ProfileConfigPanel";
 import CopyProfileDialog from "./components/CopyProfileDialog";
+import RenameProfileDialog from "./components/RenameProfileDialog";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
@@ -41,6 +43,9 @@ import type {
 } from "./types";
 
 type View = "versions" | "profiles" | "plugins" | "models" | "config" | "credentials";
+
+/** 恢复模式 profile 名（与后端 profile_cfg::RECOVERY_PROFILE 保持一致） */
+const RECOVERY_PROFILE = "web-Recovery";
 
 /**
  * 各 Target 的标签展示与启动支持状态；新增 Target（如 CLI）在此扩展。
@@ -98,6 +103,13 @@ export default function App() {
   const [restartingProfile, setRestartingProfile] = useState<string | null>(null);
   /** 复制实例对话框的源 profile；null = 关闭 */
   const [copySource, setCopySource] = useState<string | null>(null);
+  /** 重命名对话框的目标 profile；null = 关闭 */
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  /** 删除确认的目标 profile；null = 关闭 */
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  /** 恢复模式创建确认 */
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
   /** 插件管理页的预选 profile（从 Profile 实例卡片跳转时种子化；导航进入时清空走默认） */
   const [pluginsSeed, setPluginsSeed] = useState<string | null>(null);
 
@@ -391,6 +403,35 @@ export default function App() {
     } catch (e) { addToast("err", `卸载失败: ${e}`); }
   }, [pendingUninstall, addToast, refreshInstalled]);
 
+  const confirmDeleteProfile = useCallback(async () => {
+    if (!deleteTarget) return;
+    const name = deleteTarget;
+    setDeleteTarget(null);
+    try {
+      const trash = await api.deleteProfile(name);
+      addToast("ok", `已删除 profile「${name}」，配置已移入 ${trash}，可手动找回`);
+      refreshProfiles();
+      refreshInstances();
+      api.getSettings().then(setSettings).catch(() => undefined);
+    } catch (e) { addToast("err", `删除失败: ${e}`); }
+  }, [deleteTarget, addToast, refreshProfiles, refreshInstances]);
+
+  const confirmCreateRecovery = useCallback(async () => {
+    setRecoveryOpen(false);
+    setRecoveryBusy(true);
+    try {
+      const r = await api.createRecoveryProfile();
+      addToast(
+        "ok",
+        `已创建恢复模式「${r.name}」（端口 ${r.port}）：只保留官方 base + web-app 插件，可在 Profile 实例页启动`
+      );
+      refreshProfiles();
+      refreshInstances();
+    } catch (e) {
+      addToast("err", `创建恢复模式失败: ${e}`);
+    } finally { setRecoveryBusy(false); }
+  }, [addToast, refreshProfiles, refreshInstances]);
+
   const doCancelInstall = useCallback(async () => {
     try { await api.cancelInstall(); addToast("info", "已请求取消安装"); }
     catch (e) { addToast("err", `取消失败: ${e}`); }
@@ -597,14 +638,14 @@ export default function App() {
   // Profile 实例阶段：stopped → starting → ready（出现 URL）/ failed
   const instanceRows = useMemo(() => {
     type Phase = "stopped" | "starting" | "ready" | "failed" | "external";
-    type Row = { key: string; profile: string; phase: Phase; pid: number | null; source: string | null; version: string | null; webUrl: string | null; code: number | null; target: ProfileTarget; port: number | null; logFile: string | null };
+    type Row = { key: string; profile: string; phase: Phase; pid: number | null; source: string | null; version: string | null; webUrl: string | null; code: number | null; target: ProfileTarget; port: number | null; logFile: string | null; reserved: boolean };
     // 行主键：有 profile 名就用名字；没有 profile（终端 `dsh web` 没带 --profile）就用
     // PID/端口，否则多个无名实例会互相覆盖，界面上只剩一个
     const keyOf = (profile: string, pid: number | null, port: number | null) =>
       profile || (pid != null ? `pid:${pid}` : port != null ? `port:${port}` : "unknown");
     const map = new Map<string, Row>();
     for (const p of profiles) {
-      map.set(p.name, { key: p.name, profile: p.name, phase: "stopped", pid: null, source: null, version: null, webUrl: null, code: null, target: p.target, port: null, logFile: null });
+      map.set(p.name, { key: p.name, profile: p.name, phase: "stopped", pid: null, source: null, version: null, webUrl: null, code: null, target: p.target, port: null, logFile: null, reserved: p.reserved });
     }
     for (const i of instances) {
       const key = keyOf(i.profile, i.pid, i.port);
@@ -621,6 +662,7 @@ export default function App() {
         target: known?.target ?? "unknown",
         port: i.port ?? null,
         logFile: i.logFile ?? null,
+        reserved: known?.reserved ?? false,
       });
     }
     const latest = new Map<string, ProcEntry>();
@@ -633,11 +675,17 @@ export default function App() {
       const phase: Phase = p.exited
         ? p.code == null || p.code === 0 ? "stopped" : "failed"
         : p.webUrl ? "ready" : "starting";
-      map.set(key, { key, profile: p.profile, phase, pid: p.id, source: "embedded", version: p.version, webUrl: p.webUrl, code: p.code, target: map.get(key)?.target ?? "unknown", port: null, logFile: null });
+      map.set(key, { key, profile: p.profile, phase, pid: p.id, source: "embedded", version: p.version, webUrl: p.webUrl, code: p.code, target: map.get(key)?.target ?? "unknown", port: null, logFile: null, reserved: map.get(key)?.reserved ?? false });
     }
     const label = (r: Row) => r.profile || `:${r.port ?? "?"}`;
     return [...map.values()].sort((a, b) => label(a).localeCompare(label(b)));
   }, [profiles, instances, procs]);
+
+  /** 恢复模式 profile 是否已存在（存在就不再显示创建入口） */
+  const recoveryExists = useMemo(
+    () => profiles.some((p) => p.name === RECOVERY_PROFILE),
+    [profiles]
+  );
 
   if (!settings || !env) {
     return (
@@ -1106,6 +1154,14 @@ export default function App() {
                               <Badge variant={targetMeta.variant} title={targetMeta.desc}>
                                 {targetMeta.label}
                               </Badge>
+                              {row.reserved && (
+                                <Badge
+                                  variant="outline"
+                                  title="dsh 内置保留 profile：不可重命名/删除，避免核心数据丢失"
+                                >
+                                  内置
+                                </Badge>
+                              )}
                             </div>
                             <div className="text-[11px] text-muted-foreground">
                               {phaseText}
@@ -1120,6 +1176,18 @@ export default function App() {
                               onClick={() => row.webUrl && api.openUrl(row.webUrl).catch((e) => addToast("err", String(e)))}
                             >
                               <ExternalLink /> 打开
+                            </Button>
+                          )}
+                          {/* 恢复模式入口：只挂在原版 dsh 内置的 web profile 上（恢复模式以它为模板），
+                              已经存在 web-Recovery 就不再显示 */}
+                          {row.reserved && row.target === "web" && !recoveryExists && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              title={`基于官方 web 复制一份只含官方插件、换邻近端口的「${RECOVERY_PROFILE}」`}
+                              onClick={() => setRecoveryOpen(true)}
+                            >
+                              <ShieldPlus /> 恢复模式
                             </Button>
                           )}
                           {canStop ? (
@@ -1176,14 +1244,37 @@ export default function App() {
                               <FileText />
                             </Button>
                           )}
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            title="复制实例：把该 profile 的配置目录拷贝为新实例"
-                            onClick={() => setCopySource(row.profile)}
-                          >
-                            <CopyPlus />
-                          </Button>
+                          {row.profile && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="复制实例：把该 profile 的配置目录拷贝为新实例"
+                              onClick={() => setCopySource(row.profile)}
+                            >
+                              <CopyPlus />
+                            </Button>
+                          )}
+                          {/* dsh 内置保留 profile（headless/web/desktop）不提供改名与删除 */}
+                          {row.profile && !row.reserved && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                title="重命名 profile（只改目录名，配置原样保留）"
+                                onClick={() => setRenameTarget(row.profile)}
+                              >
+                                <Pencil />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                title="删除 profile（移入 ~/.dsh-launcher/deleted-profiles，可找回）"
+                                onClick={() => setDeleteTarget(row.profile)}
+                              >
+                                <Trash2 />
+                              </Button>
+                            </>
+                          )}
                           <Button
                             variant="ghost"
                             size="icon"
@@ -1296,6 +1387,60 @@ export default function App() {
         onToast={addToast}
         onCopied={() => refreshProfiles()}
       />
+
+      {/* 重命名 profile */}
+      <RenameProfileDialog
+        name={renameTarget}
+        existing={profiles.map((p) => p.name)}
+        onClose={() => setRenameTarget(null)}
+        onToast={addToast}
+        onRenamed={() => {
+          refreshProfiles();
+          refreshInstances();
+          api.getSettings().then(setSettings).catch(() => undefined);
+        }}
+      />
+
+      {/* 删除 profile 确认（内置保留 profile 不会走到这里） */}
+      <AlertDialog open={deleteTarget != null} onOpenChange={(o) => !o && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除 profile「{deleteTarget}」？</AlertDialogTitle>
+            <AlertDialogDescription>
+              配置目录会被移动到 <span className="font-mono">~/.dsh-launcher/deleted-profiles/</span>
+              （不会直接销毁，可手动找回）。dsh 内置保留 profile 已受保护、不会出现在这里；
+              实例运行中会先被拒绝。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={confirmDeleteProfile}>
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 创建恢复模式确认 */}
+      <AlertDialog open={recoveryOpen} onOpenChange={(o) => !o && setRecoveryOpen(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>创建恢复模式「{RECOVERY_PROFILE}」？</AlertDialogTitle>
+            <AlertDialogDescription>
+              以官方 <span className="font-mono">web</span> 为模板复制一份独立 profile：内置插件只保留官方{" "}
+              <span className="font-mono">base</span> 与 <span className="font-mono">web-app</span>
+              （第三方插件全部移除），并自动换一个邻近的空闲端口。相当于「原版 web 换个端口运行」，
+              用于排查第三方插件把 web 跑挂的情况。不会改动官方 web 本身，也不会自动创建。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction variant="default" disabled={recoveryBusy} onClick={confirmCreateRecovery}>
+              {recoveryBusy && <Loader2 className="animate-spin" />} 创建
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* 卸载确认 */}
       <AlertDialog open={pendingUninstall != null} onOpenChange={(o) => !o && setPendingUninstall(null)}>

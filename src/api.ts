@@ -81,6 +81,15 @@ export const api = {
     invoke<void>("set_web_quick_config", { profile, config }),
   copyProfile: (source: string, newName: string) =>
     invoke<void>("copy_profile", { source, newName }),
+  /** 重命名 profile（dsh 内置保留 profile 会被后端拒绝）；返回新名字 */
+  renameProfile: (name: string, newName: string) =>
+    invoke<string>("rename_profile", { name, newName }),
+  /** 删除 profile（移入 ~/.dsh-launcher/deleted-profiles/ 可找回）；返回回收站路径 */
+  deleteProfile: (name: string) =>
+    invoke<string>("delete_profile", { name }),
+  /** 生成恢复模式 profile：基于官方 web 复制，只留官方插件，换成邻近空闲端口 */
+  createRecoveryProfile: () =>
+    invoke<{ name: string; port: number }>("create_recovery_profile"),
   searchPackages: (query: string) =>
     invoke<PackageSearchItem[]>("search_registry_packages", { query }),
   checkPluginUpdates: (profile: string) =>

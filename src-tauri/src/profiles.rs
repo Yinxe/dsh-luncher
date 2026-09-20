@@ -63,6 +63,16 @@ struct ProfileSection {
     bundles: Vec<String>,
 }
 
+/// dsh 内置保留 profile：改名/删除会破坏 dsh 核心数据，启动器一律禁止。
+/// 判断不区分大小写（避免 `Web` 这种同名变体绕过保护）。
+pub const RESERVED_PROFILES: &[&str] = &["headless", "web", "desktop"];
+
+/// 是否为 dsh 内置保留 profile
+pub fn is_reserved_profile(name: &str) -> bool {
+    let n = name.trim();
+    RESERVED_PROFILES.iter().any(|r| r.eq_ignore_ascii_case(n))
+}
+
 #[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileInfo {
@@ -73,6 +83,8 @@ pub struct ProfileInfo {
     pub path: String,
     /// 由 package.json 的 dsh.profile.bundles 识别出的运行 Target
     pub target: ProfileTarget,
+    /// dsh 内置保留 profile（不可改名/删除）
+    pub reserved: bool,
 }
 
 /// 读 profile 的 dsh.profile.bundles 列表（缺文件/解析失败返回空）
@@ -123,11 +135,13 @@ pub fn scan_profiles_in(dir: &Path) -> Vec<ProfileInfo> {
             continue;
         }
         if ft.is_dir() {
+            let reserved = is_reserved_profile(&name);
             out.push(ProfileInfo {
                 name: name.into_owned(),
                 kind: "dir".into(),
                 path: path.to_string_lossy().into_owned(),
                 target: detect_target(&path),
+                reserved,
             });
         } else if ft.is_file() {
             let ext = path
@@ -140,11 +154,13 @@ pub fn scan_profiles_in(dir: &Path) -> Vec<ProfileInfo> {
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| name.into_owned());
+                let reserved = is_reserved_profile(&stem);
                 out.push(ProfileInfo {
                     name: stem,
                     kind: "file".into(),
                     path: path.to_string_lossy().into_owned(),
                     target: ProfileTarget::Unknown,
+                    reserved,
                 });
             }
         }

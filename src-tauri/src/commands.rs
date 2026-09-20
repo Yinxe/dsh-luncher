@@ -481,6 +481,70 @@ pub fn read_instance_log(
     }))
 }
 
+/// profile 还有实例在运行时不允许改名/删除：会让运行中的实例指向错目录
+fn ensure_profile_idle(procs: &crate::procs::ProcState, name: &str) -> Result<(), String> {
+    if let Some(i) = crate::procs::profile_instances(procs)
+        .into_iter()
+        .find(|i| i.profile == name)
+    {
+        let pid = i
+            .pid
+            .map(|p| format!("PID {p}"))
+            .unwrap_or_else(|| "PID 未知".into());
+        return Err(format!(
+            "profile「{name}」还有实例在运行（{pid}），请先停止再操作"
+        ));
+    }
+    Ok(())
+}
+
+/// 重命名 profile。dsh 内置保留 profile（headless/web/desktop）由后端拒绝。
+/// 默认 profile 若指向它，一并跟随改名，避免启动器指向不存在的名字。
+#[tauri::command]
+pub fn rename_profile(
+    state: State<'_, AppState>,
+    procs: State<'_, crate::procs::ProcState>,
+    name: String,
+    new_name: String,
+) -> Result<String, String> {
+    let old = name.trim().to_string();
+    ensure_profile_idle(&procs, &old)?;
+    crate::profile_cfg::rename_profile(&old, &new_name)?;
+    let new = new_name.trim().to_string();
+    let mut s = state.settings.lock().unwrap();
+    if s.default_profile == old {
+        s.default_profile = new.clone();
+        let _ = settings::save_settings(&s);
+    }
+    Ok(new)
+}
+
+/// 删除 profile：移入 ~/.dsh-launcher/deleted-profiles/ 可找回；
+/// dsh 内置保留 profile 由后端拒绝。
+#[tauri::command]
+pub fn delete_profile(
+    state: State<'_, AppState>,
+    procs: State<'_, crate::procs::ProcState>,
+    name: String,
+) -> Result<String, String> {
+    let name = name.trim().to_string();
+    ensure_profile_idle(&procs, &name)?;
+    let trash = crate::profile_cfg::delete_profile(&name)?;
+    let mut s = state.settings.lock().unwrap();
+    if s.default_profile == name {
+        s.default_profile = String::new();
+        let _ = settings::save_settings(&s);
+    }
+    Ok(trash)
+}
+
+/// 生成「恢复模式」profile（基于官方 web 复制、只留官方插件、换邻近空闲端口）。
+/// 只在用户显式点击并确认后调用，启动器不会自动创建。
+#[tauri::command]
+pub fn create_recovery_profile() -> Result<crate::profile_cfg::RecoveryCreated, String> {
+    crate::profile_cfg::create_recovery_profile()
+}
+
 /// 把运行日志导出到 ~/.dsh-launcher/logs/
 #[tauri::command]
 pub fn export_proc_log(

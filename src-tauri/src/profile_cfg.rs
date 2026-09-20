@@ -1098,15 +1098,7 @@ pub fn set_web_quick_config(profile: &str, input: &WebQuickConfigInput) -> Resul
 pub fn copy_profile(source: &str, new_name: &str) -> Result<(), String> {
     let source = source.trim();
     let name = new_name.trim();
-    if name.is_empty()
-        || name.starts_with('.')
-        || name == "node_modules"
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains("..")
-    {
-        return Err("非法实例名：不能为空、以 . 开头、为 node_modules 或包含路径字符".into());
-    }
+    validate_profile_name(name)?;
     let root = profiles::profiles_dir();
     let dst = root.join(name);
     if dst.exists() {
@@ -1156,6 +1148,218 @@ fn copy_dir_excluding(src: &Path, dst: &Path, skip: &[&str]) -> Result<(), Strin
         }
     }
     Ok(())
+}
+
+// ── profile 改名 / 删除 / 恢复模式 ──────────────
+
+/// 实例名合法性：启动器与 dsh 都按目录名解析，必须挡住路径穿越与保留目录
+fn validate_profile_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.starts_with('.')
+        || name == "node_modules"
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+    {
+        return Err("非法实例名：不能为空、以 . 开头、为 node_modules 或包含路径字符".into());
+    }
+    Ok(())
+}
+
+/// 定位已存在的 profile（目录型，或 yaml/yml/json 文件型）
+fn existing_profile_path(name: &str) -> Option<PathBuf> {
+    let root = profiles::profiles_dir();
+    let dir = root.join(name);
+    if dir.is_dir() {
+        return Some(dir);
+    }
+    ["yaml", "yml", "json"].iter().find_map(|ext| {
+        let f = root.join(format!("{name}.{ext}"));
+        f.is_file().then_some(f)
+    })
+}
+
+/// 移动文件/目录；DSH_HOME 与启动器目录不在同一磁盘时退化为复制 + 删除
+fn move_path(src: &Path, dst: &Path) -> Result<(), String> {
+    if std::fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+    if src.is_dir() {
+        copy_dir_excluding(src, dst, &[])?;
+        std::fs::remove_dir_all(src).map_err(|e| format!("清理原目录失败: {e}"))
+    } else {
+        std::fs::copy(src, dst)
+            .map(|_| ())
+            .map_err(|e| format!("复制失败: {e}"))?;
+        std::fs::remove_file(src).map_err(|e| format!("清理原文件失败: {e}"))
+    }
+}
+
+/// 重命名 profile。dsh 内置保留 profile（headless/web/desktop）一律拒绝——
+/// 改名会破坏 dsh 自身的默认 profile 与核心数据。调用方需先确认无实例在运行。
+pub fn rename_profile(old: &str, new_name: &str) -> Result<String, String> {
+    let old = old.trim();
+    let name = new_name.trim();
+    if profiles::is_reserved_profile(old) {
+        return Err(format!(
+            "「{old}」是 dsh 内置保留 profile，不允许重命名（避免核心数据丢失）"
+        ));
+    }
+    validate_profile_name(name)?;
+    if profiles::is_reserved_profile(name) {
+        return Err(format!("不能改名成内置保留名「{name}」"));
+    }
+    let Some(src) = existing_profile_path(old) else {
+        return Err(format!("profile「{old}」不存在"));
+    };
+    if existing_profile_path(name).is_some() {
+        return Err(format!("实例「{name}」已存在"));
+    }
+    let root = profiles::profiles_dir();
+    let dst = if src.is_dir() {
+        root.join(name)
+    } else {
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("yaml");
+        root.join(format!("{name}.{ext}"))
+    };
+    move_path(&src, &dst)?;
+    Ok(dst.to_string_lossy().into_owned())
+}
+
+/// 删除 profile：不直接 `rm -rf`，而是移入 `~/.dsh-launcher/deleted-profiles/`，
+/// 误删可手动找回。dsh 内置保留 profile 一律拒绝。返回回收站路径。
+pub fn delete_profile(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if profiles::is_reserved_profile(name) {
+        return Err(format!(
+            "「{name}」是 dsh 内置保留 profile，不允许删除（避免核心数据丢失）"
+        ));
+    }
+    let Some(src) = existing_profile_path(name) else {
+        return Err(format!("profile「{name}」不存在"));
+    };
+    let trash = crate::settings::launcher_home().join("deleted-profiles");
+    std::fs::create_dir_all(&trash).map_err(|e| format!("创建回收目录失败: {e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dst = if src.is_dir() {
+        trash.join(format!("{name}-{ts}"))
+    } else {
+        let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("yaml");
+        trash.join(format!("{name}-{ts}.{ext}"))
+    };
+    move_path(&src, &dst)?;
+    Ok(dst.to_string_lossy().into_owned())
+}
+
+/// 恢复模式只保留这两个官方内置插件，其余第三方插件全部摘掉
+const OFFICIAL_BUNDLES: &[&str] = &["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"];
+
+/// 把 package.json 的 bundles 收敛到官方两个，并同步移除对应的 dependencies，
+/// 这样恢复模式不会加载也不会安装任何第三方插件。
+fn prune_to_official_bundles(dir: &Path) -> Result<(), String> {
+    let path = dir.join("package.json");
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取 package.json 失败: {e}"))?;
+    let mut v: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("解析 package.json 失败: {e}"))?;
+
+    let removed: Vec<String> = v
+        .pointer("/dsh/profile/bundles")
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|b| b.as_str())
+                .filter(|b| !OFFICIAL_BUNDLES.contains(b))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(arr) = v
+        .pointer_mut("/dsh/profile/bundles")
+        .and_then(|b| b.as_array_mut())
+    {
+        arr.clear();
+        for b in OFFICIAL_BUNDLES {
+            arr.push(serde_json::Value::String((*b).to_string()));
+        }
+    }
+    if let Some(deps) = v.get_mut("dependencies").and_then(|d| d.as_object_mut()) {
+        for r in &removed {
+            deps.remove(r);
+        }
+    }
+    let out = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())? + "\n";
+    std::fs::write(&path, out).map_err(|e| format!("写入 package.json 失败: {e}"))
+}
+
+/// 在 base 之上找一个「邻近、当前空闲、也没被别的 profile 配置占用」的端口
+fn pick_recovery_port(host: &str, base: u16) -> Result<u16, String> {
+    let used: Vec<u16> = profiles::scan_profiles()
+        .iter()
+        .filter_map(|p| web_addr(&p.name).map(|(_, port)| port))
+        .collect();
+    for offset in 1..=200u16 {
+        let Some(port) = base.checked_add(offset) else {
+            break;
+        };
+        if used.contains(&port) || crate::netports::is_listening(host, port) {
+            continue;
+        }
+        return Ok(port);
+    }
+    Err(format!(
+        "{base} 附近 200 个端口都被占用，请创建后到「快捷配置」手动指定端口"
+    ))
+}
+
+/// 恢复模式 profile 名：目前只支持以官方 `web` 为模板（web-Recovery）
+pub const RECOVERY_PROFILE: &str = "web-Recovery";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryCreated {
+    pub name: String,
+    pub port: u16,
+}
+
+/// 生成「恢复模式」profile：以官方 `web` 为模板复制出 `Recovery`，
+/// 内置插件只留官方 base + web-app，端口换成邻近空闲端口 ——
+/// 相当于「原版 web 换个端口运行」，用于排查第三方插件把 web 跑挂的情况。
+///
+/// 只在显式调用时创建，启动器**永远不会**自动创建它。
+pub fn create_recovery_profile() -> Result<RecoveryCreated, String> {
+    let root = profiles::profiles_dir();
+    if existing_profile_path(RECOVERY_PROFILE).is_some() {
+        return Err(format!("恢复模式 profile「{RECOVERY_PROFILE}」已存在"));
+    }
+    if !root.join("web").is_dir() {
+        return Err("找不到官方 web profile，无法生成恢复模式".into());
+    }
+    let Some((host, base_port)) = web_addr("web") else {
+        return Err("官方 web profile 没有配置 webserver 端口，无法生成恢复模式".into());
+    };
+    let web_cfg = get_web_quick_config("web").unwrap_or_default();
+    // 端口先算好再复制，避免中途失败留下一个半成品 profile
+    let port = pick_recovery_port(&host, base_port)?;
+    copy_profile("web", RECOVERY_PROFILE)?;
+    prune_to_official_bundles(&root.join(RECOVERY_PROFILE))?;
+    set_web_quick_config(
+        RECOVERY_PROFILE,
+        &WebQuickConfigInput {
+            host,
+            port: port as u64,
+            open_browser: web_cfg.open_browser.unwrap_or(true),
+            surface_context: web_cfg.surface_context.unwrap_or(true),
+            cookie_max_age_days: web_cfg.cookie_max_age_days.unwrap_or(36500),
+        },
+    )?;
+    Ok(RecoveryCreated {
+        name: RECOVERY_PROFILE.to_string(),
+        port,
+    })
 }
 
 // ── 插件更新检测 ─────────────────────────
@@ -1814,5 +2018,98 @@ mod tests {
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");
+    }
+
+    /// 改名 / 删除 / 恢复模式：dsh 内置保留 profile 必须全部拒绝，
+    /// 普通 profile 可改名、删除进回收站；恢复模式只留官方插件并换邻近空闲端口。
+    #[test]
+    fn rename_delete_and_recovery_profile() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-rd-test-{}", std::process::id()));
+        let home = tmp.join("launcher-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("DSH_HOME", &tmp);
+        std::env::set_var("DSH_LAUNCHER_HOME", &home);
+
+        let profiles = tmp.join("profiles");
+        let web = profiles.join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(
+            web.join("package.json"),
+            r#"{"dependencies":{"third-party":"1.0.0"},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app","third-party"]}},"name":"dsh-profile-web"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            web.join("cordis.patch.yml"),
+            "- id: webserver\n  config:\n    host: '0.0.0.0'\n    port: 3080\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(profiles.join("mine/sub")).unwrap();
+
+        // 1) 内置保留 profile：改名/删除一律拒绝，也不许改成保留名
+        for reserved in ["headless", "web", "desktop"] {
+            assert!(
+                crate::profiles::is_reserved_profile(reserved),
+                "{reserved} 应视为保留"
+            );
+            assert!(rename_profile(reserved, "whatever").is_err(), "{reserved} 不应可改名");
+            assert!(delete_profile(reserved).is_err(), "{reserved} 不应可删除");
+        }
+        assert!(crate::profiles::is_reserved_profile("WEB"), "保留名判断应忽略大小写");
+        assert!(!crate::profiles::is_reserved_profile("web-Recovery"));
+        assert!(rename_profile("mine", "web").is_err(), "不许改名成保留名");
+        assert!(rename_profile("mine", "Desktop").is_err());
+
+        // 2) 普通 profile：改名保留内容；删除是移入回收目录而不是销毁
+        rename_profile("mine", "mine2").unwrap();
+        assert!(profiles.join("mine2/sub").is_dir(), "改名应保留原内容");
+        assert!(!profiles.join("mine").exists());
+        let trash = delete_profile("mine2").unwrap();
+        assert!(!profiles.join("mine2").exists());
+        assert!(std::path::Path::new(&trash).exists(), "删除应移入回收目录");
+
+        // 3) 恢复模式：基于 web 复制、只留官方两个插件、换邻近空闲端口
+        let rec = create_recovery_profile().unwrap();
+        assert_eq!(rec.name, RECOVERY_PROFILE);
+        assert!(
+            rec.port > 3080 && rec.port <= 3080 + 200,
+            "应是 3080 之后的邻近空闲端口，实际 {}",
+            rec.port
+        );
+        let rec_dir = profiles.join(RECOVERY_PROFILE);
+        let pkg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(rec_dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            pkg.pointer("/dsh/profile/bundles").unwrap().as_array().unwrap(),
+            &vec![
+                serde_json::Value::String("@deepseek-ai/dsh-base".into()),
+                serde_json::Value::String("@deepseek-ai/dsh-web-app".into()),
+            ],
+            "恢复模式只应保留官方 base + web-app"
+        );
+        assert!(
+            pkg.get("dependencies")
+                .and_then(|d| d.as_object())
+                .map(|d| d.is_empty())
+                .unwrap_or(true),
+            "第三方依赖应一并移除"
+        );
+        assert_eq!(
+            get_web_quick_config(RECOVERY_PROFILE).unwrap().port,
+            Some(rec.port as u64),
+            "新 profile 的 webserver 端口应指向新端口"
+        );
+        // 官方 web 本体不受影响
+        assert_eq!(web_addr("web").unwrap().1, 3080);
+        assert!(std::fs::read_to_string(web.join("package.json"))
+            .unwrap()
+            .contains("third-party"));
+        // 已存在时二次创建应拒绝
+        assert!(create_recovery_profile().is_err());
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+        std::env::remove_var("DSH_LAUNCHER_HOME");
     }
 }

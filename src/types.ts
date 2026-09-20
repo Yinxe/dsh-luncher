@@ -31,6 +31,8 @@ export interface ProfileInfo {
   path: string;
   /** 由 package.json 的 dsh.profile.bundles 识别：含 @deepseek-ai/dsh-web-app ⇒ web */
   target: ProfileTarget;
+  /** dsh 内置保留 profile（不可改名/删除） */
+  reserved: boolean;
 }
 
 export interface EnvironmentInfo {
