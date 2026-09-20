@@ -166,7 +166,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
             TrayIconEvent::Click {
                 button: MouseButton::Right,
                 ..
-            } => refresh(tray.app_handle()),
+            } => refresh_async(tray.app_handle()),
             _ => {}
         });
 
