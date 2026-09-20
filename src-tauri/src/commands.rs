@@ -802,6 +802,55 @@ pub fn cancel_plugin_job(jobs: State<'_, crate::plugin::PluginJobState>, job_id:
     jobs.cancel(job_id)
 }
 
+/// 放行被 pnpm 拦下的构建脚本，并把原命令原样重跑一次。
+///
+/// 构建脚本会执行第三方代码，属于**用户的决定**：只有用户点「允许构建脚本并重试」
+/// 才会走到这里（启动器不默认放行）。写入 profile 的 pnpm-workspace.yaml →
+/// allowBuilds（合并已有条目、保留注释与行尾、写前备份），重跑依旧走 `dsh plugin`。
+#[tauri::command]
+pub fn plugin_approve_builds(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    jobs: State<'_, crate::plugin::PluginJobState>,
+    job_id: u64,
+) -> Result<u64, String> {
+    let (profile, argv, pending) = jobs
+        .job_retry_info(job_id)
+        .ok_or_else(|| format!("任务 {job_id} 不存在（可能已被清理）"))?;
+    if pending.is_empty() {
+        return Err("这个任务没有被拦下的构建脚本".into());
+    }
+    if argv.is_empty() {
+        return Err("这个任务没有可重跑的参数".into());
+    }
+    let dir = crate::profiles::profiles_dir().join(&profile);
+    let allowed = crate::verify::set_allow_builds(&dir, &pending)?;
+    let settings = state.settings.lock().unwrap().clone();
+    let label = format!("重试（已放行构建脚本：{}）", pending.join("、"));
+    let id = crate::plugin::start_job(
+        app,
+        &jobs,
+        settings,
+        crate::plugin::JobRequest {
+            profile,
+            kind: "install".into(),
+            label,
+            steps: vec![
+                crate::plugin::Step::Note {
+                    text: format!(
+                        "已在 {} 的 allowBuilds 里放行：{}（当前共 {} 条）",
+                        dir.join("pnpm-workspace.yaml").display(),
+                        pending.join("、"),
+                        allowed.len()
+                    ),
+                },
+                crate::plugin::Step::Dsh { args: argv },
+            ],
+        },
+    )?;
+    Ok(id)
+}
+
 #[tauri::command]
 pub fn clear_plugin_jobs(jobs: State<'_, crate::plugin::PluginJobState>) -> usize {
     jobs.clear_finished()

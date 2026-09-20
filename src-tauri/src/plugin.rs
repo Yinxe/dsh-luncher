@@ -73,6 +73,10 @@ pub struct PluginJob {
     pub cancelled: bool,
     /// 失败时的对症建议（前端 toast / 终端提示都用它）
     pub hint: Option<String>,
+    /// 本次任务实际执行的 `dsh plugin` 参数（「允许构建脚本并重试」要原样重跑）
+    pub argv: Vec<String>,
+    /// 被 pnpm 拦下的构建脚本所属包（非空时前端显示「允许构建脚本并重试」）
+    pub pending_builds: Vec<String>,
     pub lines: Vec<PluginLogLine>,
     /// 因缓冲上限被丢弃的行数
     pub dropped: u64,
@@ -91,6 +95,8 @@ pub struct PluginJobEvent {
     pub cancelled: bool,
     /// 失败时的对症建议
     pub hint: Option<String>,
+    /// 待放行的构建脚本包名（按钮显示条件）
+    pub pending_builds: Vec<String>,
     pub started_at: u64,
     pub finished_at: Option<u64>,
 }
@@ -193,6 +199,8 @@ impl PluginJobState {
                 exit_code: None,
                 cancelled: false,
                 hint: None,
+                argv: Vec::new(),
+                pending_builds: Vec::new(),
                 lines: Vec::new(),
                 dropped: 0,
             }),
@@ -240,6 +248,13 @@ impl PluginJobState {
             .collect();
         out.sort_by(|a, b| b.id.cmp(&a.id));
         out
+    }
+
+    /// 取某个任务的 (profile, 参数, 待放行的构建脚本)，供「允许构建脚本并重试」使用
+    pub fn job_retry_info(&self, id: u64) -> Option<(String, Vec<String>, Vec<String>)> {
+        let handle = { self.inner.lock().unwrap().jobs.get(&id).cloned() }?;
+        let m = handle.meta.lock().unwrap();
+        Some((m.profile.clone(), m.argv.clone(), m.pending_builds.clone()))
     }
 
     /// 取某个任务的完整日志文本（导出用；包含被快照截断的头部）
@@ -369,6 +384,7 @@ fn emit_job<R: Runtime>(app: &AppHandle<R>, handle: &Arc<JobHandle>) {
             exit_code: m.exit_code,
             cancelled: m.cancelled,
             hint: m.hint.clone(),
+            pending_builds: m.pending_builds.clone(),
             started_at: m.started_at,
             finished_at: m.finished_at,
         },
@@ -650,6 +666,13 @@ pub fn start_job<R: Runtime>(
                     };
 
                     let base_argv = crate::pnpm::plugin_args_for(&dir, args);
+                    {
+                        // 记下参数，供「允许构建脚本并重试」原样重跑
+                        let mut m = handle.meta.lock().unwrap();
+                        if m.argv.is_empty() {
+                            m.argv = args.to_vec();
+                        }
+                    }
                     let before = pre_snapshot
                         .get_or_insert_with(|| crate::verify::snapshot(&dir))
                         .clone();
@@ -874,6 +897,21 @@ pub fn start_job<R: Runtime>(
                                 // 重试后仍失败：给出分类后的原因与下一步（而不是 pnpm 的原始输出墙）
                                 match crate::pnpm::classify(&out, Some(code)) {
                                     Some(f) => {
+                                        // 构建脚本被拦：记下包名，前端据此显示「允许构建脚本并重试」
+                                        let pending: Vec<String> = match &f {
+                                            crate::pnpm::PnpmFailure::IgnoredBuilds => {
+                                                crate::pnpm::parse_ignored_builds(&out)
+                                            }
+                                            crate::pnpm::PnpmFailure::GitPrepareNotAllowed => {
+                                                crate::pnpm::parse_prepare_not_allowed(&out)
+                                                    .into_iter()
+                                                    .collect()
+                                            }
+                                            _ => Vec::new(),
+                                        };
+                                        if !pending.is_empty() {
+                                            handle.meta.lock().unwrap().pending_builds = pending;
+                                        }
                                         let msg = f.message(&dir, &profile);
                                         remember_hint(&handle, &msg);
                                         for l in msg.lines() {

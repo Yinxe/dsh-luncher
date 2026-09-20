@@ -137,8 +137,10 @@ impl PnpmFailure {
                  已自动用 `{FETCH_TIMEOUT_OVERRIDE}` 加长超时重试一次。"
             ),
             PnpmFailure::IgnoredBuilds | PnpmFailure::GitPrepareNotAllowed => format!(
-                "有依赖需要在安装时执行构建脚本，被 pnpm 默认拦截。\n\
-                 把上面 pnpm 打印的键加进 {dir}/pnpm-workspace.yaml 的 allowBuilds（只有确实需要构建的包才放行），然后重跑一次。"
+                "有依赖需要在安装时执行构建脚本，被 pnpm 默认拦截（pnpm 已打印被拦的包名）。\n\
+                 点下方「允许构建脚本并重试」即可：启动器会把这些包写进 {dir}/pnpm-workspace.yaml 的 allowBuilds\
+                 （合并已有条目、保留注释与行尾、写前备份），然后用同样的参数重跑一次。\n\
+                 构建脚本会执行第三方代码——只有你确认这些包可信时才放行。"
             ),
             PnpmFailure::GitPrepareFailed { pkg } => {
                 let who = pkg.clone().map(|p| format!("（{p}）")).unwrap_or_default();
@@ -446,6 +448,46 @@ pub fn config_env_for(args: &[String]) -> Vec<(String, String)> {
     out
 }
 
+/// pnpm 报出的「构建脚本被拦」的包名（裸名，已去掉 @version 与句末句号）。
+///
+/// pnpm 原句：`Ignored build scripts: esbuild, koffi.` —— 条目可能带版本后缀。
+pub fn parse_ignored_builds(output: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"(?i)Ignored build scripts:?\s*([^\n]+)").expect("静态正则");
+    let Some(c) = re.captures(output) else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = Vec::new();
+    for chunk in c[1].split(',') {
+        let trimmed = chunk.trim().trim_end_matches('.');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let name = match trimmed.rfind('@') {
+            Some(at) if at > 0 => &trimmed[..at],
+            _ => trimmed,
+        };
+        if !name.is_empty() && !found.iter().any(|x| x == name) {
+            found.push(name.to_string());
+        }
+    }
+    found
+}
+
+/// git 插件被 pnpm 的 fetcher 拦下时点名的包
+/// （`The git-hosted package "name@2.8.0" needs to execute build scripts but is not in the "allowBuilds" allowlist.`）
+///
+/// 注意：市场类调用常用 `--reporter=ndjson`，这句话会以**转义引号**（`\"`）到达，
+/// 因此先还原再匹配，否则生产路径上永远匹配不到。
+pub fn parse_prepare_not_allowed(output: &str) -> Option<String> {
+    let text = output.replace("\\\"", "\"");
+    let re = regex::Regex::new(r#"git-hosted package "([^"]+)" needs to execute build scripts"#)
+        .expect("静态正则");
+    let raw = re.captures(&text)?.get(1)?.as_str().trim().to_string();
+    // 去掉尾部的 @version：名字本身可能带 scope（@scope/pkg）
+    let at = raw.rfind('@')?;
+    Some(if at > 0 { raw[..at].to_string() } else { raw })
+}
+
 /// 该包是否是「宿主注入、npm 上不存在」的 peer（且不是 profile 的直接依赖）
 pub fn is_unpublished_host_peer(pkg: &str, profile_dir: &Path) -> bool {
     if !pkg.starts_with(HOST_NAMESPACE) {
@@ -518,6 +560,41 @@ mod tests {
                 linked: Some("/a/store".into()),
                 wanted: Some("/b/store".into())
             }
+        );
+    }
+
+    /// 用本次实测输出固定「被拦构建脚本」的解析
+    #[test]
+    fn parses_ignored_build_scripts_from_real_output() {
+        let out = "Progress: resolved 127, reused 127, downloaded 0, added 137, done\n\
+                   [ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: supreium-headless-gl@8.3.0\n\
+                   Run \"pnpm approve-builds\" to pick which dependencies should be allowed to run scripts.\n";
+        assert_eq!(parse_ignored_builds(out), vec!["supreium-headless-gl".to_string()]);
+        // 多个条目 + 句末句号 + scope 包名
+        let multi = "Ignored build scripts: esbuild, @scope/native-thing@1.2.3, koffi.";
+        assert_eq!(
+            parse_ignored_builds(multi),
+            vec![
+                "esbuild".to_string(),
+                "@scope/native-thing".to_string(),
+                "koffi".to_string()
+            ]
+        );
+        assert!(parse_ignored_builds("no such line").is_empty());
+        assert_eq!(
+            parse_prepare_not_allowed(
+                "The git-hosted package \"@o/p@2.8.0\" needs to execute build scripts but is not in the \"allowBuilds\" allowlist."
+            )
+            .as_deref(),
+            Some("@o/p")
+        );
+        // ndjson 里引号是转义的
+        assert_eq!(
+            parse_prepare_not_allowed(
+                r#"{"message":"git-hosted package \"pkg@1.0.0\" needs to execute build scripts"}"#
+            )
+            .as_deref(),
+            Some("pkg")
         );
     }
 

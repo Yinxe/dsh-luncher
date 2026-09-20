@@ -643,6 +643,163 @@ pub struct MutationReport {
     pub still_installed: Vec<String>,
 }
 
+// ── pnpm allowBuilds（放行构建脚本） ─────────────────────────
+//
+// 处理方案移植自 dshmarket 的 setAllowBuilds（`src/profile.ts`），那几个边界都是
+// 真实 issue 换来的，不能省：
+// - **必须按 `\r?\n` 匹配**：CRLF 的 pnpm-workspace.yaml（Windows 编辑器、git autocrlf）
+//   会让旧写法匹配不到已有块而**再追加一个** `allowBuilds:`；两个同名顶层键是非法 YAML，
+//   pnpm 之后会拒绝该 profile 的每一次安装，不只是这一次。
+// - **合并全部同名块**（而不是只处理第一个）：已经踩坑留下两个块的文件能被修复，
+//   且不会丢掉其中任何一个里的授权。
+// - **键要按需加引号**：`@scope/pkg` 以 YAML 保留指示符 `@` 开头，不引号会让整个文件
+//   对之后所有 pnpm 运行都失效。
+// - **只接受三种键形态**（裸名 / `name@git+https://github.com/o/r.git` /
+//   `name@https://codeload.github.com/o/r/tar.gz/<40hex>`）：这个列表是"不往 pnpm 会解析的
+//   文件里写任意文本"的保证。
+// - **丢掉占位值**：pnpm 失败安装的 bug 会写入字面量 "set this to true or false"，
+//   留着会让之后所有授权都失效。
+// - **沿用文件自己的换行符**，别把 CRLF 文件改成混合行尾。
+
+/// YAML 块映射的键在必要时加引号
+fn quote_yaml_key(key: &str) -> String {
+    let first = key.chars().next().unwrap_or(' ');
+    let reserved = "-?:,[]{}#&*!|>'\"%@`".contains(first);
+    let colon_space = key.contains(": ") || key.ends_with(':');
+    if reserved || colon_space {
+        format!("'{}'", key.replace('\'', "''"))
+    } else {
+        key.to_string()
+    }
+}
+
+/// 允许写进 allowBuilds 的键形态（裸包名 / 稳定 git 形态 / codeload 形态）
+fn allow_build_key_ok(key: &str) -> bool {
+    let bare = regex::Regex::new(r"^[A-Za-z0-9@/_.-]+$").expect("静态正则");
+    let git = regex::Regex::new(
+        r"^[A-Za-z0-9@/_.-]+@git\+https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$",
+    )
+    .expect("静态正则");
+    let codeload = regex::Regex::new(
+        r"^[A-Za-z0-9@/_.-]+@https://codeload\.github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/tar\.gz/[0-9a-f]{40}$",
+    )
+    .expect("静态正则");
+    bare.is_match(key) || git.is_match(key) || codeload.is_match(key)
+}
+
+/// 解析 yaml 里所有 `allowBuilds:` 块（键 → 值），丢弃占位值与非法键
+fn parse_allow_builds_blocks(yaml: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let mut in_block = false;
+    for line in yaml.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            in_block = line.trim_start().starts_with("allowBuilds:");
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        // 值只认 true/false；pnpm bug 写出的占位值会被这里丢掉
+        let Some((k, v)) = t.rsplit_once(':') else { continue };
+        let v = v.trim();
+        if v != "true" && v != "false" {
+            continue;
+        }
+        let mut key = k.trim().to_string();
+        if key.len() >= 2
+            && ((key.starts_with('\'') && key.ends_with('\''))
+                || (key.starts_with('"') && key.ends_with('"')))
+        {
+            key = key[1..key.len() - 1].to_string();
+        }
+        if key.is_empty() || !allow_build_key_ok(&key) {
+            continue;
+        }
+        map.insert(key, v.to_string());
+    }
+    map
+}
+
+/// 把给定包写进 profile 的 `pnpm-workspace.yaml` 的 `allowBuilds`（合并已有条目、
+/// 保留文件其余内容与行尾）。返回合并后**全部**被放行的键。
+///
+/// 这是用户显式点「允许构建脚本」之后才调用的：构建脚本会执行第三方代码，
+/// 属于用户的决定，启动器不替用户默认放行。
+pub fn set_allow_builds(profile_dir: &Path, packages: &[String]) -> Result<Vec<String>, String> {
+    let file = profile_dir.join("pnpm-workspace.yaml");
+    let yaml = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut map = parse_allow_builds_blocks(&yaml);
+    let mut accepted: Vec<String> = Vec::new();
+    for p in packages {
+        let key = p.trim();
+        if key.is_empty() || !allow_build_key_ok(key) {
+            continue;
+        }
+        map.insert(key.to_string(), "true".to_string());
+        accepted.push(key.to_string());
+    }
+    if accepted.is_empty() {
+        return Ok(map.keys().cloned().collect());
+    }
+    let eol = if yaml.contains("\r\n") { "\r\n" } else { "\n" };
+    let block: Vec<String> = map
+        .iter()
+        .map(|(k, v)| format!("  {}: {v}", quote_yaml_key(k)))
+        .collect();
+    let block_text = format!("allowBuilds:{eol}{}{eol}", block.join(eol));
+
+    // 丢掉所有旧的 allowBuilds 块（条目已并入 map），再把合并结果插到原位置
+    let mut out: Vec<String> = Vec::new();
+    let mut inserted = false;
+    let mut in_block = false;
+    let mut first_block_line: Option<usize> = None;
+    for line in yaml.split('\n') {
+        let bare = line.strip_suffix('\r').unwrap_or(line);
+        let top_level = !bare.starts_with(' ') && !bare.starts_with('\t');
+        if top_level {
+            if bare.trim_start().starts_with("allowBuilds:") {
+                if !inserted {
+                    if first_block_line.is_none() {
+                        first_block_line = Some(out.len());
+                    }
+                    for l in block_text.trim_end_matches(eol).split(eol) {
+                        out.push(l.to_string());
+                    }
+                    inserted = true;
+                }
+                in_block = true;
+                continue;
+            }
+            in_block = false;
+        }
+        if in_block {
+            continue; // 旧块的内容整体丢弃（已并入 map）
+        }
+        out.push(line.to_string());
+    }
+    let mut text = out.join("\n");
+    if !inserted {
+        // 没有 allowBuilds 块：追加到文件末尾（保住原有换行风格）
+        let trimmed = text.trim_end_matches(['\n', '\r']).to_string();
+        text = if trimmed.is_empty() {
+            block_text.clone()
+        } else {
+            format!("{trimmed}{eol}{eol}{}", block_text.replace(eol, eol))
+        };
+    } else if !text.ends_with('\n') {
+        text.push('\n');
+    }
+
+    backup_once(&file)?;
+    std::fs::write(&file, text).map_err(|e| format!("写入 {} 失败: {e}", file.display()))?;
+    Ok(map.keys().cloned().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +815,102 @@ mod tests {
         let d = dir.join("node_modules").join(name);
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("package.json"), body).unwrap();
+    }
+
+    #[test]
+    fn allow_builds_merges_and_quotes_and_keeps_eol() {
+        let dir = tmp("allow");
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages:\r\n  - .\r\n\r\nallowBuilds:\r\n  esbuild: true\r\n  cpu-features: false\r\n  broken: set this to true or false\r\n",
+        )
+        .unwrap();
+        let all = set_allow_builds(&dir, &["@scope/native-thing".to_string(), "supreium-headless-gl".to_string()])
+            .unwrap();
+        // 合并了旧的（含 false 那条）+ 新的；占位值那条被丢掉
+        assert!(all.contains(&"esbuild".to_string()));
+        assert!(all.contains(&"cpu-features".to_string()));
+        assert!(all.contains(&"@scope/native-thing".to_string()));
+        assert!(all.contains(&"supreium-headless-gl".to_string()));
+        assert!(!all.contains(&"broken".to_string()), "占位值条目应被丢掉");
+        let text = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
+        // CRLF 保留，且只有一个 allowBuilds 块（多了就是非法 YAML）
+        assert!(text.contains("\r\n"), "应保留 CRLF");
+        assert_eq!(text.matches("allowBuilds:").count(), 1, "{text}");
+        // @scope 键必须加引号，否则整个 yaml 对之后所有 pnpm 运行都失效
+        assert!(text.contains("'@scope/native-thing': true"), "{text}");
+        // 合并后仍然是合法 YAML 且能读回来
+        let v: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+        let ab = v.get("allowBuilds").unwrap().as_mapping().unwrap();
+        assert!(ab.len() >= 4);
+        // 只想放行非法键时不写文件
+        let before = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
+        set_allow_builds(&dir, &["rm -rf /".to_string()]).unwrap();
+        assert_eq!(before, std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 串联：用本次实测的 pnpm 输出 → 解析被拦包名 → 写 allowBuilds → 文件仍合法可用
+    #[test]
+    fn approve_flow_from_real_pnpm_output() {
+        let output = "dependencies:\n\
+                      + dsh-plugin-wallpaper-engine https://gh.927223.xyz/https://github.com/e/dsh-wallpaper-engine/releases/download/v0.7.1/x.tgz\n\
+                      Packages: +137\n\
+                      [ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: supreium-headless-gl@8.3.0\n\
+                      Run \"pnpm approve-builds\" to pick which dependencies should be allowed to run scripts.\n";
+        // 分类 → 解析（分类器只报"被拦"，包名由解析函数给出）
+        let f = crate::pnpm::classify(output, Some(1)).unwrap();
+        assert_eq!(f.code(), "ignored-builds");
+        let names = crate::pnpm::parse_ignored_builds(output);
+        assert_eq!(names, vec!["supreium-headless-gl".to_string()]);
+
+        let dir = tmp("approve-e2e");
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages:\n  - .\n\nnodeLinker: hoisted\n",
+        )
+        .unwrap();
+        let all = set_allow_builds(&dir, &names).unwrap();
+        assert!(all.contains(&"supreium-headless-gl".to_string()));
+        let text = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
+        // 原有内容保留 + 新块合法
+        assert!(text.contains("packages:") && text.contains("nodeLinker: hoisted"));
+        let v: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+        assert_eq!(
+            v.get("allowBuilds")
+                .and_then(|m| m.get("supreium-headless-gl"))
+                .and_then(|b| b.as_bool()),
+            Some(true)
+        );
+        // 备份在（可回退）
+        assert!(dir.join("pnpm-workspace.yaml.launcher-bak").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allow_builds_repairs_doubled_blocks_and_appends_when_missing() {
+        let dir = tmp("allow2");
+        // 踩过坑的文件：两个 allowBuilds 块（旧写法用 \n 匹配漏了 CRLF 造成的）
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "allowBuilds:\n  a: true\nallowBuilds:\n  b: true\n",
+        )
+        .unwrap();
+        let all = set_allow_builds(&dir, &["c".to_string()]).unwrap();
+        assert!(all.contains(&"a".to_string()) && all.contains(&"b".to_string()) && all.contains(&"c".to_string()));
+        let text = std::fs::read_to_string(dir.join("pnpm-workspace.yaml")).unwrap();
+        assert_eq!(text.matches("allowBuilds:").count(), 1, "{text}");
+        serde_yaml::from_str::<serde_yaml::Value>(&text).unwrap();
+
+        // 没有该块时追加（并保住原有内容）
+        let dir2 = tmp("allow3");
+        std::fs::write(dir2.join("pnpm-workspace.yaml"), "packages:\n  - .\n").unwrap();
+        set_allow_builds(&dir2, &["esbuild".to_string()]).unwrap();
+        let t2 = std::fs::read_to_string(dir2.join("pnpm-workspace.yaml")).unwrap();
+        assert!(t2.contains("packages:") && t2.contains("  esbuild: true"), "{t2}");
+        serde_yaml::from_str::<serde_yaml::Value>(&t2).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     #[test]

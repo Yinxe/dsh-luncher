@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ChevronDown, Copy, Download, Eraser, Loader2, Square, Terminal as TerminalIcon,
+  ChevronDown, Copy, Download, Eraser, Loader2, ShieldCheck, Square, Terminal as TerminalIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,8 @@ interface Props {
   /** 当前选中的 profile（用于标注「本实例」任务） */
   profile: string;
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
+  /** 放行构建脚本并重试（由父组件调用后端命令） */
+  onApproveBuilds: (jobId: number) => void;
 }
 
 function fmtDuration(job: PluginJob): string {
@@ -49,7 +51,7 @@ function lineClass(stream: string): string {
  * 挂载时用 list_plugin_jobs 快照恢复历史；每个任务一个标签页。
  */
 export default function PluginTerminal({
-  jobs, activeId, onSelect, onCancel, onClear, profile, onToast,
+  jobs, activeId, onSelect, onCancel, onClear, profile, onToast, onApproveBuilds,
 }: Props) {
   const [open, setOpen] = useState(true);
   const [follow, setFollow] = useState(true);
@@ -239,6 +241,15 @@ export default function PluginTerminal({
                     <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-muted-foreground" title={active.command}>
                       {active.command || active.label}
                     </span>
+                    {!active.running && active.pendingBuilds.length > 0 && (
+                      <Button
+                        size="sm"
+                        onClick={() => onApproveBuilds(active.id)}
+                        title={`写入 allowBuilds 并重跑：${active.pendingBuilds.join("、")}（构建脚本会执行第三方代码，确认可信再放行）`}
+                      >
+                        <ShieldCheck /> 允许构建脚本并重试
+                      </Button>
+                    )}
                     {active.running && (
                       <Button size="sm" variant="destructive" onClick={() => onCancel(active.id)}>
                         <Square /> 取消

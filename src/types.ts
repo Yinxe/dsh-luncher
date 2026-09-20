@@ -366,6 +366,8 @@ export interface PluginJob {
   cancelled: boolean;
   /** 失败时的对症建议（首行适合直接放进 toast） */
   hint: string | null;
+  /** 被 pnpm 拦下的构建脚本所属包（非空时显示「允许构建脚本并重试」） */
+  pendingBuilds: string[];
   lines: PluginLogLine[];
   /** 因缓冲上限被丢弃的行数 */
   dropped: number;
@@ -398,6 +400,8 @@ export interface PluginJobEvent {
   cancelled: boolean;
   /** 失败时的对症建议 */
   hint: string | null;
+  /** 待放行的构建脚本包名（按钮显示条件） */
+  pendingBuilds: string[];
   startedAt: number;
   finishedAt: number | null;
 }

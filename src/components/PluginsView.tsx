@@ -327,6 +327,15 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
         onClear={clear}
         profile={profile}
         onToast={onToast}
+        onApproveBuilds={(jobId) =>
+          api
+            .approvePluginBuilds(jobId)
+            .then((id) => {
+              setActiveId(id);
+              onToast("info", "已写入 allowBuilds，正在重跑（输出见内置终端）");
+            })
+            .catch((e) => onToast("err", String(e)))
+        }
       />
 
       <Card className="p-4">
