@@ -108,6 +108,8 @@ export const api = {
   listPluginJobs: () => invoke<PluginJob[]>("list_plugin_jobs"),
   cancelPluginJob: (jobId: number) => invoke<boolean>("cancel_plugin_job", { jobId }),
   clearPluginJobs: () => invoke<number>("clear_plugin_jobs"),
+  /** 重试失败的任务：原样重放它的全部步骤（返回新任务 id） */
+  retryPluginJob: (jobId: number) => invoke<number>("plugin_retry_job", { jobId }),
   /** 放行被 pnpm 拦下的构建脚本，并原样重跑该任务（返回新任务 id） */
   approvePluginBuilds: (jobId: number) =>
     invoke<number>("plugin_approve_builds", { jobId }),

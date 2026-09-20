@@ -146,6 +146,9 @@ pub struct JobRequest {
 // ── 任务状态 ────────────────────────────────────────────────
 
 struct JobHandle {
+    /// 本任务最初请求的步骤：重试时原样重放（clone 安装是多步的，
+    /// 中途失败必须从头来，只重跑最后那条 `dsh plugin add` 是错的）
+    request: Mutex<Option<JobRequest>>,
     meta: Mutex<PluginJob>,
     lines: Mutex<Vec<PluginLogLine>>,
     dropped: AtomicU64,
@@ -181,11 +184,14 @@ impl PluginJobState {
         })
     }
 
-    fn register(&self, profile: &str, kind: &str, label: &str, command: &str) -> (u64, Arc<JobHandle>) {
+    fn register(&self, req: &JobRequest, command: &str) -> (u64, Arc<JobHandle>) {
+        let (profile, kind, label) = (req.profile.as_str(), req.kind.as_str(), req.label.as_str());
+        let req = req.clone();
         let mut inner = self.inner.lock().unwrap();
         inner.seq += 1;
         let id = inner.seq;
         let handle = Arc::new(JobHandle {
+            request: Mutex::new(None),
             meta: Mutex::new(PluginJob {
                 id,
                 profile: profile.to_string(),
@@ -209,6 +215,7 @@ impl PluginJobState {
             child: Mutex::new(None),
             cancelled: AtomicBool::new(false),
         });
+        *handle.request.lock().unwrap() = Some(req);
         inner.jobs.insert(id, handle.clone());
         inner.order.push(id);
         // 超出上限：丢掉最旧的**已结束**任务
@@ -248,6 +255,14 @@ impl PluginJobState {
             .collect();
         out.sort_by(|a, b| b.id.cmp(&a.id));
         out
+    }
+
+    /// 取某个任务的原始请求，供「重试」原样重放
+    pub fn job_request(&self, id: u64) -> Option<(JobRequest, bool)> {
+        let handle = { self.inner.lock().unwrap().jobs.get(&id).cloned() }?;
+        let running = handle.meta.lock().unwrap().running;
+        let req = handle.request.lock().unwrap().clone()?;
+        Some((req, running))
     }
 
     /// 取某个任务的 (profile, 参数, 待放行的构建脚本)，供「允许构建脚本并重试」使用
@@ -391,6 +406,15 @@ fn emit_job<R: Runtime>(app: &AppHandle<R>, handle: &Arc<JobHandle>) {
     );
 }
 
+/// `git clone` 因目标目录已存在而失败 —— 重试时必然遇到，按"用已存在的仓库继续"处理
+fn looks_like_clone_exists(program: &str, args: &[String], out: &str) -> bool {
+    program == "git"
+        && args.first().map(String::as_str) == Some("clone")
+        && (out.contains("already exists")
+            || out.contains("已存在")
+            || out.contains("would be overwritten"))
+}
+
 /// 结束子进程**及其整个进程组**。
 ///
 /// pnpm / node / sh 都会派生子进程（构建、sleep 等），只 kill 直接子进程时，
@@ -438,7 +462,7 @@ pub fn start_job<R: Runtime>(
         ));
     }
     let command = describe_first_step(&req.steps);
-    let (id, handle) = state.register(&req.profile, &req.kind, &req.label, &command);
+    let (id, handle) = state.register(&req, &command);
     emit_job(&app, &handle);
 
     let state2 = state.clone();
@@ -564,13 +588,24 @@ pub fn start_job<R: Runtime>(
                     }
                 }
                 Step::RmDir { path } => {
-                    emit_line(&app, &handle, id, "info", &format!("$ rm -rf {}", path.display()));
-                    match remove_clone_path(path) {
-                        Ok(()) => emit_line(&app, &handle, id, "info", "已删除本地克隆目录"),
-                        Err(e) => {
-                            emit_line(&app, &handle, id, "stderr", &e);
-                            ok = false;
-                            break;
+                    if !path.exists() {
+                        // 幂等：重试一个"卸载并删克隆"的任务时，目录可能上次就删掉了
+                        emit_line(
+                            &app,
+                            &handle,
+                            id,
+                            "info",
+                            &format!("{} 已不存在，跳过删除", path.display()),
+                        );
+                    } else {
+                        emit_line(&app, &handle, id, "info", &format!("$ rm -rf {}", path.display()));
+                        match remove_clone_path(path) {
+                            Ok(()) => emit_line(&app, &handle, id, "info", "已删除本地克隆目录"),
+                            Err(e) => {
+                                emit_line(&app, &handle, id, "stderr", &e);
+                                ok = false;
+                                break;
+                            }
                         }
                     }
                 }
@@ -578,6 +613,19 @@ pub fn start_job<R: Runtime>(
                     emit_line(&app, &handle, id, "info", &format!("$ {label}"));
                     match run_streamed(&app, &handle, id, program, args, cwd.as_deref(), &[], &settings) {
                         Ok((code, out)) => {
+                            // 重试时 `git clone` 的目标目录可能上次已经建好了：
+                            // 这不是失败，改成"用已存在的仓库继续"
+                            if code != 0 && looks_like_clone_exists(program, args, &out) {
+                                emit_line(
+                                    &app,
+                                    &handle,
+                                    id,
+                                    "info",
+                                    "⚠ 目标目录已存在（上次可能已克隆成功），跳过克隆，直接用已存在的仓库继续",
+                                );
+                                exit_code = Some(0);
+                                continue;
+                            }
                             exit_code = Some(code);
                             if code != 0 {
                                 if let Some(hint) = failure_hint(program, &out, None) {
@@ -1753,7 +1801,15 @@ mod tests {
     #[test]
     fn job_state_tracks_running_and_clear() {
         let st = PluginJobState::default();
-        let (_id, h) = st.register("web", "install", "安装 @x", "dsh plugin add @x");
+        let req = JobRequest {
+            profile: "web".into(),
+            kind: "install".into(),
+            label: "安装 @x".into(),
+            steps: vec![Step::Note {
+                text: "x".into(),
+            }],
+        };
+        let (_id, h) = st.register(&req, "dsh plugin add @x");
         assert!(st.busy_profile("web"));
         assert!(!st.busy_profile("other"));
         assert_eq!(st.snapshot().len(), 1);
@@ -1984,6 +2040,97 @@ mod tests {
 
         std::env::remove_var("DSH_LAUNCHER_HOME");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// clone 目录已存在的判定（重试才需要）
+    #[test]
+    fn clone_exists_is_recognised() {
+        let args: Vec<String> = vec!["clone".into(), "https://x/y".into(), "/tmp/dest".into()];
+        assert!(looks_like_clone_exists(
+            "git",
+            &args,
+            "fatal: destination path '/tmp/dest' already exists and is not an empty directory."
+        ));
+        assert!(looks_like_clone_exists("git", &args, "目标路径已存在"));
+        // 其它 git 失败、或者不是 clone，都不能当成"已存在"
+        assert!(!looks_like_clone_exists("git", &args, "fatal: could not read Username"));
+        let pull: Vec<String> = vec!["-C".into(), "/x".into(), "pull".into()];
+        assert!(!looks_like_clone_exists("git", &pull, "already exists"));
+        assert!(!looks_like_clone_exists("pnpm", &args, "already exists"));
+    }
+
+    /// 任务保存了原始请求 → 「重试」能原样重放全部步骤
+    #[cfg(unix)]
+    #[test]
+    fn retry_replays_the_whole_request() {
+        let app = tauri::test::mock_app();
+        let state = PluginJobState::default();
+        let steps = vec![
+            Step::Cmd {
+                program: "sh".into(),
+                args: vec!["-c".into(), "echo 第一步".into()],
+                cwd: None,
+                label: "sh 第一步".into(),
+                soft: false,
+            },
+            Step::Cmd {
+                program: "sh".into(),
+                args: vec!["-c".into(), "echo 第二步; exit 7".into()],
+                cwd: None,
+                label: "sh 第二步".into(),
+                soft: false,
+            },
+        ];
+        let req = JobRequest {
+            profile: "web".into(),
+            kind: "clone".into(),
+            label: "clone 安装 x".into(),
+            steps: steps.clone(),
+        };
+        let id = start_job(app.handle().clone(), &state, Settings::default(), req).unwrap();
+        let job = wait_job(&state, id);
+        assert_eq!(job.ok, Some(false));
+        assert_eq!(job.exit_code, Some(7));
+
+        let (req2, running) = state.job_request(id).expect("应能取回原始请求");
+        assert!(!running);
+        assert_eq!(req2.kind, "clone");
+        assert_eq!(req2.steps.len(), 2, "两步都要在，重试才能从头来");
+        match &req2.steps[0] {
+            Step::Cmd { label, .. } => assert_eq!(label, "sh 第一步"),
+            other => panic!("{other:?}"),
+        }
+        // 重放同一份请求（等价于命令层的重试）
+        let retry = JobRequest {
+            label: format!("重试：{}", req2.label),
+            ..req2.clone()
+        };
+        let id2 = start_job(app.handle().clone(), &state, Settings::default(), retry).unwrap();
+        let job2 = wait_job(&state, id2);
+        assert_eq!(job2.label, "重试：clone 安装 x");
+        let texts: Vec<String> = job2.lines.iter().map(|l| l.text.clone()).collect();
+        assert!(texts.iter().any(|t| t == "第一步") && texts.iter().any(|t| t == "第二步"));
+    }
+
+    /// 重放任务时的幂等：`rm -rf` 目标已不存在不该算失败
+    #[cfg(unix)]
+    #[test]
+    fn rm_dir_of_missing_path_is_not_a_failure() {
+        let app = tauri::test::mock_app();
+        let state = PluginJobState::default();
+        let missing = std::env::temp_dir().join("dsh-does-not-exist-retry-test");
+        let _ = std::fs::remove_dir_all(&missing);
+        let req = JobRequest {
+            profile: "web".into(),
+            kind: "uninstall".into(),
+            label: "卸载并删除克隆".into(),
+            steps: vec![Step::RmDir { path: missing }],
+        };
+        let id = start_job(app.handle().clone(), &state, Settings::default(), req).unwrap();
+        let job = wait_job(&state, id);
+        assert_eq!(job.ok, Some(true), "已不存在的目录应跳过而不是失败: {job:?}");
+        let texts: Vec<String> = job.lines.iter().map(|l| l.text.clone()).collect();
+        assert!(texts.iter().any(|t| t.contains("已不存在，跳过删除")), "{texts:?}");
     }
 
     /// 真起进程 + 真流式事件：stdout/stderr 都进日志缓冲，退出码与状态正确

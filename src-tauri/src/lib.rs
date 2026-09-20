@@ -69,6 +69,7 @@ pub fn run() {
             commands::cancel_plugin_job,
             commands::clear_plugin_jobs,
             commands::plugin_approve_builds,
+            commands::plugin_retry_job,
             commands::export_plugin_job_log,
             commands::list_cloned_plugins,
             commands::probe_local_plugins,

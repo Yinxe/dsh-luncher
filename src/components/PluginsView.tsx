@@ -327,6 +327,15 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
         onClear={clear}
         profile={profile}
         onToast={onToast}
+        onRetry={(jobId) =>
+          api
+            .retryPluginJob(jobId)
+            .then((id) => {
+              setActiveId(id);
+              onToast("info", "已重试：输出见内置终端");
+            })
+            .catch((e) => onToast("err", String(e)))
+        }
         onApproveBuilds={(jobId) =>
           api
             .approvePluginBuilds(jobId)

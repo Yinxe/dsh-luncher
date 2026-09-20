@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ChevronDown, Copy, Download, Eraser, Loader2, ShieldCheck, Square, Terminal as TerminalIcon,
+  ChevronDown, Copy, Download, Eraser, Loader2, RotateCcw, ShieldCheck, Square,
+  Terminal as TerminalIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,8 @@ interface Props {
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
   /** 放行构建脚本并重试（由父组件调用后端命令） */
   onApproveBuilds: (jobId: number) => void;
+  /** 重试失败的任务：原样重放它的全部步骤 */
+  onRetry: (jobId: number) => void;
 }
 
 function fmtDuration(job: PluginJob): string {
@@ -51,7 +54,7 @@ function lineClass(stream: string): string {
  * 挂载时用 list_plugin_jobs 快照恢复历史；每个任务一个标签页。
  */
 export default function PluginTerminal({
-  jobs, activeId, onSelect, onCancel, onClear, profile, onToast, onApproveBuilds,
+  jobs, activeId, onSelect, onCancel, onClear, profile, onToast, onApproveBuilds, onRetry,
 }: Props) {
   const [open, setOpen] = useState(true);
   const [follow, setFollow] = useState(true);
@@ -241,6 +244,16 @@ export default function PluginTerminal({
                     <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-muted-foreground" title={active.command}>
                       {active.command || active.label}
                     </span>
+                    {!active.running && !active.ok && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => onRetry(active.id)}
+                        title="原样重放这个任务的全部步骤（新任务，输出同样在这里）"
+                      >
+                        <RotateCcw /> 重试
+                      </Button>
+                    )}
                     {!active.running && active.pendingBuilds.length > 0 && (
                       <Button
                         size="sm"

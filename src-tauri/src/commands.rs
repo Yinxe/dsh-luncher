@@ -806,6 +806,38 @@ pub fn cancel_plugin_job(jobs: State<'_, crate::plugin::PluginJobState>, job_id:
     jobs.cancel(job_id)
 }
 
+/// 重试一个失败的任务：**原样重放它的全部步骤**（新任务，输出同样进内置终端）。
+///
+/// 为什么重放整个任务而不是只重跑最后一条命令：clone 安装是多步的
+/// （预检 → git clone/pull → 可选构建 → dsh plugin add link:…），中途失败时
+/// 只重跑最后一步是错的。为此 `git clone` 目标已存在、`rm -rf` 目标已消失
+/// 这两种重试必然遇到的情况都做成了幂等。
+#[tauri::command]
+pub fn plugin_retry_job(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    jobs: State<'_, crate::plugin::PluginJobState>,
+    job_id: u64,
+) -> Result<u64, String> {
+    let (req, running) = jobs
+        .job_request(job_id)
+        .ok_or_else(|| format!("任务 {job_id} 不存在或已被清理（无法重试）"))?;
+    if running {
+        return Err("任务还在运行中：请先取消或等它结束".into());
+    }
+    if req.steps.is_empty() {
+        return Err("这个任务没有可重放的步骤".into());
+    }
+    let settings = state.settings.lock().unwrap().clone();
+    let retry = crate::plugin::JobRequest {
+        profile: req.profile.clone(),
+        kind: req.kind.clone(),
+        label: format!("重试：{}", req.label),
+        steps: req.steps.clone(),
+    };
+    crate::plugin::start_job(app, &jobs, settings, retry)
+}
+
 /// 放行被 pnpm 拦下的构建脚本，并把原命令原样重跑一次。
 ///
 /// 构建脚本会执行第三方代码，属于**用户的决定**：只有用户点「允许构建脚本并重试」
