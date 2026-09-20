@@ -120,6 +120,9 @@ pub enum Step {
     Dsh { args: Vec<String> },
     /// 安装前预检远端可匿名访问（放任务里跑：点击立即有反馈，不必让 UI 等网络）
     ProbeRemote { url: String },
+    /// GitHub 直装前的把关：目标包必须声明 dsh.bundle 且**已带 lib/ 构建产物**
+    /// （GitHub 直装不构建，缺 lib 等于装个加载不了的东西；克隆安装会构建，是另一条路）
+    ProbeGithubPackage { spec: String },
     /// 内部步骤：删除目录（克隆出的本地仓库）
     RmDir { path: PathBuf },
     /// 内部步骤：只写一行提示
@@ -466,6 +469,68 @@ pub fn start_job<R: Runtime>(
                                     "⚠ 未能预检远端（{reason}）：直接尝试安装，失败原因见下方输出"
                                 ),
                             );
+                        }
+                    }
+                }
+                Step::ProbeGithubPackage { spec } => {
+                    let parsed = crate::registry::parse_github_spec(spec);
+                    match parsed {
+                        // 打包产物直链没有仓库树可查：跳过（装后校验会兜底）
+                        None => {}
+                        Some(sp) if sp.tarball_url.is_some() => {
+                            emit_line(
+                                &app,
+                                &handle,
+                                id,
+                                "info",
+                                "（打包产物直链：无法预先核对 lib/，装后校验会兜底）",
+                            );
+                        }
+                        Some(sp) => {
+                            emit_line(
+                                &app,
+                                &handle,
+                                id,
+                                "info",
+                                &format!(
+                                    "$ 核对 {} {} 的 dsh.bundle 与 lib/ 构建产物",
+                                    sp.owner, sp.repo
+                                ),
+                            );
+                            let token = crate::registry::github_token(Some(&settings.github_token));
+                            // 任务线程是普通 std::thread，这里用 block_on 跑只读探测
+                            match tauri::async_runtime::block_on(crate::registry::fetch_github_repo(
+                                spec,
+                                token.as_deref(),
+                            )) {
+                                Ok(info) => {
+                                    match crate::registry::preflight_direct_install(
+                                        &info.candidates,
+                                        sp.plugin_path.as_deref(),
+                                    ) {
+                                        Ok(detail) => {
+                                            emit_line(&app, &handle, id, "info", &format!("✔ {detail}"));
+                                        }
+                                        Err(reason) => {
+                                            emit_line(&app, &handle, id, "stderr", &reason);
+                                            remember_hint(&handle, &reason);
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    // 探测失败不该挡住安装（可能只是元数据/额度问题）：
+                                    // 装后校验仍然会拦下真正加载不了的包
+                                    emit_line(
+                                        &app,
+                                        &handle,
+                                        id,
+                                        "info",
+                                        &format!("⚠ 无法预先核对（{e}）：直接安装，装后校验会兜底"),
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -878,7 +943,9 @@ fn describe_first_step(steps: &[Step]) -> String {
             Step::Cmd { label, .. } => return label.clone(),
             Step::Dsh { args } => return format!("dsh plugin {}", args.join(" ")),
             Step::RmDir { path } => return format!("rm -rf {}", path.display()),
-            Step::Note { .. } | Step::ProbeRemote { .. } => continue,
+            Step::Note { .. }
+            | Step::ProbeRemote { .. }
+            | Step::ProbeGithubPackage { .. } => continue,
         }
     }
     String::new()

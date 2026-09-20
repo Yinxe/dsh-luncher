@@ -60,8 +60,16 @@ export default function PluginCandidateList({
           value={c.installSpec}
           variant="outline"
           size="sm"
+          disabled={!c.ready || !c.libOk}
+          title={
+            !c.ready
+              ? "该子包没有声明 dsh.bundle，不能作为插件安装"
+              : !c.libOk
+              ? "仓库里没有 lib/ 构建产物：直装会加载失败，请改用「Clone 仓库」安装（会装依赖并构建）"
+              : undefined
+          }
           // 带 ! 的几项是为了压过 toggleVariants 的 size/variant 默认值（h-7 / font-medium / whitespace-nowrap）
-          className="h-auto! w-full flex-col items-stretch gap-1.5 overflow-visible rounded-lg! px-2.5 py-2 text-left font-normal! whitespace-normal! data-[state=on]:border-primary/50 data-[state=on]:bg-primary/5"
+          className="h-auto! w-full flex-col items-stretch gap-1.5 overflow-visible rounded-lg! px-2.5 py-2 text-left font-normal! whitespace-normal! data-[state=on]:border-primary/50 data-[state=on]:bg-primary/5 disabled:cursor-not-allowed disabled:opacity-70"
         >
           <span className="flex w-full items-start gap-2">
             <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
@@ -125,7 +133,8 @@ export default function PluginCandidateList({
 
           {!c.libOk && (
             <span className="text-[10.5px] leading-relaxed text-amber-600 dark:text-amber-400">
-              仓库未提交构建产物：直接安装会缺 lib/，建议改用「Clone 仓库」方式（会装依赖并构建）
+              仓库未提交 lib/ 构建产物，**不能直装**（dsh 加载不了）——请改用「Clone 仓库」方式安装（会先装依赖并构建），
+              或让作者提交构建产物
             </span>
           )}
         </ToggleGroupItem>

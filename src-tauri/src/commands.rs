@@ -653,6 +653,8 @@ pub fn plugin_install(
     for spec in &specs {
         if is_github(spec) {
             steps.push(crate::plugin::Step::ProbeRemote { url: spec.clone() });
+            // 直装不放行"没有 lib/ 构建产物"的包（dsh 加载不了）；克隆安装是另一条路
+            steps.push(crate::plugin::Step::ProbeGithubPackage { spec: spec.clone() });
         }
         steps.push(crate::plugin::Step::Dsh {
             args: vec!["add".into(), spec.clone()],

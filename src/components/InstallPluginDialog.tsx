@@ -200,7 +200,9 @@ export default function InstallPluginDialog({
     () => (ghInfo?.candidates ?? []).filter((c) => ghSel.includes(c.installSpec)),
     [ghInfo, ghSel],
   );
-  const needsBuildHint = selectedGh.some((c) => !c.libOk);
+  // 直装要求：声明 dsh.bundle 且已带 lib/ 构建产物（后端 ProbeGithubPackage 是权威闸门）
+  const blockedGh = selectedGh.filter((c) => !c.ready || !c.libOk);
+  const needsBuildHint = blockedGh.length > 0;
 
   const installGh = () => {
     if (ghSel.length === 0) return;
@@ -490,7 +492,8 @@ export default function InstallPluginDialog({
                       />
                       {needsBuildHint && (
                         <p className="text-[10.5px] leading-relaxed text-amber-600 dark:text-amber-400">
-                          选中的包里有的没提交 lib/：直接安装会缺构建产物，建议改用「Clone 仓库」方式安装（会装依赖并构建）。
+                          只有<strong>声明了 dsh.bundle 且已提交 lib/ 构建产物</strong>的子包才能直装；
+                          没提交 lib/ 的请改用「Clone 仓库」方式安装（会先装依赖并构建）。
                         </p>
                       )}
                     </>
@@ -691,9 +694,14 @@ export default function InstallPluginDialog({
         {/* 固定脚注：主操作按当前标签页变化 */}
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border bg-muted/30 px-5 py-2.5">
           {tab === "github" && ghInfo && !ghTarball && (
-            <Button size="sm" disabled={ghSel.length === 0} onClick={installGh}>
+            <Button size="sm" disabled={ghSel.length === 0 || blockedGh.length > 0} onClick={installGh}>
               <Plus /> 安装选中的 {ghSel.length} 个插件
             </Button>
+          )}
+          {tab === "github" && blockedGh.length > 0 && (
+            <span className="text-[10.5px] leading-relaxed text-amber-600 dark:text-amber-400">
+              选中的 {blockedGh.length} 个包没有 lib/ 构建产物（或未声明 dsh.bundle），不能直装 —— 请改用「Clone 仓库」标签页安装
+            </span>
           )}
           {tab === "link" && linkCands && (
             <Button

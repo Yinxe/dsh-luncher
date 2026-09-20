@@ -1691,6 +1691,125 @@ pub async fn probe_remote_access(url: &str, token: Option<&str>) -> RepoAccess {
     }
 }
 
+/// 用 GitHub 仓库地址**直装**之前的把关（纯函数，便于离线测试）。
+///
+/// 规则（对应 dsh 的加载约定）：
+/// 1. 目标包必须声明 `dsh.bundle.patch` —— 否则装上也只是普通依赖，不会成为 profile 层；
+/// 2. 目标包必须**已经带 `lib/` 构建产物** —— GitHub 直装不会构建（pnpm 只装现成文件），
+///    缺 lib/ 装上去是"装了个加载不了的东西"，必须改用 Clone 仓库安装（会装依赖并构建）
+///    或让作者提交构建产物；
+/// 3. 没写 `#path:` 时：根包就是插件则用它；根包不是插件但库里有子包插件，则列出子包
+///    要求指定路径（不能替用户猜一个装上去）。
+///
+/// @param candidates 本次探测到的候选（fetch_github_repo 的结果）
+/// @param spec_path  安装规格里的 `path:` 片段（没有则 None）
+/// @returns Ok(提示信息) 通过；Err(拒绝原因) 不能直装
+pub fn preflight_direct_install(
+    candidates: &[PluginCandidate],
+    spec_path: Option<&str>,
+) -> Result<String, String> {
+    let target_path = spec_path.map(|p| p.trim().trim_matches('/').to_string());
+    let target = match &target_path {
+        Some(p) => candidates.iter().find(|c| c.path == *p),
+        None => candidates.iter().find(|c| c.path.is_empty()),
+    };
+    let label = |c: &PluginCandidate| {
+        let who = c
+            .name
+            .clone()
+            .unwrap_or_else(|| if c.path.is_empty() { "（仓库根）".to_string() } else { c.path.clone() });
+        match (c.path.is_empty(), c.version.clone()) {
+            (true, Some(v)) => format!("{who}@{v}"),
+            (_, Some(v)) => format!("{who}@{v}（{path}）", path = c.path),
+            _ => who,
+        }
+    };
+
+    // 指定了路径却找不到该目录 / 该目录没有 package.json
+    let Some(target) = target else {
+        let hint = if target_path.is_some() {
+            "该路径下没有 package.json。请确认「插件在仓库中的路径」填的是插件根目录。".to_string()
+        } else {
+            "仓库根目录没有 package.json（这通常是个 monorepo）。".to_string()
+        };
+        let subs: Vec<String> = candidates
+            .iter()
+            .filter(|c| c.has_bundle)
+            .map(|c| {
+                if c.path.is_empty() {
+                    "（仓库根）".to_string()
+                } else {
+                    c.path.clone()
+                }
+            })
+            .collect();
+        let extra = if subs.is_empty() {
+            String::new()
+        } else {
+            format!("\n仓库里的插件子包：{}", subs.join("、"))
+        };
+        return Err(format!("{hint}{extra}"));
+    };
+
+    if !target.has_bundle {
+        let subs: Vec<String> = candidates
+            .iter()
+            .filter(|c| c.has_bundle && c.path != target.path)
+            .map(|c| {
+                if c.path.is_empty() {
+                    "（仓库根）".to_string()
+                } else {
+                    c.path.clone()
+                }
+            })
+            .collect();
+        let msg = if subs.is_empty() {
+            format!(
+                "{} 没有声明 dsh.bundle（package.json 里缺 dsh.bundle.patch），装上也只会是普通依赖，不会成为插件层。",
+                label(target)
+            )
+        } else if subs.len() == 1 {
+            format!(
+                "{} 不是 dsh 插件包；这个仓库里的插件在：{} —— 请在「插件在仓库中的路径」里填它，或直接用探测列表勾选安装。",
+                label(target),
+                subs[0]
+            )
+        } else {
+            format!(
+                "{} 不是 dsh 插件包；这个仓库里有多个插件子包：{} —— 请指定其中一个。",
+                label(target),
+                subs.join("、")
+            )
+        };
+        return Err(msg);
+    }
+
+    // 核心：库内必须有 lib/ 构建产物，直装才不会装出个加载不了的东西
+    if !target.lib_ok {
+        return Err(format!(
+            "{} 声明了 dsh.bundle，但仓库里**没有 lib/ 构建产物**（没有已提交的 .js/.cjs/.mjs）。\n             GitHub 直装只取仓库里的现成文件、不会构建，装上去会加载失败（启动器会在装完校验时把它卸掉）。\n             两条可行路径：① 改用「Clone 仓库」安装（会先 pnpm install + build 再 link）；             ② 换一个提交了 lib/ 的分支/标签（例如该插件的发布分支）。",
+            label(target)
+        ));
+    }
+    if !target.has_patch {
+        // lib 有、patch 声明有，但文件缺失 —— dsh 记入 bundles 后会因缺 patch 报错
+        return Err(format!(
+            "{} 声明了 dsh.bundle.patch，但仓库里找不到那个 cordis.patch.yml。请确认该包是否完整提交。",
+            label(target)
+        ));
+    }
+    Ok(format!(
+        "{}：lib/ 已就绪（{}{}）",
+        label(target),
+        if target.workspace_member {
+            "workspace 子包，"
+        } else {
+            ""
+        },
+        "构建产物齐全"
+    ))
+}
+
 /// 私有仓库/不存在的仓库的统一拒绝话术（GitHub 对二者都返回 404）
 pub fn private_repo_reject(owner: &str, repo: &str) -> String {
     format!(
@@ -2400,6 +2519,61 @@ mod tests {
         assert!(probes.iter().all(|p| p.ms < 60_000), "耗时字段异常: {probes:?}");
         // 自检会把熔断状态清空重建，因此至少有一条免额度通道给出确定结论
         println!("通道自检: {probes:?}");
+    }
+
+    /// 直装前的把关：必须有 dsh.bundle + lib/，没有 lib 一律拒绝并指向 Clone 安装
+    #[test]
+    fn direct_install_requires_lib_and_bundle() {
+        let cand = |path: &str, bundle: bool, lib: bool, patch: bool| PluginCandidate {
+            path: path.to_string(),
+            name: Some(format!("@dshp/{path}")),
+            version: Some("1.0.0".into()),
+            description: None,
+            lib_ok: lib,
+            has_bundle: bundle,
+            has_patch: patch,
+            workspace_member: !path.is_empty(),
+            ready: bundle,
+            install_spec: format!("github:o/r#path:{path}"),
+        };
+
+        // ① 正常：声明 bundle + lib 就绪
+        let ok = vec![cand("plugins/a", true, true, true)];
+        assert!(preflight_direct_install(&ok, Some("plugins/a")).is_ok());
+        // ② 缺 lib → 拒绝，且给出 Clone 安装的指引
+        let nolib = vec![cand("plugins/a", true, false, true)];
+        let err = preflight_direct_install(&nolib, Some("plugins/a")).unwrap_err();
+        assert!(err.contains("没有 lib/ 构建产物"), "{err}");
+        assert!(err.contains("Clone 仓库"), "{err}");
+        // ③ 没声明 dsh.bundle → 拒绝（普通库）
+        let plain = vec![cand("plugins/a", false, true, false)];
+        let err = preflight_direct_install(&plain, Some("plugins/a")).unwrap_err();
+        assert!(err.contains("没有声明 dsh.bundle"), "{err}");
+        // ④ 声明了 bundle 但 patch 文件不在 → 拒绝
+        let nopatch = vec![cand("plugins/a", true, true, false)];
+        let err = preflight_direct_install(&nopatch, Some("plugins/a")).unwrap_err();
+        assert!(err.contains("cordis.patch.yml"), "{err}");
+
+        // ⑤ 未指定路径 + 根包不是插件 + 库里有子包 → 让它指定路径，并列出子包
+        let mono = vec![
+            cand("", false, false, false),
+            cand("plugins/a", true, true, true),
+            cand("plugins/b", true, true, true),
+        ];
+        let err = preflight_direct_install(&mono, None).unwrap_err();
+        assert!(err.contains("多个插件子包"), "{err}");
+        assert!(err.contains("plugins/a") && err.contains("plugins/b"), "{err}");
+        // 只有一个子包时直接点名
+        let one = vec![cand("", false, false, false), cand("plugins/a", true, true, true)];
+        let err = preflight_direct_install(&one, None).unwrap_err();
+        assert!(err.contains("插件在仓库中的路径"), "{err}");
+        assert!(err.contains("plugins/a"), "{err}");
+        // ⑥ 指定了不存在的路径
+        let err = preflight_direct_install(&ok, Some("plugins/nope")).unwrap_err();
+        assert!(err.contains("没有 package.json"), "{err}");
+        // ⑦ 根包就是插件（整仓就是一个插件）
+        let root = vec![cand("", true, true, true)];
+        assert!(preflight_direct_install(&root, None).is_ok());
     }
 
     #[test]
