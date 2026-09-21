@@ -742,20 +742,32 @@ pub async fn delete_profile(
 
 /// 回收站列表（删除的 profile 只是被移入这里，可还原或彻底删除）
 #[tauri::command]
-pub fn list_deleted_profiles() -> Vec<crate::profile_cfg::DeletedProfile> {
-    crate::profile_cfg::list_deleted_profiles()
+pub async fn list_deleted_profiles() -> Vec<crate::profile_cfg::DeletedProfile> {
+    match tauri::async_runtime::spawn_blocking(crate::profile_cfg::list_deleted_profiles).await {
+        Ok(v) => v,
+        Err(e) => {
+            // 同步命令在主线程上扫回收站会卡窗口，挪进阻塞线程池后 join 失败
+            // 只可能是线程池异常——留一条线索，别静默给出「回收站是空的」
+            crate::diag::warn("app", &format!("读取回收站失败: {e}"));
+            Vec::new()
+        }
+    }
 }
 
 /// 把回收站条目还原回 profiles 目录
 #[tauri::command]
-pub fn restore_deleted_profile(dir_name: String) -> Result<String, String> {
-    crate::profile_cfg::restore_deleted_profile(&dir_name)
+pub async fn restore_deleted_profile(dir_name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::profile_cfg::restore_deleted_profile(&dir_name))
+        .await
+        .map_err(|e| format!("还原失败: {e}"))?
 }
 
 /// 从回收站彻底删除（不可恢复）
 #[tauri::command]
-pub fn purge_deleted_profile(dir_name: String) -> Result<(), String> {
-    crate::profile_cfg::purge_deleted_profile(&dir_name)
+pub async fn purge_deleted_profile(dir_name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::profile_cfg::purge_deleted_profile(&dir_name))
+        .await
+        .map_err(|e| format!("删除失败: {e}"))?
 }
 
 /// 生成「恢复模式」profile（用 dsh 的 `--profile web-Recovery --from-default-profile web`
@@ -1354,8 +1366,11 @@ pub async fn probe_local_plugins(
 }
 
 #[tauri::command]
-pub fn delete_cloned_plugin(dir_name: String) -> Result<(), String> {
-    crate::plugin::remove_clone_dir(&dir_name)
+pub async fn delete_cloned_plugin(dir_name: String) -> Result<(), String> {
+    // 克隆目录连着 node_modules 可能有几十万个小文件，递归删除动辄数秒
+    tauri::async_runtime::spawn_blocking(move || crate::plugin::remove_clone_dir(&dir_name))
+        .await
+        .map_err(|e| format!("删除失败: {e}"))?
 }
 
 /// 返回 git-plugins 目录路径（不存在则创建），供前端在文件管理器里打开
@@ -1429,9 +1444,15 @@ pub fn set_web_quick_config(
 /// 复制 profile。复制后**自动错开 web 端口**（复用「邻近空闲端口」那套逻辑），
 /// 否则两个实例配置同一个端口、无法并行启动。返回新端口（null = 该 profile 没有 webserver 配置）。
 #[tauri::command]
-pub fn copy_profile(source: String, new_name: String) -> Result<Option<u16>, String> {
-    crate::profile_cfg::copy_profile(&source, &new_name)?;
-    crate::profile_cfg::assign_free_web_port(new_name.trim())
+pub async fn copy_profile(source: String, new_name: String) -> Result<Option<u16>, String> {
+    // 整目录递归复制（profile 可能带 node_modules）+ 端口探测都在磁盘上耗时，
+    // 留在同步命令里会卡住主线程
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::profile_cfg::copy_profile(&source, &new_name)?;
+        crate::profile_cfg::assign_free_web_port(new_name.trim())
+    })
+    .await
+    .map_err(|e| format!("复制 profile 失败: {e}"))?
 }
 
 #[tauri::command]
