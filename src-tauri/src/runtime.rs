@@ -1,4 +1,6 @@
 use serde::Serialize;
+// update()/finalize() 是 trait 方法，必须在作用域内
+use sha2::Digest as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,6 +15,24 @@ pub const NODE_VERSION: &str = "24.15.0";
 
 pub fn runtime_root() -> PathBuf {
     settings::starter_home().join("runtime")
+}
+
+/// 内置 Node 归档的官方 SHA-256（来自 https://nodejs.org/dist/vNODE_VERSION/SHASUMS256.txt）。
+/// 镜像站地址用户可以随便改，完整性不能跟着一起放下：装进 dsh 运行时的 node 必须
+/// 先用这里锚定的官方哈希验过才解压。升级 NODE_VERSION 时必须换掉这张表
+/// （`embedded_node_hashes_match_builds` 会联网核对，CI 防错）。
+pub const NODE_SHA256: [(&str, &str); 6] = [
+    ("node-v24.15.0-darwin-arm64.tar.xz", "af5cfaeafe603aaf7599f287fd9d100bb41f16794f49788fa59dd3f25546930f"),
+    ("node-v24.15.0-darwin-x64.tar.xz", "5d627245b9f53cb2512cc21b7aa6aad693106affadd91e0c8f42d600fb7ba444"),
+    ("node-v24.15.0-linux-arm64.tar.xz", "f3d5a797b5d210ce8e2cb265544c8e482eaedcb8aa409a8b46da7e8595d0dda0"),
+    ("node-v24.15.0-linux-x64.tar.xz", "472655581fb851559730c48763e0c9d3bc25975c59d518003fc0849d3e4ba0f6"),
+    ("node-v24.15.0-win-arm64.zip", "c9eb7402eda26e2ba7e44b6727fc85a8de56c5095b1f71ebd3062892211aa116"),
+    ("node-v24.15.0-win-x64.zip", "cc5149eabd53779ce1e7bdc5401643622d0c7e6800ade18928a767e940bb0e62"),
+];
+
+/// 当前平台归档对应的官方哈希；架构不支持时返回 None（上游 install 会先报不支持）。
+fn expected_node_sha256(fname: &str) -> Option<&'static str> {
+    NODE_SHA256.iter().find(|(n, _)| *n == fname).map(|(_, h)| *h)
 }
 
 pub fn runtime_dir() -> PathBuf {
@@ -82,6 +102,13 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
     let plat = platform_key()?;
     let ext = if cfg!(windows) { "zip" } else { "tar.xz" };
     let fname = format!("node-v{NODE_VERSION}-{plat}.{ext}");
+    // 完整性锚点：内置官方哈希只认文件名，认不出来说明这张表没跟上平台/版本
+    // —— 宁可拒绝安装，也绝不解压一份没验过的 node。
+    let expected_sha = expected_node_sha256(&fname).ok_or_else(|| {
+        format!(
+            "内部错误：内置哈希表里没有 {fname} 的官方 SHA-256（升级 NODE_VERSION 时漏改 runtime.rs），已拒绝安装"
+        )
+    })?;
     let url = format!("{mirror}/v{NODE_VERSION}/{fname}");
     emit(&app, &format!("$ 镜像站: {mirror}"));
     emit(&app, &format!("$ 平台: {plat} · 目标: runtime/node-v{NODE_VERSION}"));
@@ -117,6 +144,8 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
     let mut received: u64 = 0;
     let mut last_emit: u64 = 0;
     let mut last_pct: u64 = 0;
+    // 边下边算：50MB 的归档不重复读第二遍
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
     let mut resp = resp;
     while let Some(chunk) = resp
         .chunk()
@@ -124,6 +153,7 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
         .map_err(|e| format!("下载中断: {e}"))?
     {
         file.write_all(&chunk).map_err(|e| format!("写文件失败: {e}"))?;
+        hasher.update(&chunk);
         received += chunk.len() as u64;
         if received - last_emit >= 512 * 1024 || received == total {
             let _ = app.emit(
@@ -168,6 +198,21 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
         crate::diag::op("runtime", &msg);
         return Err(msg);
     }
+    // SHA-256 校验：镜像站地址是用户可改的（设置里随便填），被投毒或被网关替换成
+    // 别的载荷时魔数与长度都拦不住 —— 只有和官方锚定值比对才算数。校验失败**删档**：
+    // 一份「看着像 node 实际不是」的归档留在磁盘上只会等着被手动解压。
+    let got_sha = format!("{:x}", hasher.finalize());
+    if !got_sha.eq_ignore_ascii_case(expected_sha) {
+        let _ = std::fs::remove_file(&archive_path);
+        let msg = format!(
+            "SHA-256 校验不通过，已删除该归档：\n  期望（官方）: {expected_sha}\n  实际: {got_sha}\n\
+             镜像站给出的文件不是官方 {fname}（被篡改、劫持或版本目录不同步都可能造成）。\
+             请在设置里换回默认镜像站（或填 https://nodejs.org/dist）后重试"
+        );
+        crate::diag::op("runtime", &msg);
+        return Err(msg);
+    }
+    emit(&app, "$ SHA-256 校验通过 ✔");
     match archive_kind(&archive_path) {
         Some(kind) if kind == archive_expected_kind() => {}
         other => {
@@ -374,6 +419,70 @@ mod tests {
         assert_eq!(archive_kind(&html).as_deref(), Some("未知"));
         let empty = sample("c.tar.xz", b"");
         assert_eq!(archive_kind(&empty), None);
+    }
+
+    /// 每个受支持的平台×架构组合都必须有锚定哈希 —— install() 只按文件名查表，
+    /// 表里缺一行就等于那个平台永远装不上（宁缺毋滥是故意的，但别无声无息）。
+    #[test]
+    fn every_supported_build_has_a_pinned_hash() {
+        for (os, arch, ext) in [
+            ("linux", "x64", "tar.xz"),
+            ("linux", "arm64", "tar.xz"),
+            ("darwin", "x64", "tar.xz"),
+            ("darwin", "arm64", "tar.xz"),
+            ("win", "x64", "zip"),
+            ("win", "arm64", "zip"),
+        ] {
+            let fname = format!("node-v{NODE_VERSION}-{os}-{arch}.{ext}");
+            let sha = expected_node_sha256(&fname);
+            assert!(sha.is_some(), "锚定表缺少 {fname}");
+            let sha = sha.unwrap();
+            assert_eq!(
+                sha.len(), 64,
+                "{fname} 的哈希不是 64 个十六进制字符: {sha}"
+            );
+            assert!(
+                sha.chars().all(|c| c.is_ascii_hexdigit()),
+                "{fname} 的哈希含非法字符: {sha}"
+            );
+        }
+    }
+
+    /// 与 nodejs.org 官方 SHASUMS256.txt 对账：锚定表抄错一个字符都会在用户
+    /// 装机时爆炸，这条测试把它拦在提交阶段。外网不可达时跳过（CI 离线不红）。
+    #[test]
+    fn embedded_hashes_match_official_shasums() {
+        let _guard = crate::util::NET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = format!("https://nodejs.org/dist/v{NODE_VERSION}/SHASUMS256.txt");
+        let body = match tauri::async_runtime::block_on(async {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .ok()?
+                .get(&url)
+                .send()
+                .await
+                .ok()?
+                .text()
+                .await
+                .ok()
+        }) {
+            Some(b) => b,
+            None => {
+                eprintln!("跳过：拉不到 {url}（离线环境）");
+                return;
+            }
+        };
+        for line in body.lines() {
+            let mut it = line.split_whitespace();
+            let (Some(sha), Some(file)) = (it.next(), it.next()) else { continue };
+            if let Some(pinned) = expected_node_sha256(file) {
+                assert_eq!(
+                    pinned, sha,
+                    "锚定表与官方不符：{file} 官方为 {sha}，内置为 {pinned}"
+                );
+            }
+        }
     }
 }
 

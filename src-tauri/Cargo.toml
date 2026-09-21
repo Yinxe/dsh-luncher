@@ -30,6 +30,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+# 内置 Node 归档的完整性校验（runtime.rs 边下边算 SHA-256，与官方锚定值比对）
+sha2 = "0.10"
 # 跨平台「端口 → 占用进程」查询：Linux 读 /proc（rustix）、macOS 走 libproc、
 # Windows 走 IP Helper。纯 Rust 依赖、无 build.rs；刻意不用 netstat2 0.10+，
 # 因为它会在 Linux/macOS 引入 bindgen 构建依赖（要求装 libclang）。
