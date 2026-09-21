@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DSH Launcher — dsh 的跨平台图形启动器 · 下载</title>
+    <meta
+      name="description"
+      content="DSH Launcher 是 @deepseek-ai/dsh（DeepSeek Harness CLI）的跨平台图形启动器：管版本、跑实例、装插件、配模型。Windows / macOS / Linux 安装包直链下载，自建源与 GitHub 源可选。"
+    />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#05070c" />
+    <link rel="icon" type="image/svg+xml" href="./dsh-logo.svg" />
+    <!-- 打开页面就去取最新清单（R2 + GitHub 双源），让首屏版本号尽早到位 -->
+    <link rel="preconnect" href="https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev" crossorigin />
+    <link rel="preconnect" href="https://api.github.com" crossorigin />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="DSH Launcher — dsh 的跨平台图形启动器" />
+    <meta
+      property="og:description"
+      content="管版本、跑实例、装插件、配模型。Windows / macOS / Linux 安装包直链，自建源与 GitHub 源可选。"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      <div style="padding: 24px; font: 14px/1.7 system-ui, sans-serif; color: #e8ecf6; background: #05070c">
+        <h1>DSH Launcher</h1>
+        <p>本页需要 JavaScript 才能读取最新版本号并生成下载直链。也可以直接去发布页手工下载：</p>
+        <ul>
+          <li><a style="color: #7d93ff" href="https://github.com/Yinxe/dsh-luncher/releases/latest">GitHub Release</a></li>
+          <li><a style="color: #7d93ff" href="https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev/latest.json">自建源清单 latest.json</a></li>
+        </ul>
+      </div>
+    </noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -11,6 +11,10 @@
   `update_check` 自更新、`netports` 端口归属）。改了命令签名必须同步 `lib.rs` 的 `generate_handler!`。
 - **前端**（`src/`）：`App.tsx` 主界面与状态、`api.ts` 所有 `invoke` 封装、`types.ts` 与 Rust 结构体一一对应的类型、
   `components/` 业务组件、`components/ui/` shadcn 组件、`lib/` 主题等基础库。
+- **下载页**（`site/`）：独立的 Vite + React + shadcn/ui + Tailwind 站点（GitHub Pages），**不参与主程序构建**。
+  `lib/release.ts` 是唯一的数据层（平台清单、两条源的直链规则、R2/REPO 常量），页面上的版本号与体积都是
+  打开时现拉的；`components/site/` 业务区块、`components/ui/` 同为 shadcn 组件。改平台清单或地址规则只改这里
+  —— 与 `src-tauri/src/update_check.rs` 的 `R2_BASE`、`scripts/r2-manifest.mjs` 的固定键表必须保持一致。
 - **文档**：`README.md`（面向用户的能力与配置）、`CHANGELOG.md`（**发布说明唯一来源**）、
   `docs/RELEASING.md`（发版手册）、`docs/releases/`（旧版说明归档，生成物）。
 
@@ -60,12 +64,16 @@ cd src-tauri && cargo check   # Rust 编译检查（改 Rust 必跑）
 cd src-tauri && cargo test    # Rust 单测（现有 100+ 用例，改核心逻辑后跑）
 npm run notes:check           # 版本号一致性 + CHANGELOG 本版说明（发版必跑）
 npm run app                   # 本地起 Tauri 开发版；build:debug / build:release 出安装包
+npm run site:build            # 下载页：tsc + vite 构建（改 site/ 必跑，等价于 cd site && npm run build）
+npm run site:dev              # 下载页本地预览（dev server）
 ```
 
 - 加了 Rust 依赖后 `cargo check` 需要网络（`src-tauri/.cargo/config.toml` 已配国内镜像）。
 - 改 UI 至少跑 `npm run build`，确认 `tsc` 无错。
 - 行为类改动（单实例、托盘、子进程生命周期）**要用真实二进制验证**，编译通过不算通过；
   例如单实例可用 `busctl --user list | grep SingleInstance` 观察。
+- 下载页要**在真实浏览器里过一遍**：直链、源切换、窄屏横向溢出都只有渲染后才看得出来。
+  站点依赖 shadcn registry（`npx shadcn@latest add …`）**不支持走代理**，本机有 `*_proxy` 环境变量时要临时清掉再跑。
 
 ## 安全红线
 
@@ -81,3 +89,4 @@ npm run app                   # 本地起 Tauri 开发版；build:debug / build:
 | 用户可见的新能力/行为 | `README.md` + `CHANGELOG.md` 的 `[Unreleased]` |
 | 发版方式、CI 行为、目录约定 | `docs/RELEASING.md`、本文件 |
 | 新增命令/类型/组件的位置约定 | 本文件「项目速览」「代码规则」 |
+| 下载页内容、平台清单、直链形态 | `site/src/lib/release.ts`（唯一数据层）+ `README.md` 的「下载页」小节；改平台或 R2 键还要对齐 `scripts/r2-manifest.mjs` |

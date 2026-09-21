@@ -288,7 +288,30 @@ npx wrangler r2 object put dsh-luncher-release/latest.json --file r2-upload/late
 - 早期按版本号命名的对象（`DSH.Launcher_0.1.5_*.exe`）已删除；固定键方案下不会再产生，
   版本信息改由 `Content-Disposition` 和清单里的 `?v=` 承载。
 
-## 8. 常见故障
+## 8. 下载页（GitHub Pages）
+
+站点源码在 `site/`，由 `.github/workflows/pages.yml` 部署到
+<https://yinxe.github.io/dsh-luncher/>（push 到 `main` 且改动 `site/**` 时才跑）。
+
+**它与发版是解耦的**：页面在浏览器里现拉自建源清单与 GitHub Release API 得到版本号、体积与直链，
+所以发新版**不需要重新构建页面**，pages 作业也不必等 release 作业。
+
+两条与发布流程相关的边界：
+
+- **桶没配 CORS**，浏览器读不到 `latest.json` 的内容（只探得到「可达」）。这不影响下载，也不影响
+  启动器（它走 Rust HTTP 客户端），页面因此改用 GitHub Release 的正文与体积。若给桶配上 CORS
+  （允许 `https://yinxe.github.io` 的 GET/HEAD），把 `site/src/lib/release.ts` 的
+  `R2_CORS_ENABLED` 改成 `true`，页面就会改读自建源清单并核对两条源是否同步。**没配 CORS 时不要
+  打开这个常量** —— 那样每次加载页面都会在控制台留下一条 CORS 报错。
+- **`.dmg` 不在自建源上**：第 7 节的同步只上传 `latest.json` 里出现过的平台键（`STABLE_KEYS`），
+  macOS 的 DMG 只存在于 GitHub Release。所以下载页在自建源模式下会把 DMG 那行标成「自建源未托管」
+  并指向 GitHub。若要让 DMG 也走自建源，得给 `scripts/r2-manifest.mjs` 补一个固定的 dmg 键，
+  并在 `upload.tsv` 之外单独上传（当前未做）。
+
+首次部署需要在仓库 **Settings → Pages** 把 Source 选成 *GitHub Actions*；工作流里的
+`configure-pages@v6` 带了 `enablement: true`，通常会自动打开。
+
+## 9. 常见故障
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
@@ -297,3 +320,5 @@ npx wrangler r2 object put dsh-luncher-release/latest.json --file r2-upload/late
 | CI 失败：`段落没有任何条目` | 只写了标题没写内容，至少补一条 `- ` |
 | 客户端收不到更新 | Release 不能是草稿/pre-release；`releases/latest` 只认正式版本；确认 `latest.json` 能下载 |
 | 发布后发现说明写错 | 直接编辑 GitHub Release 正文 + 修 `CHANGELOG.md`（`latest.json` 里的 notes 已经下发，改不了，除非重发/热修版本） |
+| 下载页版本号一直是旧的 | 页面不缓存清单，先硬刷新；仍不对就查 `latest.json` 与 GitHub Release 是否有一边没更新（Vite 产物本身有 hash，不是页面缓存问题） |
+| 下载页显示「自建源不可达」 | R2 桶被删/改名/桶名权限变了；自建源的固定键直链同时也会失效，需要按第 7 节重新上传 |

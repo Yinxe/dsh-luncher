@@ -1,0 +1,74 @@
+name: 下载页
+
+# 产品介绍 + 各平台直链的静态站点（站点源码在 site/，React + shadcn/ui + Tailwind）。
+#
+# 设计上刻意**与发版解耦**：页面在浏览器里现拉 R2 清单与 GitHub Release API 得到版本号、
+# 体积与直链，所以发新版后不需要重新构建页面 —— 这里只在站点源码本身变化时才跑。
+#
+# 分支/路径过滤：只监听站点相关文件，避免改 Rust 或前端主程序时白跑一遍 Pages 部署。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
+      - 'images/preview.png'
+      - 'public/dsh-logo.svg'
+  workflow_dispatch:
+
+# 部署到 Pages 需要这三项：读仓库、写 Pages、用 OIDC 换部署令牌
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只允许一个 Pages 部署；不取消进行中的部署（取消会让线上停在半截状态）
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    # 只有本仓库发布站点：fork 里 R2_BASE 仍然指向本项目的自建源，
+    # 部署出去会是「别人的页面 + 别人的下载源」。fork 要自建站点请改
+    # site/src/lib/release.ts 的 R2_BASE / REPO，并删掉这一行 if。
+    if: github.repository_owner == 'Yinxe'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          # 站点有独立的 package-lock.json，缓存键必须指向它
+          cache-dependency-path: site/package-lock.json
+
+      - name: 安装站点依赖
+        working-directory: site
+        run: npm ci
+
+      # 与本地同一条命令：tsc 类型检查 + vite 构建（类型挂了就别发布）
+      - name: 类型检查 + 构建
+        working-directory: site
+        run: npm run build
+
+      # enablement: true —— 仓库还没开 Pages（Settings → Pages → Source 选 GitHub Actions）
+      # 时自动打开，省掉一次「workflow 失败 → 去点一下 → 重跑」
+      - uses: actions/configure-pages@v6
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
