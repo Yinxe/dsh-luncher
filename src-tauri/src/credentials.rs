@@ -172,6 +172,23 @@ pub fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
             .ok_or_else(|| "凭据文件路径异常：无父目录".to_string())?,
     )
     .map_err(|e| format!("创建目录失败: {e}"))?;
+    // unix 下直接以 0600 建文件：先 fs::write 再 chmod 会留一小段 0644 窗口，
+    // 明文 token 在那几毫秒里对同组/其他人可读。
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("写入失败: {e}"))?;
+        file.write_all(out.as_bytes())
+            .map_err(|e| format!("写入失败: {e}"))?;
+    }
+    #[cfg(not(unix))]
     std::fs::write(&path, out).map_err(|e| format!("写入失败: {e}"))?;
 
     #[cfg(unix)]

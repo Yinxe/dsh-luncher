@@ -292,6 +292,19 @@ pub(crate) fn backup(path: &Path) -> Result<(), String> {
         .unwrap_or_default();
     let bak = path.with_file_name(format!("{stem}.starter-bak"));
     std::fs::write(&bak, content).map_err(|e| format!("写备份失败: {e}"))?;
+    // 备份必须继承源文件权限：凭据文件是 0600，它的备份（同样躺着明文 token）
+    // 若按默认 umask 落成 0644，多用户机器上任一次保存都把全套 token 敞开可读。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let src_mode = meta.permissions().mode() & 0o777;
+            let _ = std::fs::set_permissions(
+                &bak,
+                std::fs::Permissions::from_mode(src_mode),
+            );
+        }
+    }
     if let Some(dir) = path.parent() {
         let legacy_prefix = format!("{stem}.starter-bak-");
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -2373,6 +2386,26 @@ mod tests {
             .filter(|n| n.contains("starter-bak"))
             .collect();
         assert_eq!(baks, vec!["cordis.patch.starter-bak".to_string()]);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 回归：凭据备份必须继承源文件的 0600 —— 备份同样装着明文 token，
+    /// 按默认 umask 落成 0644 就等于把全套凭据对同组/其他人敞开。
+    #[cfg(unix)]
+    #[test]
+    fn backup_inherits_source_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("dsh-bak-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let f = tmp.join("credentials.yaml");
+        std::fs::write(&f, "refs:\n  A: secret\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        backup(&f).unwrap();
+        let bak = tmp.join("credentials.starter-bak");
+        let mode = std::fs::metadata(&bak).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "备份权限应跟随源文件，实际 {mode:#o}");
 
         std::fs::remove_dir_all(&tmp).ok();
     }
