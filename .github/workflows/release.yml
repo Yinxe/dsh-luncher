@@ -60,6 +60,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: lts/*
+          cache: npm
 
       # ★3 发布说明门禁 + 提取。CHANGELOG.md 是唯一来源：
       # - 三处版本号不一致 → 失败
@@ -87,6 +88,21 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      # 缓存 Rust 依赖与 target/：这是整个发版最贵的一步 —— 冷缓存下 tauri-action
+      # 要现编 500 多个 crate（实测 Windows 620s / Linux 492s，占整作业 90%+）。
+      # 三端并行，所以墙钟时间 = 最慢的那个平台。
+      # workspaces 必须写成 `src-tauri -> target`：本仓库的 Cargo.toml 在子目录里，
+      # 用默认值会找不到 target 目录、缓存等于没开。
+      # 注意：GitHub 的缓存 7 天没被访问就会被清掉，发版间隔超过一周时这里可能仍然
+      # 是冷启动（.github/workflows 里也别指望它永远命中）。
+      - name: 缓存 Rust 构建
+        if: steps.gate.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+          # 只缓存依赖与自身的编译产物；save-if 保持默认（成功才存，避免存下坏缓存）
+          cache-on-failure: false
 
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-22.04' && steps.gate.outputs.skip != 'true'
@@ -126,6 +142,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: lts/*
+          cache: npm
 
       - name: install frontend dependencies
         run: npm ci

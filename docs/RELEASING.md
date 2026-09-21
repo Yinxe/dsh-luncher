@@ -84,6 +84,30 @@ npm run notes:archive    # 从 CHANGELOG 重新生成 docs/releases/vX.Y.Z.md
 3. 打包（`tauri-action`）并把同一份正文作为 Release 正文 → `latest.json` 的 `notes`；
 4. `publish` 作业：发布前再按 CHANGELOG 刷一遍正文，然后把草稿转正式。
 
+### 为什么打包要 10 分钟
+
+三平台**并行**跑，所以墙钟时间 = 最慢的那个平台（实测 Windows 约 11 分钟、macOS 10.5、Linux 9）。
+其中 90%+ 花在 `tauri-action` 这一步里**冷编译 500 多个 crate**（`Cargo.lock` 里 547 个包），
+其余步骤（checkout / 装 Node / 装 Rust / `npm ci`）加起来不到 40 秒：
+
+| 步骤 | Windows | Linux |
+| --- | --- | --- |
+| `tauri-action`（编译 + 打包） | 620s | 492s |
+| `npm ci` | 17s | 7s |
+| 其余全部 | <20s | <30s |
+
+所以：**别在这种作业里做无关的事**。已经加了两处缓存 —— `Swatinem/rust-cache@v2`
+（`workspaces: src-tauri -> target`，缓存 registry + `target/`）和 `setup-node` 的 `cache: npm`。
+两点注意：
+
+- 缓存 key 里带 OS/架构和 `Cargo.lock` 哈希，三端各存一份；`Cargo.toml` 一改就会换 key、
+  这次仍是冷编译。**依赖变动的那次发版，时间不会变短**。
+- GitHub 的缓存 7 天没被访问就清掉：发版间隔超过一周时，大概率还是冷启动。
+
+另外有个坑：**发新版期间别再往 main 推提交**。版本门禁查的是「已经*正式发布*的版本」，
+而打包中的 Release 还停在草稿状态 —— 此时推 main 会通过门禁、再起一整轮三端构建
+（白烧 10 分钟，两个 run 还会抢同一个草稿）。等这轮跑完再推。
+
 ## 5. 发布后确认（1 分钟）
 
 ```bash
