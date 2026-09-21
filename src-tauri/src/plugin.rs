@@ -621,9 +621,11 @@ pub fn fix_proxied_remote(dir: &Path) -> Result<Option<(String, String)>, String
 fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
-        let pid = child.id() as i32;
         // 负 pid = 发往整个进程组；失败再退回只杀直接子进程
-        let killed = unsafe { libc::kill(-pid, libc::SIGKILL) == 0 };
+        let killed = match i32::try_from(child.id()) {
+            Ok(pid) => unsafe { libc::kill(-pid, libc::SIGKILL) == 0 },
+            Err(_) => false,
+        };
         if !killed {
             let _ = child.kill();
         }

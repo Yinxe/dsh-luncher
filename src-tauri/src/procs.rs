@@ -689,9 +689,27 @@ pub fn validate_detached_registry() -> Vec<DetachedRecord> {
 
 /// 跨平台结束独立进程：unix 用 SIGKILL，Windows 用 taskkill /F
 fn force_kill_pid(pid: u32) -> Result<(), String> {
+    // 动手前的最后一道闸：pid 可能来自 detached.json（可被写坏）。unix 下超范围
+    // 的 u32 转 i32 会变负数，kill(-1) 语义是「SIGKILL 本用户全部可杀进程」、
+    // kill(0) 是「SIGKILL 自己所在的进程组」——一条坏记录就能把用户桌面整个杀掉。
+    if pid < 2 {
+        return Err(format!(
+            "进程号 {pid} 不可能是普通进程（0 代表整个进程组、1 是系统 init），已拒绝结束；\
+             若「独立进程」列表仍显示该实例，请退出启动器后删除 ~/.dsh-starter/detached.json 重新打开"
+        ));
+    }
+    let _pid_i = match i32::try_from(pid) {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(format!(
+                "进程号 {pid} 超出合法范围，已拒绝结束（独立进程登记表可能已损坏）；\
+                 请退出启动器后删除 ~/.dsh-starter/detached.json 重新打开"
+            ))
+        }
+    };
     #[cfg(unix)]
     {
-        let rc = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        let rc = unsafe { libc::kill(_pid_i, libc::SIGKILL) };
         if rc != 0 {
             return Err(format!("结束进程 {pid} 失败"));
         }
@@ -1523,6 +1541,22 @@ mod tests {
         // 只应匹配 dsh 本身，不能把同前缀的其它 bin 也认进来
         assert!(!is_dsh_cmdline("node /home/u/node_modules/.bin/dsh-something"));
         assert!(!is_dsh_cmdline("node /home/u/node_modules/.bin/codex"));
+    }
+
+    #[test]
+    fn force_kill_pid_rejects_dangerous_values() {
+        // 这些值一旦落到 unix 的 kill()：-1 群杀本用户全部进程、0 杀自己进程组、
+        // 1 是 init。坏 detached.json 记录即可触发，必须在进 kill 前就拒绝。
+        for bad in [0u32, 1, i32::MAX as u32 + 1, u32::MAX] {
+            let err = force_kill_pid(bad).unwrap_err();
+            assert!(
+                err.contains("进程号"),
+                "pid={bad} 应被拒绝且给出可操作提示，实际: {err}"
+            );
+        }
+        // 不存在但格式合法的 pid：报错也绝不能是 panic（走到 ESRCH 分支）
+        let err = force_kill_pid(i32::MAX as u32 - 1).unwrap_err();
+        assert!(err.contains("结束进程"), "实际: {err}");
     }
 
     #[test]
