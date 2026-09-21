@@ -229,13 +229,13 @@ jobs:
     runs-on: ubuntu-22.04
     if: github.repository_owner == 'Yinxe' && needs.publish.outputs.released == 'true'
     env:
-      # ⚠️ 桶名暂时**保持旧名**：R2 不支持改桶名，新桶 `dsh-starter-release` 建好后，
-      # 下面三个值必须一次性同时换（本文件两项 + `update_check.rs` 的 R2_BASE +
-      # `site/src/lib/release.ts` 的 R2_BASE）。只换一半是最坏情况：清单传进新桶、客户端
-      # 还在读旧桶，而旧桶那份陈旧清单依然「有效」→ 客户端判定「已是最新」，
-      # 连 GitHub 兜底都走不到，等于静默卡死更新。步骤见 docs/RELEASING.md 第 1 节。
-      R2_BUCKET: dsh-luncher-release
-      R2_PUBLIC_BASE: https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev
+      # ⚠️ 下面四个值必须**同进同退**：本文件的 R2_BUCKET / R2_PUBLIC_BASE、
+      # `src-tauri/src/update_check.rs` 的 R2_BASE、`site/src/lib/release.ts` 的 R2_BASE。
+      # 只换一半是最坏情况：清单传进新桶、客户端仍在读旧桶，而旧桶那份陈旧清单依然「有效」
+      # → 客户端判定「已是最新」，连 GitHub 兜底都走不到，等于静默卡死更新。
+      # 另：CI 用的 R2 API Token 必须把桶加进 Scope，否则上传 403（见 docs/RELEASING.md 第 1 节）。
+      R2_BUCKET: dsh-starter-release
+      R2_PUBLIC_BASE: https://pub-576ca711d9cf4cfe96b58195dfe6ce81.r2.dev
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
     steps:
       - uses: actions/checkout@v7

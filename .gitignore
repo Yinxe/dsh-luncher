@@ -5,3 +5,5 @@ src-tauri/gen/
 *.log
 .DS_Store
 .sysroot/
+# wrangler 本地模拟状态（手动补传 R2 时会生成，别入库）
+.wrangler/

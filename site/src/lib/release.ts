@@ -18,8 +18,12 @@
 export const REPO = "Yinxe/dsh-starter";
 export const REPO_URL = `https://github.com/${REPO}`;
 
-/** 与 src-tauri/src/update_check.rs 的 R2_BASE 保持一致（改一处就得改两处） */
-export const R2_BASE = "https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev";
+/**
+ * 与 src-tauri/src/update_check.rs 的 R2_BASE 保持一致；换桶还牵动
+ * `.github/workflows/release.yml` 的 R2_BUCKET / R2_PUBLIC_BASE —— 四处同改，
+ * 只改一半会让客户端读到旧桶那份陈旧但有效的清单，静默卡死更新。
+ */
+export const R2_BASE = "https://pub-576ca711d9cf4cfe96b58195dfe6ce81.r2.dev";
 export const R2_MANIFEST_URL = `${R2_BASE}/latest.json`;
 export const GH_API_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
 export const GH_RELEASES_URL = `${REPO_URL}/releases`;

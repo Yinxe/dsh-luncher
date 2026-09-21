@@ -160,8 +160,8 @@ curl -sL https://github.com/Yinxe/dsh-starter/releases/latest/download/latest.js
 
 ### 一次性准备（已完成的部分标 ✅）
 
-1. ✅ **建桶并开公共访问**（旧桶 `dsh-luncher-release` 已建好；**改名后的新桶还没建**，
-   见后面「换桶待办（0.2.0 遗留）」）：
+1. ✅ **建桶并开公共访问**（两个桶都在：旧桶 `dsh-luncher-release` 只留历史、不再更新，
+   当前用的是 `dsh-starter-release`，见后面「换桶记录」）：
 
    ```bash
    npx wrangler r2 bucket create dsh-starter-release --location apac
@@ -179,8 +179,10 @@ curl -sL https://github.com/Yinxe/dsh-starter/releases/latest/download/latest.js
 
 2. ⬜ **建 R2 API Token**（只能网页建 —— 用 OAuth 登录的 wrangler 没有建 token 的权限）：
    Cloudflare Dashboard → R2 → API → Manage API Tokens → Create API Token →
-   权限 `Object Read & Write`，Scope 选桶（当前 `dsh-luncher-release`；换桶后要把
-   `dsh-starter-release` 也加进 Scope，否则上传会 403）。
+   权限 `Object Read & Write`，Scope 选桶。
+   ⚠️ **0.2.0 换桶后必须把 `dsh-starter-release` 加进这个 token 的 Scope**
+   （或新建一个包含它的 token 并更新下面第 3 步的 secret），否则下次发版的 `publish-r2`
+   上传会 403 —— 失败是响的，但 R2 上的清单会停在旧版本。
    记下 **Access Key ID** 与 **Secret Access Key**。
 
 3. ⬜ **填三个 secrets**（仓库 Settings → Secrets and variables → Actions）：
@@ -194,26 +196,28 @@ curl -sL https://github.com/Yinxe/dsh-starter/releases/latest/download/latest.js
    没配也能正常发版：`publish-r2` 作业会自动跳过并打一条 **warning**（不是静默的 notice ——
    客户端默认走 R2，这里跳过就意味着 R2 上的清单会停在旧版本，得照本节末尾手动补传）。
 
-### 换桶待办（0.2.0 遗留）
+### 换桶记录（0.2.0 已完成）
 
-0.2.0 把产品改名成 DSH Starter，桶名理应跟着换，但 **R2 不支持改桶名**，只能新建再迁。
-**新桶此刻还没建**，所以 CI 与客户端实际仍在用旧桶 `dsh-luncher-release`
-（`R2_BASE` = `https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev`）——
-这一状态下发布流程与平时完全一样，不需要任何额外操作。要完成换桶：
+产品 0.2.0 改名成 DSH Starter，桶也跟着换 —— **R2 不支持改桶名**，所以是新建 + 迁移：
 
-1. `npx wrangler r2 bucket create dsh-starter-release --location apac`
-2. `npx wrangler r2 bucket dev-url enable dsh-starter-release`，记下新的 `pub-<新hash>.r2.dev`
-3. 把第 1 节表格里的**四处一次性全换**（两处基址 + 桶名），并给 R2 API Token 的 Scope 加上新桶、
-   更新仓库 secret
-4. 下次发布会把清单与安装包写进新桶。旧桶可以留着不删：它的清单会停在最后一个写进去的版本，
-   不再更新，也不再被引用
+| 项 | 值 |
+| --- | --- |
+| 旧桶（只留历史，不再更新） | `dsh-luncher-release` |
+| 当前桶 | `dsh-starter-release` |
+| 公开基址 | `https://pub-576ca711d9cf4cfe96b58195dfe6ce81.r2.dev` |
 
-⚠️ **为什么必须一次性全换**：更新器按顺序取「第一个能解析的清单」，而 R2 排在 GitHub 兜底之前。
-只换一半（例如上传改到新桶、客户端仍读旧桶）时，旧桶那份**陈旧却依然有效**的清单会被先取到，
-客户端据此判定「已是最新」，**连 GitHub 兜底都走不到 —— 静默卡死更新，且不报任何错**。
+迁移时是照第 7 节的手动补传流程，把 0.2.0 的六个安装包与改写过的清单先铺进新桶，再换的基址 ——
+所以下载页切到新桶那一刻，自建源直链不会是死链。
 
-> 本文档下面的桶名、布局与手动补传命令都按**换桶之后**的目标状态写（`dsh-starter-release`）；
-> 换桶之前要手动补传，请把命令里的桶名换成 `dsh-luncher-release`。
+⬜ **唯一遗留（Cloudflare 侧）**：把 `dsh-starter-release` 加进 CI 用的 R2 API Token 的 Scope
+（或新建含它的 token 并更新第 3 步的两个 secret）。没做的话，下次发版的 `publish-r2` 会以 403
+明确失败，R2 上的清单会停在旧版本 —— 失败是响的，不会静默。
+
+⚠️ **为什么单独写一段**：更新器按顺序取「第一个能解析的清单」，R2 排在 GitHub 兜底之前。
+换桶时只改一半（例如上传改到新桶、客户端仍读旧桶）会让旧桶那份**陈旧却依然有效**的清单
+被先取到，客户端据此判定「已是最新」，**连 GitHub 兜底都走不到 —— 静默卡死更新，且不报任何错**。
+所以这四处永远一起改：`update_check.rs` 的 `R2_BASE`（客户端）、`release.ts` 的 `R2_BASE`（下载页）、
+`release.yml` 的 `R2_BUCKET` 与 `R2_PUBLIC_BASE`（CI）。
 
 ### 每次发布自动发生什么
 

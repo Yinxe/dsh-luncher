@@ -75,7 +75,12 @@ pub fn installable() -> bool {
 ///
 /// ⚠️ 维护提醒：R2 上的清单必须随每次发布更新。更新器按顺序取**第一个能解析的清单**，
 /// 清单陈旧会让客户端停在旧版本（此时用户可在设置里切回 GitHub 源）。
-const R2_BASE: &str = "https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev";
+///
+/// ⚠️ 换桶（0.2.0 时从 `dsh-luncher-release` 换到 `dsh-starter-release`）要**四处同改**：
+/// 这里、`site/src/lib/release.ts` 的 `R2_BASE`、`release.yml` 的 `R2_BUCKET` 与
+/// `R2_PUBLIC_BASE`。只改一半会让客户端读到旧桶那份「陈旧但有效」的清单，判定「已是最新」，
+/// 连 GitHub 兜底都走不到 —— 静默卡死更新。
+const R2_BASE: &str = "https://pub-576ca711d9cf4cfe96b58195dfe6ce81.r2.dev";
 
 /// R2 上 `latest.json` 的完整地址（基址为空 = 还没配置，退化为只用 GitHub）
 fn r2_manifest_url() -> Option<String> {
