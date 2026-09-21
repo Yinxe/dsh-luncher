@@ -815,9 +815,11 @@ export default function App() {
         settings={settings}
         runningInstanceCount={runningInstanceCount}
         upgradableCount={upgradableCount}
+        onToast={addToast}
       />
 
-      {/* 内容侧：顶栏 / 视图 / 状态栏都放在 SidebarInset 内，随侧栏收放一起让位 */}
+      {/* 内容侧：顶栏 / 视图放在 SidebarInset 内，随侧栏收放一起让位。
+          这里不再有状态栏：环境数据与项目仓库入口都收在侧栏底部的卡片里（见 AppSidebar）。 */}
       <SidebarInset className="min-w-0 overflow-hidden bg-transparent">
         {/* 顶栏（低优先级项按断点逐级收起，超窄窗口统一进「更多」菜单） */}
         <header className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background/80 px-2 lg:gap-2 lg:px-4">
