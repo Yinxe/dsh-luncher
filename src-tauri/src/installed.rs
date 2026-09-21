@@ -32,11 +32,38 @@ pub fn resolve_bin_js(pkg_dir: &Path) -> Option<PathBuf> {
             .map(|s| s.to_string())?,
         _ => return None,
     };
-    let bin = pkg_dir.join(bin_rel);
-    if bin.is_file() {
-        Some(bin)
-    } else {
-        None
+    // bin 来自第三方 package.json，是「启动器接下来会拿 node 去执行的任意路径」的入口：
+    // 绝对路径会让 join 直接丢掉 pkg_dir，`../` 能爬出包目录。先按组件拒绝这两种，
+    // 再对实际落点 canonicalize（展开符号链接）确认仍在包目录内，防止
+    // bin/evil -> /outside 这类链接逃逸。
+    let rel = Path::new(&bin_rel);
+    if rel.is_absolute()
+        || rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        crate::diag::warn(
+            "install",
+            &format!("包 {} 的 bin 字段指向包外路径，已拒绝: {bin_rel}", pkg_dir.display()),
+        );
+        return None;
+    }
+    let bin = pkg_dir.join(rel);
+    if !bin.is_file() {
+        return None;
+    }
+    match (bin.canonicalize(), pkg_dir.canonicalize()) {
+        (Ok(real_bin), Ok(real_pkg)) if real_bin.starts_with(&real_pkg) => Some(bin),
+        _ => {
+            crate::diag::warn(
+                "install",
+                &format!(
+                    "包 {} 的 bin 实际落在包目录之外（符号链接？），已拒绝: {bin_rel}",
+                    pkg_dir.display()
+                ),
+            );
+            None
+        }
     }
 }
 
@@ -209,4 +236,70 @@ pub fn pick_latest(installed: &[InstalledVersion]) -> Option<InstalledVersion> {
         }
     });
     candidates.first().map(|c| (*c).clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pkg_with_bin(bin_json: &str) -> PathBuf {
+        let tmp = std::env::temp_dir().join(format!(
+            "dsh-bin-js-test-{}-{}",
+            std::process::id(),
+            bin_json.len()
+        ));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("package.json"), format!("{{\"bin\": {bin_json}}}")).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn resolve_bin_js_accepts_relative_and_rejects_escape() {
+        let dir = pkg_with_bin("\"./bin/dsh.js\"");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/dsh.js"), "//").unwrap();
+        assert!(resolve_bin_js(&dir).is_some(), "正常相对路径应被接受");
+
+        // 对象形态 bin.dsh 同样支持
+        std::fs::write(dir.join("package.json"), "{\"bin\": {\"dsh\": \"bin/dsh.js\"}}").unwrap();
+        assert!(resolve_bin_js(&dir).is_some());
+
+        // 绝对路径：join 会丢弃包目录，指向全盘任意文件
+        std::fs::write(dir.join("package.json"), "{\"bin\": \"/tmp/evil.js\"}").unwrap();
+        std::fs::write("/tmp/evil.js", "//").unwrap();
+        assert_eq!(resolve_bin_js(&dir), None, "绝对路径 bin 必须被拒绝");
+        std::fs::remove_file("/tmp/evil.js").ok();
+
+        // ../ 爬出包目录（即便目标文件真实存在）
+        std::fs::write(
+            dir.join("package.json"),
+            "{\"bin\": \"../outside.js\"}",
+        )
+        .unwrap();
+        std::fs::write(dir.parent().unwrap().join("outside.js"), "//").unwrap();
+        assert_eq!(resolve_bin_js(&dir), None, "含 .. 的 bin 必须被拒绝");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_bin_js_rejects_symlink_escape() {
+        let dir = pkg_with_bin("\"bin/linked.js\"");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "dsh-bin-outside-{}.js",
+            std::process::id()
+        ));
+        std::fs::write(&outside, "//").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("bin/linked.js")).unwrap();
+        assert_eq!(
+            resolve_bin_js(&dir),
+            None,
+            "bin 用符号链接爬到包外必须被拒绝"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&outside).ok();
+    }
 }
