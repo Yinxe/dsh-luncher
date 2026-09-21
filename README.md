@@ -6,13 +6,18 @@
 
 ![DSH Launcher「版本与安装」界面（深色主题）](images/preview.png)
 
+> **只想下载？** 产品页与各平台直链：**<https://yinxe.github.io/dsh-luncher/>**
+> （GitHub Pages，自建源 / GitHub 源可切换，版本号与体积由页面现拉）。
+> 页面源码在 [`site/`](site/)，push 到 `main` 自动部署（见 [.github/workflows/pages.yml](.github/workflows/pages.yml)）。
+
 ## 功能
 
-- **官方版本列表**：直接从 npm registry 拉取 `@deepseek-ai/dsh` 已发布的全部版本（含 `latest` / `next` / `alpha` dist-tags、发布日期、体积），支持切换 registry 镜像。
+- **官方版本列表**：直接从 npm registry 拉取 `@deepseek-ai/dsh` 已发布的全部版本（含 `latest` / `next` / `alpha` dist-tags、发布日期、体积），支持切换 registry 镜像。列表按卡片实际宽度响应：窄窗口下把次要操作收进行尾「更多」菜单、按宽度收起「发布日期 / 大小」两列，行长与列宽都不会换行或横向溢出。
 - **识别已安装版本**：三个来源自动合并识别——
   - 本启动器管理的 `~/.dsh-launcher/versions/`；
   - npm 全局安装（`npm root -g`）；
   - PATH 中的 `dsh` 可执行文件（顺着符号链接解析版本）。
+- **逐版本看 dsh 更新日志**：版本表每行（以及工具栏）都有「更新日志」，点开是版本浏览器——左栏列全部版本（有官方 Release 的带绿点，早期没建 Release 的标「无发布说明」），右栏渲染该版本的 GitHub Release 正文（小标题 + 条目原样排版），官方的中英双段可切「中文 / English」，底部可跳「完整提交对比」。数据一次拉全量并缓存（进程内 10 分钟 + ETag 条件请求，304 不计额度），翻版本零等待；仓库是 monorepo，Release tag 形如 `dsh-v0.1.6-alpha.2`，只取 `dsh-` 前缀的那些。npm 的 packument 里没有 changelog，所以更新日志只能来自 Release；匿名额度不够时在设置里填 GitHub Token 即可。
 - **安装 / 卸载 / 重装**：未安装的版本由启动器用 npm 装进自己的数据目录（互不污染全局环境），`--loglevel info` 把每个包的真实 fetch/resolve/extract 过程实时显示在安装卡里，可取消；卸载即删除对应目录。
 - **首次使用引导**：dsh 的数据目录（`$DSH_HOME`，缺省 `~/.dsh`）是**第一次运行 dsh 时**才生成的，在那之前 profile 列表是空的，实例、快捷配置、插件管理全都无从下手。启动器会在装完版本后提示「还差一步」，并在 Profile 实例页给出一张引导卡（含 Node / dsh / npm 就绪状态），一键以 `dsh web`（等价 `--profile web`）完成初始化；dsh 写出 `profiles/web`、配置与凭据文件后，profile 列表与默认 profile 会自动就位。
 - **内嵌启动（默认）**：「启动」把 dsh 作为启动器的**子进程**运行——日志实时显示在底部进程面板（多实例 tab、运行时长、停止按钮），**退出启动器即结束所有 dsh 进程**；也可点「终端」在独立系统终端中启动（交互式 TUI 场景，不受启动器生命周期管理）。**每个 profile 同时只能运行一个实例**（内嵌与终端启动都受约束），Profile 选择器默认选中 `web`（不存在则取第一个），不提供“默认 profile”空选项。
@@ -21,12 +26,14 @@
 - **插件管理**：按 profile 管理 dsh bundle 插件——列出已装插件与启用状态并可一键启停（启停按包内真实插件 ID 写入 cordis.patch 层），也可直接编辑 profile 侧的配置文件并写回。
   - **全部走官方 `dsh plugin` 命令**：安装 = `dsh plugin --profile <p> add <spec>`，卸载 = `remove`，升级同样回到 `add`（git 克隆源则先 `git pull` 再重新 `link:` 安装），启动器从不直接改写 `package.json` / `dsh.profile.bundles`。
   - **内置终端**：插件页顶部常驻可折叠终端，安装 / 卸载 / 升级 / 克隆的 stdout+stderr **逐行实时**输出（每行按流着色、自动滚底、可复制 / 导出到 `~/.dsh-launcher/logs/`）；每个任务一个标签页，运行中可一键取消（取消会杀掉整棵进程组，pnpm/node 派生的孙进程不会残留），窗口重挂载后历史仍在。同一 profile 同时只允许一个插件任务，避免并发写坏 `node_modules`。
-  - **三种安装方式**：① npm 包（registry 搜索 / 精确规格，按版本号检测更新）② 链接直装（本地 `link:` 路径、仓库插件链接、`.tgz` 直链——原样交给 `dsh plugin add`，**不做任何远端探测**，也就没有版本渠道，只能手动重装同一来源）③ clone 仓库 + 本地 link（克隆到 `~/.dsh-launcher/git-plugins/<owner>-<repo>`，可选自动 `pnpm install` + `pnpm run build`，更新方式 = 该目录 `git pull`）。
+  - **三种安装方式**：① npm 包（registry 搜索 / 精确规格，按版本号检测更新）② 链接直装（本地 `link:` 路径、仓库插件链接、`.tgz` 直链——原样交给 `dsh plugin add`，**不做任何远端探测**，也就没有版本渠道，只能手动重装同一来源）③ clone 仓库 + 本地 link（克隆到 `~/.dsh-launcher/git-plugins/<owner>-<repo>`，可选自动 `pnpm install` + `pnpm run build`，更新方式 = 该目录 `git pull`；「本地克隆仓库」卡片里每个子包的 `link` 安装都会先弹确认框，写明目标 profile、来源仓库（分支/提交/本地改动）、子包路径与 `link:…` 安装规格，缺 `lib/` 构建产物会警告「装后校验会卸掉」并指路先 `git pull` 构建，未声明 `dsh.bundle` 的候选则直接置灰不可点）。
   - **探测只在 clone 路径上，且基于真实工作树**：点「探测」= 先把仓库克隆（或同步）到本地，再扫描这棵工作树（`pnpm-workspace.yaml` / `package.json workspaces` 识别 monorepo 子包，逐个给出名称 / 版本 / 描述 / 是否声明 `dsh.bundle` / `lib/` 是否就绪）。这样候选列表与 `lib/` 判定就是安装要用的那份目录本身。之前基于 jsDelivr 文件索引的探测已下线：那份索引是边缘缓存快照（实测某仓库只回 119 个文件 / 4 个子包，真实分支是 353 个文件 / 9 个插件），会出现「候选少几个」和「明明有 `lib/` 却判缺失」的偏差，还会据此误拦能装的包。GitHub 直装现在只做「远端可匿名访问」的轻量预检（`git ls-remote` 级别），能不能加载交给装后校验。
   - **GitHub 加速（前缀代理）**：把 github 链接原样拼到代理前缀后面即可，例如 `git clone https://gh-proxy.com/https://github.com/owner/repo.git`。内置一组常用前缀（gh-proxy.com / gh.xxooo.cf / gh.dpik.top / gh.927223.xyz / ghfast.top / ghproxy.net），设置里可固定用哪一个、也可补自建前缀。**首次使用自动测速并缓存 6 小时**：下载能力用小文件 GET 计时，git 能力用一次真实的 `git clone --depth 1 --filter=blob:none` 计时——两者分开测是必要的，代理是否放行 git（clone 403）会随网络和时段变化，不能只看下载测速。注入方式：git 走 `url.<前缀>https://github.com/.insteadOf`（因此**已有克隆的 `git pull` 也生效**；命令行文本仍是原始地址，所以安装页会单独写出「实际请求」那一行，任务日志里也会逐条列出实际请求地址；`git@github.com:` 这类 SSH 地址不在改写范围内，要走加速请填 https 地址），releases / raw 等直链在安装前直接改写为代理链接。只对 github 域名生效。**前缀只存在于进程内，永不写进仓库配置**：clone 用的是原始地址，粘进来带前缀的地址会被自动还原，已有的克隆在 fetch/pull 前也会把 `origin` 修回 `https://github.com/...` —— 所以代理失效或换域名只会退回直连，不会像手改 remote 那样把克隆永久卡死。
   - **安装 / 卸载的前后置校验**（细节对齐同生态的 dshmarket）：装完立刻核对新增的包——缺 `dsh` 清单、或没有可加载入口（源码检出、构建被 `allowBuilds` 拦住）会在**下次启动**把整个 profile 拖挂，因此当场卸掉并说明原因；新增包与被装插件的 loader **entry id 冲突**（cordis 不允许同 id 两个 insert，装错会让 dsh 起不来）也会被检出并卸掉。卸载前先查用户自己的 `cordis.patch.yml` 是否仍引用该包（引用则拒绝并指出要删哪几行，启动器不改写你的补丁文件）、是否带原生模块（`.node` 在进程退出前不会释放，需重启才能重装）；卸载后以**磁盘事实**对账：包没了却还在 `package.json` 里留着依赖/bundle 行的，删掉残留行（原件备份为 `package.json.launcher-bak`），包还在的就保留行并提示重试。升级后还会比对实际安装版本——pnpm 的 `minimumReleaseAge` 会**静默保留旧版本并退出 0**，版本没变会明确告警而不是报成功。pnpm 失败按 dshmarket 的清单一次性恢复：新版本等待期放行（`--config.minimum-release-age=0`，短横线拼写，camelCase 在 pnpm ≥12.3 会被静默忽略）、网络抖动重跑、下载超时加长、宿主 peer 关闭自动安装、node_modules 布局/store 不匹配先重建——全部仍经由 `dsh plugin`。
   - **更新检测（同样零 API 额度）**：npm 包比对 registry `latest`；`github:` 规格与 clone+link 源都走 `git ls-remote` 比对提交（同一仓库的多个插件共用一次查询，结果缓存 60s；实测真实 profile 的 16 个依赖 ≈13s、GitHub API 调用 **0 次**），clone+link 源支持一键 `git pull` 升级；远端不可匿名访问（私有仓库）时明确标注 `私有仓库 · 不支持` 并提示在本地仓库手动 `git pull`；纯本地 link 与 `.tgz` 直链标注「无更新渠道」，只能手动重装。
+- **配置文件 / 内嵌 YAML 编辑器**：全局配置（`$DSH_HOME/settings.yaml`）与 profile 侧的 `cordis.patch.yml`、`package.json` 都用同一个 CodeMirror 6 编辑器——语法高亮、行号、括号匹配、折叠、行内 YAML 报错（保存前也会再校验一次），编辑保留注释，写前自动备份。**高度自适应**：内容多高就多高（只改几行时不再顶着一大片空白），封顶在「它上方在滚动容器里还剩多少高度」——长配置能填满窗口并在编辑器内滚动，不会把整页顶长、拖出双滚动条；窗口缩放、上方说明换行都会即时重算。
 - **模型配置**：参考 dsh 官方 provider 配置布局，结构化编辑全局配置的模型两节——`llm-pi-ai.providers`（API 密钥 / 显示名称 / API 地址 / API 协议 / 模型列表）与 `agent-default-model`（默认模型三级联动：Provider → 模型 → 思考等级，不选则保持默认）。API 密钥可下拉选择已有凭据或手动输入（手动输入的密钥保存时自动回存到「凭据管理」）；支持「获取可用模型」——从服务方 `GET {baseURL}/models` 拉取列表勾选添加（openai / anthropic 协议，密钥按 手动值 > 凭据 refs > 环境变量 解析）；模型的思考等级（reasoningEfforts）可补充映射，不填则不写入。保存只重写这两节，`settings.yaml` 其余内容与节外注释逐字节保留，写前自动备份，未识别字段原样透传。
+- **凭据管理（含注释）**：管理 `$DSH_HOME/.credentials.yaml` 的 `refs`（各处按名字引用的 API Key / 令牌），支持增删改、复制、显示明文；列表只显示名称与长度，值仅在详情弹窗里可见。**每条凭据可以带一行注释**：约定就是文件里键**正上方那一行 `# 注释`** —— 已有的注释会被读出来显示在列表里，在列表里点注释格就能就地改（回车 / 失焦提交、Esc 取消），留空即删掉那一行；添加 / 编辑弹窗里也有注释字段。保存采用**逐行改写 refs 块**：`records`、`version`、未知顶层键以及它们自己的注释（含小节注释、records 段说明）全部逐字节保留，写前自动备份、文件权限自动收紧为仅本用户可读写。dsh 实例运行中也可能更新凭据，建议此时避免编辑保存（后保存者生效）。
 - **通道自检**：设置页可一键并发探测四条通道（`github.com` refs / jsDelivr / raw / `api.github.com`）的可达性与往返延迟，直接看清当时哪条通、多快。每条通道记录最近成功延迟（EWMA）与连续失败次数：任一通道连续失败 2 次会被**临时跳过 5 分钟**，到期自动半开，避免每次都白等一个超时（自检按钮会清空熔断状态）。
 - **GitHub Token（可选）**：设置里可填一个 token（或直接用 `GITHUB_TOKEN` / `GH_TOKEN` 环境变量），把 `api.github.com` 额度从匿名 60 次/小时 提到 5000 次/小时。插件安装与更新检测走 git / registry，不填也完全可用；设置页会显示当前额度与重置时间。
 - **任务栏 / 托盘图标**：常驻托盘，左键切换窗口；右键菜单为「打开主界面」+ 各 profile 的运行状态（● 运行中 / ○ 未运行，纯展示不可点击）+ 退出；点关闭默认最小化到托盘（可在设置中改为直接退出）。
@@ -47,6 +54,7 @@
   - 开发构建（`npm run app` / 未打包的二进制）没有格式标记，**不会**放开应用内安装——否则 updater 会把安装包字节写到开发二进制上；这种形态只提示有新版。
   - **可以走 GitHub 加速**：检查更新（拉 latest.json）和下载安装包都套用设置里的加速前缀，与 clone / 插件下载共用同一份测速结果（`githubAccel` 开关 + `githubProxy` 指定前缀）。代理不支持某个地址（如 ghfast.top 对 `api.github.com` 会 403）或中途断流时，会自动回退直连重试。安装包有签名校验，所以**经第三方代理也无法投毒**——代理改一个字节就验签失败。
   - latest.json 里的下载地址由 tauri-action 生成，形如 `api.github.com/.../releases/assets/<id>`；客户端在开加速时会把它也套上前缀（gh-proxy 认这种地址；ghfast 之类只认 `github.com/...` 的会 403，此时客户端会自动回退直连重试）。
+- **侧栏底部：环境状态 + 项目仓库两张卡片**：底部数据不再分散在主栏底栏与侧栏两处 —— 主栏那条状态栏已去掉，「官方源 / 数据目录 / 托盘提示」全部并进侧栏底部。「运行状态」一行一灯（Node / 当前 dsh 版本 / 运行中实例数），「目录与源」把 registry、启动器数据目录、版本目录、dsh 数据目录各排一行、左侧标签固定宽度对齐；路径自动缩成 `~/.dsh-launcher/versions` 这类形式，完整值在悬停提示里，行尾悬停可一键复制。最下面新增「项目仓库」卡片（源码 / 问题反馈 / 更新日志），一键打开 [Yinxe/dsh-luncher](https://github.com/Yinxe/dsh-luncher) 或其更新日志；侧栏收起时退化成一排状态灯 + 仓库图标按钮。
 
 ## 自动更新是怎么工作的
 
@@ -167,6 +175,36 @@ npm run release        # 同上（别名）
 
 > Linux 编译与运行都依赖上面安装的 WebKit/GTK 系统库；cargo 依赖下载已配置国内镜像（`src-tauri/.cargo/config.toml`，只影响本项目）。
 > Tauri 2 的 rpm 打包是**纯 Rust** 实现（内置 `rpm` crate），不需要系统安装 `rpm` / `rpmbuild`，Debian/Ubuntu 上可直接产出 `.rpm`。
+
+### 下载页（GitHub Pages）
+
+`site/` 是一份独立的 **Vite + React + shadcn/ui + Tailwind v4** 站点：介绍产品、给出各平台安装包直链。
+与主程序共用品牌色与字体（Geist / Geist Mono / Archivo），但不共享构建产物，互不影响。
+
+```sh
+cd site && npm ci
+npm run dev      # 本地预览
+npm run build    # tsc 类型检查 + 构建到 site/dist
+```
+
+根目录也有快捷方式：`npm run site:dev` / `npm run site:build`。
+
+**页面不写死版本号**：打开时并行请求自建源清单（`latest.json`）与 GitHub Release API，
+用拿到的版本号现算两条源各自的直链 —— 所以发新版后不需要重新构建页面。
+
+两点值得记住的边界：
+
+- **自建源桶没配 CORS**，浏览器读不到清单内容（只探得到「可达」）。这**不影响下载**，也不影响启动器
+  （它走 Rust 的 HTTP 客户端，不受 CORS 约束），页面因此改用 GitHub Release 的正文与体积数据。
+  若给桶配上 CORS（允许 `https://yinxe.github.io` 的 GET/HEAD），把
+  `site/src/lib/release.ts` 里的 `R2_CORS_ENABLED` 改成 `true`，页面就会改读自建源清单并核对两条源是否同步。
+- **macOS 的 .dmg 不在自建源上**（发布流程只把 `latest.json` 里出现的平台键同步到 R2，`.dmg` 只存在于
+  GitHub Release），所以 DMG 那一行在自建源模式下会标明「自建源未托管」并指向 GitHub。
+
+部署：`.github/workflows/pages.yml` —— push 到 `main` 且改动 `site/**` 时构建并发布。
+首次需要在仓库 **Settings → Pages** 把 Source 选成 *GitHub Actions*（工作流里的 `configure-pages`
+带了 `enablement: true`，通常会自动打开）。站点按项目路径部署，Vite 用相对 `base: "./"`，
+将来绑自定义域也不用改配置。
 
 ## 发布新版本（启动器自身）
 
