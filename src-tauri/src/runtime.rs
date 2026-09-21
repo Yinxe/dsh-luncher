@@ -172,12 +172,15 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
         Some(kind) if kind == archive_expected_kind() => {}
         other => {
             // 镜像站挂掉时经常返回 200 + 一个 HTML 错误页，光看后缀名分辨不出来
-            let head = head_bytes(&archive_path, 160);
+            let got = match other.as_deref() {
+                None => "空文件".to_string(),
+                Some("未知") => "认不出的格式（镜像站常见：200 + 一个 HTML 错误页）".to_string(),
+                Some(k) => k.to_string(),
+            };
             let msg = format!(
-                "下载到的不是 {} 压缩包（文件头检测为 {}，开头内容 {:?}）。归档已保留在 {}，请更换镜像站后重试",
+                "下载到的不是 {} 压缩包（判定：{got}；文件头 {}）。归档已保留在 {}，请更换镜像站后重试",
                 archive_expected_kind(),
-                other.unwrap_or_else(|| "未知".into()),
-                head,
+                head_preview(&archive_path, 32),
                 archive_path.display()
             );
             crate::diag::op("runtime", &msg);
@@ -279,33 +282,99 @@ fn archive_expected_kind() -> &'static str {
     }
 }
 
-/// 从文件头认归档种类：镜像站 404/被网关拦截时常常返回 200 + HTML，只看后缀会误判
+/// 从文件头认归档种类：镜像站 404/被网关拦截时常常返回 200 + HTML，只看后缀会误判。
+///
+/// ⚠️ 必须比**原始字节**：xz 的魔数首字节是 `0xFD`，不是合法 UTF-8 —— 一旦先过
+/// `String::from_utf8_lossy`，它就会被替换成 `U+FFFD`，`starts_with` 永远不可能命中，
+/// 结果是把一份好端端的 `node-*.tar.xz` 判成「不是 tar.xz」，安装直接失败。
 fn archive_kind(path: &Path) -> Option<String> {
-    let head = head_bytes(path, 8);
-    let b = head.as_bytes();
-    if b.starts_with(b"PK") {
+    let head = head_raw(path, 8);
+    if head.starts_with(b"PK") {
         Some("zip".into())
-    } else if b.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
+    } else if head.starts_with(&[0xFD, b'7', b'z', b'X', b'Z', 0x00]) {
         Some("tar.xz".into())
-    } else if b.starts_with(&[0x1F, 0x8B]) {
+    } else if head.starts_with(&[0x1F, 0x8B]) {
         Some("tar.gz".into())
     } else if head.is_empty() {
         None
     } else {
-        Some(format!("未知（开头 {head:?}）"))
+        Some("未知".into())
     }
 }
 
-/// 读文件开头若干字节（非 UTF-8 也能看个大概），仅用于留痕与报错
-fn head_bytes(path: &Path, n: usize) -> String {
+/// 读文件开头若干字节（原始字节，不做任何编码转换 —— 魔数比较只能用这个）
+fn head_raw(path: &Path, n: usize) -> Vec<u8> {
     use std::io::Read;
     let Ok(mut f) = std::fs::File::open(path) else {
-        return String::new();
+        return Vec::new();
     };
     let mut buf = vec![0u8; n];
     let read = f.read(&mut buf).unwrap_or(0);
     buf.truncate(read);
-    String::from_utf8_lossy(&buf).replace(['\r', '\n'], " ")
+    buf
+}
+
+/// 给用户看的开头预览：十六进制 + 可打印字符。
+///
+/// 别把原始字节直接当文本塞进提示里 —— HTML 错误页还算能读，压缩包就是一屏乱码。
+fn head_preview(path: &Path, n: usize) -> String {
+    let buf = head_raw(path, n);
+    if buf.is_empty() {
+        return "（读不到内容）".into();
+    }
+    let hex = buf.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let ascii: String = buf
+        .iter()
+        .map(|b| if (0x20..0x7f).contains(b) { *b as char } else { '.' })
+        .collect();
+    format!("{hex}  ({ascii})")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(name: &str, bytes: &[u8]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dsh-runtime-kind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// 回归：xz 魔数首字节 `0xFD` 不是合法 UTF-8 —— 先做 lossy 字符串化再比较，
+    /// 会把一份合法的 `node-*.tar.xz` 判成「不是 tar.xz」，内置 Node 直接装不上。
+    #[test]
+    fn xz_magic_is_read_from_raw_bytes() {
+        let p = sample(
+            "node-v24.15.0-linux-x64.tar.xz",
+            &[0xFD, b'7', b'z', b'X', b'Z', 0x00, 0x00, 0x04, 0xE6],
+        );
+        assert_eq!(archive_kind(&p).as_deref(), Some("tar.xz"));
+
+        let preview = head_preview(&p, 8);
+        assert!(
+            preview.starts_with("fd 37 7a 58 5a 00"),
+            "预览应是十六进制：{preview}"
+        );
+        assert!(
+            !preview.contains('\u{fffd}'),
+            "预览里不该出现替换字符：{preview}"
+        );
+    }
+
+    /// 其余形态照样认得：gzip、zip、镜像站的 HTML 错误页、空文件
+    #[test]
+    fn other_archive_kinds_and_html_are_classified() {
+        let gz = sample("a.tar.gz", &[0x1F, 0x8B, 0x08, 0x00]);
+        assert_eq!(archive_kind(&gz).as_deref(), Some("tar.gz"));
+        let zip = sample("a.zip", b"PK\x03\x04rest");
+        assert_eq!(archive_kind(&zip).as_deref(), Some("zip"));
+        let html = sample("b.tar.xz", b"<!DOCTYPE html><title>404</title>");
+        assert_eq!(archive_kind(&html).as_deref(), Some("未知"));
+        let empty = sample("c.tar.xz", b"");
+        assert_eq!(archive_kind(&empty), None);
+    }
 }
 
 /// 目录两层快照（写日志用）：出问题时能一眼看出「解压到哪去了 / 顶层目录叫什么」
