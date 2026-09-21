@@ -1165,13 +1165,20 @@ export default function App() {
 
               {/* 版本表 */}
               {rows.length > 0 && (
-                <Card className="py-0">
-                  <Table className="min-w-[600px]">
+                /* @container：版本行的响应式按「这张卡片实际有多宽」算（侧栏收放会改变它），
+                   而不是按视口宽度 —— 窄的时候就收起次要操作与低优先级列 */
+                <Card className="@container py-0">
+                  <Table className="min-w-[20rem]">
                     <TableHeader>
                       <TableRow className="bg-muted/40 hover:bg-muted/40">
+                        {/* 列的显隐阈值必须与 VersionRow 里对应单元格一致（容器查询按卡片宽度算） */}
                         <TableHead className="h-9 pl-4 text-[10.5px] uppercase tracking-wider">版本</TableHead>
-                        <TableHead className="h-9 text-[10.5px] uppercase tracking-wider">发布日期</TableHead>
-                        <TableHead className="h-9 text-[10.5px] uppercase tracking-wider">大小</TableHead>
+                        <TableHead className="hidden h-9 text-[10.5px] uppercase tracking-wider @[34rem]:table-cell">
+                          发布日期
+                        </TableHead>
+                        <TableHead className="hidden h-9 text-[10.5px] uppercase tracking-wider @[40rem]:table-cell">
+                          大小
+                        </TableHead>
                         <TableHead className="h-9 text-[10.5px] uppercase tracking-wider">状态</TableHead>
                         <TableHead className="h-9 pr-4 text-right text-[10.5px] uppercase tracking-wider">操作</TableHead>
                       </TableRow>

@@ -1,6 +1,9 @@
-import { FolderOpen, RefreshCw, ScrollText } from "lucide-react";
+import { FolderOpen, MoreHorizontal, RefreshCw, ScrollText, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { TableCell, TableRow } from "@/components/ui/table";
 import type { InstalledVersion } from "../types";
 
@@ -47,6 +50,14 @@ const CHANNEL_V: Record<string, "default" | "success" | "warning" | "info" | "se
   next: "secondary",
 };
 
+/**
+ * 次要操作铺开所需的最小容器宽度（表格外层的 `@container` 尺寸）。
+ * 实测：四个次要操作 +「设为当前」加起来约 560px，加上版本 / 日期 / 大小 / 状态
+ * 四列就得 830px 以上才排得下 —— 低于这个宽度与其让按钮换行把行撑高，
+ * 不如收进「更多」菜单（主操作始终留在外面）。
+ */
+const WIDE = "@[52rem]";
+
 export default function VersionTableRow({
   row, isLatestTag, busy, isActive, switchLocked, upgradeTo, onUpgrade, onSetActive, onInstall, onUninstall, onReveal,
   onShowNotes,
@@ -57,6 +68,9 @@ export default function VersionTableRow({
   const fmtSize = (n: number | null) =>
     n == null ? "" : n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 
+  const canReinstall = !!inst && inst.source === "managed" && !busy && !isActive;
+  const canUninstall = canReinstall;
+
   return (
     <TableRow
       className={`border-l-2 hover:bg-muted/40 ${
@@ -65,11 +79,15 @@ export default function VersionTableRow({
           : RAIL[row.channel] ?? "border-l-transparent"
       }`}
     >
-      <TableCell className="px-4 py-2.5">
+      {/* 版本：窄容器里让徽标换到第二行，但版本号本身不截断（截断的版本号没有意义） */}
+      <TableCell className="px-3 py-2.5 sm:pl-4">
         <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-          <span className={`font-mono text-[13px] font-bold ${isActive ? "text-primary" : ""}`}>{row.version}</span>
+          <span className={`font-mono text-[13px] font-bold whitespace-nowrap ${isActive ? "text-primary" : ""}`}>
+            {row.version}
+          </span>
           <Badge variant={CHANNEL_V[row.channel] ?? "secondary"} className="uppercase">{row.channel}</Badge>
-          {isLatestTag && <Badge variant="info">latest</Badge>}
+          {/* channel 已经是 latest 时不再重复挂一个 latest 徽标（同一行里两个同义徽标） */}
+          {isLatestTag && row.channel !== "latest" && <Badge variant="info">latest</Badge>}
           {isActive && <Badge>当前</Badge>}
         </div>
         {upgradeTo && (
@@ -83,8 +101,15 @@ export default function VersionTableRow({
           </button>
         )}
       </TableCell>
-      <TableCell className="px-3 py-2.5 font-mono text-[11.5px] text-muted-foreground">{fmtDate(row.remote?.publishedAt ?? null) || "—"}</TableCell>
-      <TableCell className="px-3 py-2.5 font-mono text-[11.5px] text-muted-foreground">{fmtSize(row.remote?.unpackedSize ?? null) || "—"}</TableCell>
+
+      {/* 发布日期 / 大小：按容器宽度逐级收起，它们的优先级最低 */}
+      <TableCell className="hidden px-3 py-2.5 font-mono text-[11.5px] whitespace-nowrap text-muted-foreground @[34rem]:table-cell">
+        {fmtDate(row.remote?.publishedAt ?? null) || "—"}
+      </TableCell>
+      <TableCell className="hidden px-3 py-2.5 font-mono text-[11.5px] whitespace-nowrap text-muted-foreground @[40rem]:table-cell">
+        {fmtSize(row.remote?.unpackedSize ?? null) || "—"}
+      </TableCell>
+
       <TableCell className="px-3 py-2.5">
         {isActive ? (
           <Badge title={inst?.location}>当前版本</Badge>
@@ -96,22 +121,14 @@ export default function VersionTableRow({
             {inst.source === "managed" ? "已装 · 管理" : inst.source === "global" ? "npm 全局" : "PATH"}
           </Badge>
         ) : (
-          <span className="text-xs text-muted-foreground">未安装</span>
+          <span className="text-xs whitespace-nowrap text-muted-foreground">未安装</span>
         )}
       </TableCell>
-      <TableCell className="px-3 py-2.5 text-right">
-        <div className="flex flex-wrap items-center justify-end gap-1">
-          {/* 更新日志：任何版本都能点（早期版本官方没建 Release，对话框里会说明）。
-              这里用图标按钮，与「打开安装目录」同位 —— 操作列已经排到「卸载」，
-              再加一个文字按钮会把整行撑高换行 */}
-          <Button
-            size="sm"
-            variant="ghost"
-            title={`查看 dsh ${row.version} 改了什么（官方 Release 正文）`}
-            onClick={() => onShowNotes(row.version)}
-          >
-            <ScrollText />
-          </Button>
+
+      {/* 操作：主操作常驻 + 次要操作（宽屏铺开 / 窄屏收进「更多」）。
+          容器查询而不是视口断点：侧栏收放会改掉这里真正可用的宽度。 */}
+      <TableCell className="px-3 py-2.5 text-right sm:pr-4">
+        <div className="flex flex-nowrap items-center justify-end gap-1">
           {!inst && (
             <Button size="sm" disabled={busy} onClick={() => onInstall(row.version, false)} title="安装完成后自动设为当前版本">
               安装
@@ -128,32 +145,70 @@ export default function VersionTableRow({
               设为当前
             </Button>
           )}
-          {inst && inst.source === "managed" && (
-            <>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => onReveal(inst.location)} title="打开安装目录">
-                <FolderOpen />
+
+          <div className={`hidden items-center gap-0.5 ${WIDE}:flex`}>
+            <Button
+              size="sm"
+              variant="ghost"
+              title={`查看 dsh ${row.version} 改了什么（官方 Release 正文）`}
+              onClick={() => onShowNotes(row.version)}
+            >
+              <ScrollText />
+            </Button>
+            {inst && inst.source === "managed" && (
+              <>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => onReveal(inst.location)} title="打开安装目录">
+                  <FolderOpen />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={!canReinstall}
+                  onClick={() => onInstall(row.version, true)}
+                  title={isActive ? "当前版本正在使用，请先切换到其他版本再重装" : "删除后重新下载安装（会设为当前版本）"}
+                >
+                  <RefreshCw /> 重装
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  disabled={!canUninstall}
+                  onClick={() => onUninstall(row.version)}
+                  title={isActive ? "当前版本不允许卸载，请先切换到其他版本" : undefined}
+                >
+                  卸载
+                </Button>
+              </>
+            )}
+          </div>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" variant="ghost" className={`${WIDE}:hidden`} title="更多操作">
+                <MoreHorizontal />
               </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy || isActive}
-                onClick={() => onInstall(row.version, true)}
-                title={isActive ? "当前版本正在使用，请先切换到其他版本再重装" : "删除后重新下载安装（会设为当前版本）"}
-              >
-                <RefreshCw /> 重装
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                disabled={busy || isActive}
-                onClick={() => onUninstall(row.version)}
-                title={isActive ? "当前版本不允许卸载，请先切换到其他版本" : undefined}
-              >
-                卸载
-              </Button>
-            </>
-          )}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuItem onSelect={() => onShowNotes(row.version)}>
+                <ScrollText /> 更新日志
+              </DropdownMenuItem>
+              {inst && inst.source === "managed" && (
+                <>
+                  <DropdownMenuItem onSelect={() => onReveal(inst.location)}>
+                    <FolderOpen /> 打开安装目录
+                  </DropdownMenuItem>
+                  <DropdownMenuItem disabled={!canReinstall} onSelect={() => onInstall(row.version, true)}>
+                    <RefreshCw /> 重装
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" disabled={!canUninstall} onSelect={() => onUninstall(row.version)}>
+                    <Trash2 /> 卸载
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </TableCell>
     </TableRow>
