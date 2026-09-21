@@ -166,7 +166,31 @@ fn run_install(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("启动 npm 失败: {e}"))?;
+    // 把「实际执行的命令 + PATH」写进日志：npm 起不来时（os error 193 这类）
+    // 光看一句报错根本定位不了，日志里能直接看到解析到哪个 npm
+    let line = util::cmd_line(&cmd);
+    crate::diag::op(
+        "install",
+        &format!(
+            "安装 dsh {version}\n  命令: {line}\n  目标: {}\n  node: {}\n  PATH: {}",
+            target.display(),
+            node.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "（未找到）".into()),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    let mut child = cmd.spawn().map_err(|e| {
+        crate::diag::op("install", &format!("启动 npm 失败：{line}\n  错误: {e}"));
+        // 193 = ERROR_BAD_EXE_FORMAT：把脚本当成可执行文件了（Windows 上的经典坑）
+        let hint = if e.raw_os_error() == Some(193) {
+            "\n  这通常是把没有扩展名的脚本（git-bash 用的 npm / pnpm）当成程序执行了；\n  请确认 Node.js 安装完整（目录里应有 npm.cmd），或在设置里指定 Node 路径"
+        } else {
+            ""
+        };
+        format!(
+            "启动 npm 失败：{}{hint}\n  命令与 PATH 已写入 logs/install.log（设置 → 打开日志目录）",
+            npm.program.display()
+        )
+    })?;
     emit_log(app, version, "npm 安装中，依赖较多可能需要几分钟…", "info");
 
     // 两个管道各起一个读取线程，逐行推送日志；stderr 尾部保留用于失败信息
@@ -245,7 +269,13 @@ fn run_install(
             return Ok(format!("已安装到 {}", target.display()));
         }
         let _ = remove_version_dir(&target);
-        return Err("npm 结束但未找到 @deepseek-ai/dsh 包文件，可能 registry 上没有该版本".into());
+        crate::diag::op(
+            "install",
+            &format!("npm 退出码 0 但未找到包文件：{}", target.display()),
+        );
+        return Err(format!(
+            "npm 结束但未找到 @deepseek-ai/dsh 包文件，可能 registry 上没有该版本（细节见 logs/install.log）"
+        ));
     }
 
     // 失败或取消：清理半成品目录
@@ -255,11 +285,15 @@ fn run_install(
     }
     let tail = stderr_tail.lock().unwrap().join("\n");
     let code = status.and_then(|s| s.code());
+    crate::diag::op(
+        "install",
+        &format!("npm 退出码 {code:?}\n  命令: {line}\n  stderr 尾部:\n{tail}"),
+    );
     Err(format!(
         "npm 退出码 {:?}{}",
         code,
         if tail.is_empty() {
-            String::new()
+            format!("\n  细节见 logs/install.log（设置 → 打开日志目录）")
         } else {
             format!("\n{tail}")
         }

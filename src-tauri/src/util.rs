@@ -29,10 +29,16 @@ pub fn home_dir() -> Option<PathBuf> {
     }
 }
 
-/// 在 PATH 中查找可执行文件
+/// 在 PATH 中查找可执行文件。
+///
+/// Windows 上的顺序很关键：官方 Node.js for Windows 会在同一个目录里同时放
+/// `npm`（**给 git-bash 用的 POSIX shell 脚本**）、`npm.cmd`、`npm.ps1`，pnpm/npx
+/// 同理。若先命中无扩展名的那个，CreateProcess 会报
+/// 「不是有效的 Win32 应用程序 (os error 193)」——表现为「npm 显示未装」「安装 dsh 失败」。
+/// 所以：.exe / .cmd / .bat 排前面，无扩展名的候选必须是真正的 PE 可执行文件才认。
 pub fn which(name: &str) -> Option<PathBuf> {
     let exts: &[&str] = if cfg!(windows) {
-        &["", ".exe", ".cmd", ".bat"]
+        &[".exe", ".cmd", ".bat", ""]
     } else {
         &[""]
     };
@@ -40,12 +46,38 @@ pub fn which(name: &str) -> Option<PathBuf> {
     for dir in std::env::split_paths(&path) {
         for ext in exts {
             let p = dir.join(format!("{name}{ext}"));
-            if p.is_file() {
-                return Some(p);
+            if !p.is_file() {
+                continue;
             }
+            if ext.is_empty() && !is_directly_executable(&p) {
+                continue;
+            }
+            return Some(p);
         }
     }
     None
+}
+
+/// 这个文件能不能直接交给 CreateProcess：只有真 PE（MZ 头）才行。
+/// 无扩展名的文本脚本（git-bash 用的 npm / pnpm / npx）一律不算。
+/// 非 Windows 上恒为 true（有无扩展名都能 exec）。
+pub fn is_directly_executable(p: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::io::Read;
+        match std::fs::File::open(p) {
+            Ok(mut f) => {
+                let mut magic = [0u8; 2];
+                f.read_exact(&mut magic).is_ok() && &magic == b"MZ"
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = p;
+        true
+    }
 }
 
 /// 隐藏控制台窗口（Windows）。
@@ -78,9 +110,54 @@ pub fn hidden_command<P: AsRef<std::ffi::OsStr>>(program: P) -> Command {
     c
 }
 
+/// Windows：把「无扩展名的 POSIX 脚本」纠正到同目录的 .cmd / .bat / .exe。
+///
+/// 调用方可能从设置、缓存或旧日志里拿到 `<dir>\npm` 这种路径（真正能用的是
+/// `npm.cmd`）。放任不管就是 os error 193，且报错信息对用户毫无指导意义。
+#[cfg(windows)]
+fn resolve_windows_program(program: &Path) -> PathBuf {
+    if program.extension().is_some() || is_directly_executable(program) {
+        return program.to_path_buf();
+    }
+    for ext in ["cmd", "bat", "exe"] {
+        let cand = program.with_extension(ext);
+        if cand.is_file() {
+            crate::diag::op(
+                "spawn",
+                &format!(
+                    "{} 不是可执行文件（多半是 git-bash 用的脚本），改用它旁边的 {}",
+                    program.display(),
+                    cand.display()
+                ),
+            );
+            return cand;
+        }
+    }
+    program.to_path_buf()
+}
+
+/// 把一条命令拼成可读的一行（写入日志用；Command 没有公开的 Display）
+pub fn cmd_line(cmd: &Command) -> String {
+    let mut s = cmd.get_program().to_string_lossy().into_owned();
+    for a in cmd.get_args() {
+        s.push(' ');
+        let a = a.to_string_lossy();
+        if a.contains(' ') {
+            s.push('"');
+            s.push_str(&a);
+            s.push('"');
+        } else {
+            s.push_str(&a);
+        }
+    }
+    s
+}
+
 /// 构建 Command，Windows 上自动包装 .cmd/.bat，并隐藏控制台窗口。
 /// 只用于**后台**命令；要让用户看到终端窗口请直接用 `Command::new`（见 `hide_window`）。
 pub fn spawn_command(program: &Path, args: &[String]) -> Command {
+    #[cfg(windows)]
+    let program = &resolve_windows_program(program);
     #[cfg(windows)]
     {
         let is_script = program
@@ -103,6 +180,7 @@ pub fn spawn_command(program: &Path, args: &[String]) -> Command {
     }
     c
 }
+
 
 /// 探测 node 可执行文件：覆盖路径 → 按来源解析
 /// auto：系统优先，缺失回退内置运行时；system：仅系统；runtime：仅内置
@@ -174,16 +252,33 @@ fn file_version(p: &Path) -> String {
 
 /// 探测 npm：PATH 中的 npm → node 同目录 → npm-cli.js 通过 node 运行
 pub fn find_npm(settings: &Settings) -> Option<NpmInvocation> {
+    let node = find_node(settings);
+    // Windows 优先走 `node <npm-cli.js>`：一次绕开 npm / npm.cmd / npm.ps1 三种包装。
+    // 无扩展名的 `npm` 是给 git-bash 的 POSIX 脚本，直接 CreateProcess 会报
+    // 「不是有效的 Win32 应用程序 (os error 193)」，界面表现为「npm 未装」+ 安装必失败。
+    // 官方 msi 与 zip 发行版都把 npm 放在 <node 目录>/node_modules/npm/bin/npm-cli.js。
+    if cfg!(windows) {
+        if let Some((n, cli)) = node.as_ref().and_then(|n| {
+            let cli = n.parent()?.join("node_modules/npm/bin/npm-cli.js");
+            cli.is_file().then(|| (n.clone(), cli))
+        }) {
+            return Some(NpmInvocation {
+                program: n,
+                args: vec![cli.to_string_lossy().into_owned()],
+            });
+        }
+    }
     if let Some(npm) = which("npm") {
         return Some(NpmInvocation {
             program: npm,
             args: vec![],
         });
     }
-    let node = find_node(settings)?;
+    let node = node?;
     let bin_dir = node.parent()?;
 
     if cfg!(windows) {
+        // 兜底：npm-cli.js 就在 node 目录下（正常布局；上面的优先分支已覆盖）
         let cli = bin_dir.join("node_modules/npm/bin/npm-cli.js");
         if cli.is_file() {
             return Some(NpmInvocation {
