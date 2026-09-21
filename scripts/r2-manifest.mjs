@@ -1,24 +1,32 @@
 #!/usr/bin/env node
 // 把 tauri-action 生成的 latest.json 改写成「自建源（Cloudflare R2）」版本。
 //
-// 为什么需要：Tauri 更新器清单里的下载地址是绝对 URL，而 tauri-action 用的是
-// GitHub 的**资产 API 地址**（`https://api.github.com/repos/…/releases/assets/<id>`）。
-// 对象搬到 R2 之后，地址必须改成 R2 的公开文件地址，否则客户端会绕回 GitHub 下载
-// —— 那就白搬了。签名（signature）字段原样保留：安装包字节没变，客户端照常验签。
+// 两个要点：
+// 1. tauri-action 的清单里用的是 GitHub **资产 API 地址**
+//    （`https://api.github.com/repos/…/releases/assets/<id>`），搬到 R2 后必须改写成
+//    R2 的文件地址，否则客户端会绕回 GitHub 下载 —— 那就白搬了；
+// 2. 地址用**固定键**（`<base>/latest/<平台>.扩展名`），路径不带版本号：每次发布覆盖
+//    同名对象，桶里永远只有一份「当前最新」，旧版自然消失，也不需要任何清理逻辑；
+// 3. 但固定路径的内容会变，**长缓存会把旧包喂给客户端**（与清单里的签名对不上、更新
+//    直接失败）。所以清单里再补一个与版本绑定的查询串 `?v=<版本>` 当缓存指纹：
+//    路径对人始终是「latest」，对 CDN 却是「每个版本一个新对象」—— 对象因此可以安全地
+//    用 immutable 长缓存，下载才快。
+//
+// 签名（signature）字段原样保留：安装包字节没变，客户端照常验签。
 //
 // 用法：
 //   node scripts/r2-manifest.mjs --in latest.json --base https://pub-xxx.r2.dev \
-//        --assets-map assets.json [--out latest.r2.json] [--check-dir 目录]
+//        --assets-map assets.json [--out latest.r2.json] [--check-dir 目录] \
+//        [--list-files upload.tsv]
 //
 //   --in          tauri-action 生成的 latest.json
 //   --base        自建源公开基址（末尾不要带 /）
-//   --assets-map  资产映射，二选一：
-//                   · `gh release view vX --json assets` 的输出（数组，含 apiUrl/name）
-//                   · 或自己写的 {"<apiUrl>": "<文件名>"}
-//                 清单里是资产 API 地址时**必须**给，否则解析不出文件名（会直接报错，
-//                 绝不猜：猜错等于把用户指向 404）
+//   --assets-map  资产映射：`gh release view vX --json assets` 的输出，或 {apiUrl: 文件名}
+//                 清单里是资产 API 地址时**必须**给，否则解析不出文件名
+//                 （会直接报错，绝不猜：猜错等于把用户指向 404）
 //   --out         输出路径（默认打印到 stdout）
-//   --check-dir   可选：确认每个平台引用的安装包确实在这个目录里（防止清单指向没上传的文件）
+//   --check-dir   可选：确认引用的安装包都在这个目录里
+//   --list-files  可选：写出「本地文件名 <TAB> R2 对象键」的 TSV，供 CI 逐行上传
 //
 // 退出码：0 成功；1 参数/结构有问题；2 校验不通过。
 
@@ -39,6 +47,9 @@ function parseArgs(argv) {
     else if (a === "--check-dir") out.checkDir = argv[++i] ?? "";
     else if (a === "--assets-map") out.assetsMap = argv[++i] ?? "";
     else if (a === "--list-files") out.listFiles = argv[++i] ?? "";
+    else if (a === "--stable-keys") {
+      /* 兼容旧调用（现在恒为稳定键模式） */
+    }
     else if (a === "--help" || a === "-h") {
       console.log(USAGE);
       process.exit(0);
@@ -52,6 +63,43 @@ function parseArgs(argv) {
     process.exit(1);
   }
   return out;
+}
+
+/**
+ * 平台键 → R2 上的**固定对象键**。
+ *
+ * 用固定键（而不是带版本号的文件名）是为了「桶里只保留一份 latest」：
+ * 客户端清单里的地址永远长这样，版本一变就覆盖同名对象。
+ * 同名不同包（如 darwin 三个架构共用 universal 包）指向同一个键，避免重复上传。
+ */
+const STABLE_KEYS = {
+  "windows-x86_64": "windows-x64.msi",
+  "windows-x86_64-msi": "windows-x64.msi",
+  "windows-x86_64-nsis": "windows-x64-setup.exe",
+  "linux-x86_64": "linux-x86_64.AppImage",
+  "linux-x86_64-appimage": "linux-x86_64.AppImage",
+  "linux-x86_64-deb": "linux-x86_64.deb",
+  "linux-x86_64-rpm": "linux-x86_64.rpm",
+  "darwin-aarch64": "darwin-universal.app.tar.gz",
+  "darwin-aarch64-app": "darwin-universal.app.tar.gz",
+  "darwin-x86_64": "darwin-universal.app.tar.gz",
+  "darwin-x86_64-app": "darwin-universal.app.tar.gz",
+  "darwin-universal": "darwin-universal.app.tar.gz",
+  "darwin-universal-app": "darwin-universal.app.tar.gz",
+};
+
+/** 压缩/安装包的复合扩展名（.app.tar.gz 要整体保留） */
+const COMPOUND_EXT = /(\.app\.tar\.gz|\.tar\.gz|\.tar\.xz|\.AppImage|\.[A-Za-z0-9]{2,6})$/;
+
+/**
+ * 取平台键对应的固定对象键。
+ * 表里没有的新平台（以后加了 target）退化为「平台键 + 原扩展名」——
+ * 依然不带版本号，依然是稳定地址。
+ */
+function stableKey(target, originalName) {
+  if (STABLE_KEYS[target]) return STABLE_KEYS[target];
+  const ext = (originalName.match(COMPOUND_EXT) || [".bin"])[0];
+  return `${target}${ext}`;
 }
 
 /** 读资产映射：兼容 gh 的数组形态与手写的对象形态 */
@@ -114,7 +162,7 @@ if (entries.length === 0) {
 }
 
 const problems = [];
-const resolved = new Map(); // 文件名 → 被哪些平台引用
+const resolved = new Map(); // R2 对象键 → { local, targets[] }
 for (const e of entries) {
   if (!e.info || typeof e.info.url !== "string") {
     problems.push(`${e.where}: 缺少 url`);
@@ -145,9 +193,12 @@ for (const e of entries) {
     );
     continue;
   }
-  e.info.url = `${base}/${encodeURIComponent(name)}`;
-  if (!resolved.has(name)) resolved.set(name, []);
-  resolved.get(name).push(e.target);
+  const key = stableKey(e.target, name);
+  // ?v= 是缓存指纹：路径稳定、字节可 immutable，换版本就换 URL
+  const fingerprint = encodeURIComponent(String(manifest.version ?? "dev"));
+  e.info.url = `${base}/latest/${encodeURIComponent(key)}?v=${fingerprint}`;
+  if (!resolved.has(key)) resolved.set(key, { local: name, targets: [] });
+  resolved.get(key).targets.push(e.target);
   if (args.checkDir && !existsSync(join(args.checkDir, name))) {
     problems.push(`${e.where}: ${args.checkDir} 里没有 ${name}`);
   }
@@ -162,13 +213,16 @@ if (args.out) {
 }
 
 if (args.listFiles) {
-  writeFileSync(args.listFiles, [...resolved.keys()].join("\n") + "\n");
-  console.log(`✔ 已写出待上传清单 ${args.listFiles}（${resolved.size} 个安装包）`);
+  const tsv = [...resolved.entries()]
+    .map(([key, v]) => `${v.local}\t${key}`)
+    .join("\n");
+  writeFileSync(args.listFiles, tsv + "\n");
+  console.log(`✔ 已写出待上传清单 ${args.listFiles}（${resolved.size} 个对象）`);
 }
-console.log(`   基址: ${base}`);
-console.log(`   需要上传的对象（去掉 latest.json 就是安装包清单）：`);
-for (const [name, targets] of resolved) {
-  console.log(`     ${name}   ← ${targets.length} 个平台键`);
+console.log(`   基址: ${base}（固定键，每次发布覆盖）`);
+console.log(`   上传映射（本地文件 → R2 键）：`);
+for (const [key, v] of resolved) {
+  console.log(`     ${v.local}  →  latest/${key}   （${v.targets.length} 个平台键）`);
 }
 if (problems.length) {
   console.error("\n✖ 校验不通过：");

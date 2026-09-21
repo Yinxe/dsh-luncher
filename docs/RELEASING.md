@@ -109,8 +109,12 @@ curl -sL https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.js
 ## 7. 自建更新源（Cloudflare R2）
 
 客户端**默认**从自建 R2 源下载更新（基址写死在 `src-tauri/src/update_check.rs` 的
-`R2_BASE`），GitHub 源保留为兜底；用户可在设置里二选一。实测同一条网络下 81MB 的
-AppImage：R2 约 3.3MB/s、GitHub 约 1.7MB/s（快 1.9 倍，下载时间 ~47s → ~24s）。
+`R2_BASE`），GitHub 源保留为兜底；用户可在设置里二选一。
+
+实测（国内直连、不走代理）拉 81MB 的 AppImage：**GitHub 的 release 下载直接连不上**
+（curl 返回 000），自建源 200、约 **3.3MB/s**（首字节 ~0.9s）。走代理时两者都受同一条
+隧道限速（~0.8–1.6MB/s），差距不明显 —— 所以自建源的价值首先是**可用性**，
+其次才是不受 GitHub 速率限制。
 
 ### 一次性准备（已完成的部分标 ✅）
 
@@ -149,51 +153,64 @@ AppImage：R2 约 3.3MB/s、GitHub 约 1.7MB/s（快 1.9 倍，下载时间 ~47s
 
 1. `gh release download` 拉本次发布的全部资产；
 2. `node scripts/r2-manifest.mjs` 把 `latest.json` 里的下载地址从 GitHub 资产 API
-   （`api.github.com/repos/…/releases/assets/<id>`）改写成 `<R2_PUBLIC_BASE>/<文件名>`，
-   **签名原样保留**（安装包字节没变，客户端照常验签），并校验清单引用的文件都在本地；
-3. `aws s3 cp` 上传清单引用的 6 个安装包（`max-age=31536000, immutable`）与
-   `latest.json`（`no-cache, max-age=0`）；
-4. 清理旧版本产物，再自检：从公网取回清单，确认每个平台地址都指向自建源。
+   （`api.github.com/repos/…/releases/assets/<id>`）改写成**固定键**
+   `<R2_PUBLIC_BASE>/latest/<平台>.扩展名`，**签名原样保留**（安装包字节没变，
+   客户端照常验签），并校验清单引用的文件都在本地；
+3. `aws s3 cp` 按 `<本地文件> <TAB> <R2 键>` 逐行覆盖上传（`no-cache, max-age=0`），
+   再覆盖 `latest.json`；
+4. 自检：从公网取回清单，确认每个平台地址都落在 `<基址>/latest/` 下。
 
-### 旧版本会被清掉吗
+### 桶里的布局（固定键，只有一份 latest）
 
-会，但不是立刻：
-
-- `latest.json` 每次都被**覆盖**（同一个 key）；
-- 安装包按文件名新增，所以旧版本会先留着；
-- 清理步骤随后删除「不在本次清单里、且超过 `KEEP_DAYS`（默认 7 天）」的对象 ——
-  当前清单引用的文件与 `latest.json` **永远不删**。
-
-留 7 天宽限期是为了避开这个竞态：客户端刚拿到旧清单、还没下完，旧文件就被删 → 404。
-桶里因此稳定在「当前版本 + 最近一次发布」约 120–240 MB；想留更多版本就把
-`KEEP_DAYS` 调大（或删掉这一步，代价是每次发布多堆约 118 MB）。
-GitHub Release 始终是完整归档，R2 只服务「更新」这一条链路。
-
-手动补传（例如补历史版本）等价于：
-
-```bash
-gh release download vX.Y.Z --dir r2-upload --clobber
-gh release view vX.Y.Z --json assets > r2-upload/assets.json
-node scripts/r2-manifest.mjs --in r2-upload/latest.json --assets-map r2-upload/assets.json \
-  --check-dir r2-upload --base "$R2_PUBLIC_BASE" --list-files r2-upload/files.txt --out r2-upload/latest.json
-# 再用 wrangler 逐个上传（无需 S3 凭据，用本机 OAuth 登录态即可）：
-npx wrangler r2 object put dsh-luncher-release/<文件名> --file r2-upload/<文件名> --remote
 ```
+dsh-luncher-release/
+├── latest.json                        # 更新清单：每次覆盖
+└── latest/
+    ├── windows-x64-setup.exe          # NSIS（windows-x86_64-nsis）
+    ├── windows-x64.msi                # MSI（windows-x86_64 / -msi）
+    ├── darwin-universal.app.tar.gz    # macOS 三架构共用 universal 包
+    ├── linux-x86_64.AppImage
+    ├── linux-x86_64.deb
+    └── linux-x86_64.rpm
+```
+
+- 地址**不带版本号**：每次发布覆盖同名对象，桶里永远只有一份「当前最新」，
+  旧版本自然消失、**不需要任何清理步骤**，占用稳定在约 118 MB；
+- 顺带的好处：`<基址>/latest/windows-x64-setup.exe` 可以直接当「永久最新版下载链接」分享；
+- 只上传清单真正引用的包（AppImage / deb / rpm / app.tar.gz / msi / setup.exe）；
+  `.dmg` 不在更新清单里（它供首次下载），要镜像的话另外传。
 
 ### 必须记住的两条
 
 - **`latest.json` 要随每次发布更新**：更新器按顺序取第一个能解析的清单，R2 上的清单
   陈旧会让客户端停在旧版本（届时用户可在设置里切到 GitHub 源自救）。
-- **`latest.json` 的缓存必须保持 `no-cache`**，否则新版本提示会被 CDN 缓存挡住。
+- **`latest/` 下的对象不能长缓存**：它们的内容每次发布都变，如果给它们套上
+  `immutable` 长缓存，CDN 会把旧包喂给客户端，与清单里的签名对不上、更新直接失败。
+  CI 已固定写成 `no-cache, max-age=0`，改动时别改成 `immutable` ——
+  这是这套方案唯一容易踩的坑。
+
+### 手动补传（等价于 CI 那几步）
+
+```bash
+gh release download vX.Y.Z --dir r2-upload --clobber
+gh release view vX.Y.Z --json assets > r2-upload/assets.json
+node scripts/r2-manifest.mjs --in r2-upload/latest.json --assets-map r2-upload/assets.json \
+  --check-dir r2-upload --base "$R2_PUBLIC_BASE" --list-files r2-upload/upload.tsv \
+  --out r2-upload/latest.json
+# upload.tsv 每行是「本地文件 <TAB> R2 键」；用本机 OAuth 登录态即可，无需 S3 凭据：
+while IFS=$'\t' read -r local key; do
+  npx wrangler r2 object put "dsh-luncher-release/latest/$key" --file "r2-upload/$local" \
+    --content-type application/octet-stream --cache-control "no-cache, max-age=0" --remote
+done < r2-upload/upload.tsv
+npx wrangler r2 object put dsh-luncher-release/latest.json --file r2-upload/latest.json \
+  --content-type application/json --cache-control "no-cache, max-age=0" --remote
+```
 
 ### 其它
 
-- 只上传清单真正引用的包（AppImage / deb / rpm / app.tar.gz / msi / setup.exe）；
-  `.dmg` 不在更新清单里（它供首次下载），要镜像的话另外传。
-- 每个版本约 118 MB（AppImage 81MB 占大头）。不清理的话一年几个 GB、R2 存储
-  约 $0.015/GB/月，钱不多但没必要堆着。
-- 想换自定义域名：改上面表格里的两处基址即可。`r2.dev` 是 Cloudflare 的托管开发域名，
-  有速率限制，流量大了建议绑自定义域名。
+- 想换自定义域名：改「一次性准备」表格里的两处基址即可。`r2.dev` 是 Cloudflare 的托管
+  开发域名、有速率限制，流量大了建议绑自定义域名。
+- 早期按版本号命名的对象（`DSH.Launcher_0.1.5_*.exe`）已删除；固定键方案下不会再产生。
 
 ## 8. 常见故障
 

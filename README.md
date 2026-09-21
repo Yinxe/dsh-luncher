@@ -64,6 +64,12 @@
 
 关键点只有三个：**私钥在 CI**（签名）、**公钥在安装包里的 `tauri.conf.json`**（验签）、**`latest.json` 必须能通过 HTTPS 匿名访问**。
 
+下载地址默认走**自建 CDN**：清单由自建源（Cloudflare R2）提供，地址是
+`…/latest/windows-x64-setup.exe` 这类**不带版本号的固定地址**（每次发布覆盖，桶里只留一份
+「当前最新」）；GitHub 源保留为兜底，也可以在设置里手动切过去。实测国内直连（不走代理）拉 81MB 的
+AppImage：GitHub release 直接连不上，自建源约 3.3MB/s 正常下载。地址写死在程序里，发布细节见
+[docs/RELEASING.md](docs/RELEASING.md) 第 7 节。
+
 
 ## 日志与排查
 

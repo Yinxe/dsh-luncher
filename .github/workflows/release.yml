@@ -237,61 +237,38 @@ jobs:
             --assets-map r2-upload/assets.json \
             --check-dir r2-upload \
             --base "$R2_PUBLIC_BASE" \
-            --list-files r2-upload/files.txt \
+            --list-files r2-upload/upload.tsv \
             --out r2-upload/latest.json
 
-      - name: 上传到 R2（安装包长缓存、清单不缓存）
+      - name: 上传到 R2（固定键覆盖，短缓存）
         if: steps.cfg.outputs.ready == 'true'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          while read -r f; do
-            [ -z "$f" ] && continue
-            echo "→ $f"
-            aws s3 cp "r2-upload/$f" "s3://$R2_BUCKET/$f" \
+          # 清单里的地址是固定键（<base>/latest/<平台>.扩展名）+ 版本指纹 ?v=<版本>：
+          # 路径对人始终是「latest」，对 CDN 却是每个版本一个新对象 ——
+          # 所以对象可以放心用 immutable 长缓存（下载快），也不会下到与签名不符的旧包。
+          # 每次发布覆盖同名对象，桶里永远只有一份「当前最新」，不需要清理步骤。
+          while IFS=$'\t' read -r local key; do
+            [ -z "$local" ] && continue
+            echo "→ latest/$key   (← $local)"
+            aws s3 cp "r2-upload/$local" "s3://$R2_BUCKET/latest/$key" \
               --endpoint-url "$R2_ENDPOINT" \
               --content-type application/octet-stream \
               --cache-control "public, max-age=31536000, immutable" \
               --no-progress
-          done < r2-upload/files.txt
-          # latest.json 必须不缓存：否则客户端会长期看到旧清单（更新提示不出现）
+          done < r2-upload/upload.tsv
+          # 清单本身同样必须不缓存：否则客户端会长期看到旧清单（更新提示不出现）
           aws s3 cp r2-upload/latest.json "s3://$R2_BUCKET/latest.json" \
             --endpoint-url "$R2_ENDPOINT" \
             --content-type application/json \
             --cache-control "no-cache, max-age=0" \
             --no-progress
-
-      - name: 清理旧版本产物（保留当前版本 + 宽限期）
-        if: steps.cfg.outputs.ready == 'true'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          # 宽限期：刚发布这几天旧版本先留着，避免「客户端已拿到旧清单、文件却被删」→ 404
-          KEEP_DAYS: '7'
-        run: |
-          # 当前清单引用的文件 + latest.json 永远不删
-          tr -d '\r' < r2-upload/files.txt | sed '/^$/d' | sort -u > /tmp/keep.txt
-          echo latest.json >> /tmp/keep.txt
-          now=$(date +%s)
-          aws s3 ls "s3://$R2_BUCKET/" --endpoint-url "$R2_ENDPOINT" | while read -r d t size key; do
-            [ -z "$key" ] && continue
-            if grep -qxF "$key" /tmp/keep.txt; then
-              continue
-            fi
-            ts=$(date -d "$d $t" +%s)
-            age_days=$(( (now - ts) / 86400 ))
-            if [ "$age_days" -ge "$KEEP_DAYS" ]; then
-              echo "🧹 清理旧产物 $key（${age_days} 天前，$(numfmt --to=iec "$size" 2>/dev/null || echo "$size B")）"
-              aws s3 rm "s3://$R2_BUCKET/$key" --endpoint-url "$R2_ENDPOINT" --no-progress
-            else
-              echo "⏳ 保留 $key（${age_days} 天，未超 ${KEEP_DAYS} 天宽限期）"
-            fi
-          done
-          echo "--- 清理后的桶内容 ---"
+          echo "--- 桶内容（应只有 latest.json + latest/ 下的固定键）---"
           aws s3 ls "s3://$R2_BUCKET/" --endpoint-url "$R2_ENDPOINT"
+          aws s3 ls "s3://$R2_BUCKET/latest/" --endpoint-url "$R2_ENDPOINT"
 
       - name: 自检（公网地址能取到清单，且地址确实指向 R2）
         if: steps.cfg.outputs.ready == 'true'
@@ -301,7 +278,7 @@ jobs:
             const m = JSON.parse(require("fs").readFileSync("/tmp/r2-latest.json", "utf8"));
             const base = process.env.R2_PUBLIC_BASE;
             for (const [k, v] of Object.entries(m.platforms ?? {})) {
-              if (!v.url.startsWith(base + "/")) { console.error(`✖ ${k} 的地址没指向自建源: ${v.url}`); process.exit(1); }
+              if (!v.url.startsWith(base + "/latest/")) { console.error(`✖ ${k} 的地址不是固定键: ${v.url}`); process.exit(1); }
             }
             console.log(`✔ 自建源清单 version=${m.version}，${Object.keys(m.platforms ?? {}).length} 个平台键全部指向 ${base}`);
           '
