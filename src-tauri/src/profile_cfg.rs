@@ -308,7 +308,21 @@ pub(crate) fn backup(path: &Path) -> Result<(), String> {
 fn validate_yaml(content: &str) -> Result<(), String> {
     serde_yaml::from_str::<serde_yaml::Value>(content)
         .map(|_| ())
-        .map_err(|e| format!("YAML 语法错误：{e}"))
+        .map_err(|e| {
+            let msg = e.to_string();
+            // 「多文档」来路基本只有一个：顶层 `[]`（flow 写法）后面接了 `- id: …` 这类
+            // block 条目 —— `[]` 自己就构成整个文档，后面只能靠 `---` 开新文档。原文
+            // 只说了「不支持多文档」，一个字都没说该怎么改，这里补上下一步动作。
+            if msg.contains("more than one document") {
+                return format!(
+                    "YAML 语法错误：{msg}\n\
+                     提示：这份文件里有多个 YAML 文档 —— 顶层的 `[]` 是 flow 写法，\
+                     后面不能再接 `- id: …` 这样的 block 条目。删掉那行 `[]`（条目照旧逐条列出）即可；\
+                     单个 `[]` 本身是合法的空补丁层。"
+                );
+            }
+            format!("YAML 语法错误：{msg}")
+        })
 }
 
 fn validate_json(content: &str) -> Result<(), String> {
@@ -1028,8 +1042,10 @@ pub fn set_web_quick_config(profile: &str, input: &WebQuickConfigInput) -> Resul
     let mut i = 0;
     while i < lines.len() {
         if !lines[i].starts_with("- ") {
-            // 空 `[]` 占位在补块后非法（flow 与 block 序列不能混用），先行移除
-            if lines[i].trim() == "[]" && replaced.iter().any(|r| !r) {
+            // 空 flow 占位在补块后非法（flow 与 block 序列不能混用），先行移除。
+            // 判定与插件启停共用 `is_empty_flow_placeholder`：两条路径改的是同一份文件，
+            // 对「什么算空占位」必须是同一套（含带空格的 `[ ]`）。
+            if is_empty_flow_placeholder(lines[i]) && replaced.iter().any(|r| !r) {
                 i += 1;
                 continue;
             }
@@ -2261,6 +2277,68 @@ mod tests {
         set_ids_disabled("web", "@dshp/demo", &ids, false).unwrap();
         let raw = std::fs::read_to_string(&patch).unwrap();
         assert_eq!(raw.matches("[]").count(), 1, "占位只应有一行:\n{raw}");
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// 同一个 profile 上「插件启停」与「web 快捷配置」会轮流改写**同一份** patch 文件：
+    /// 两条路径对空 flow 占位的处理必须一致，否则先写的那步就把文件弄成多文档，后面全崩。
+    /// 顺带覆盖带空格的 `[ ]`，以及写坏文件时给的是可操作提示而不是解析器原文。
+    #[test]
+    fn plugin_toggle_and_web_quick_share_one_patch_file() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-patch-mix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        let patch = prof_dir.join("cordis.patch.yml");
+        // 带空格的空 flow 序列同样是合法的空补丁层
+        std::fs::write(&patch, "# header\n[ ]\n").unwrap();
+
+        let ids = vec!["dshp-demo".to_string()];
+        let read = || std::fs::read_to_string(&patch).unwrap();
+        let assert_single_doc = |raw: &str| {
+            serde_yaml::from_str::<serde_yaml::Value>(raw)
+                .unwrap_or_else(|e| panic!("必须是单文档合法 YAML：{e}\n{raw}"));
+        };
+
+        let input = WebQuickConfigInput {
+            host: "0.0.0.0".into(),
+            port: 3080,
+            open_browser: false,
+            surface_context: true,
+            cookie_max_age_days: 30,
+        };
+
+        // 1) 先写 web 快捷配置：占位让位给 block 条目
+        set_web_quick_config("web", &input).unwrap();
+        assert_single_doc(&read());
+        assert!(read().contains("host: '0.0.0.0'"));
+        assert!(!read().contains("[ ]"), "占位应被移除:\n{}", read());
+
+        // 2) 紧接着关插件开关：文件里已经有 block 条目，追加必须仍然只产生一个文档
+        set_ids_disabled("web", "@dshp/demo", &ids, true).unwrap();
+        assert_single_doc(&read());
+        assert!(patch_disabled_ids("web").contains("dshp-demo"));
+
+        // 3) 打开开关：只摘管理块，web 配置与注释都留着
+        set_ids_disabled("web", "@dshp/demo", &ids, false).unwrap();
+        let raw = read();
+        assert_single_doc(&raw);
+        assert!(raw.contains("# header") && raw.contains("host: '0.0.0.0'"));
+        assert!(!raw.contains("dshp-demo"));
+
+        // 4) 快捷配置幂等替换：同一份文件再写一遍也不出错
+        set_web_quick_config("web", &input).unwrap();
+        assert_single_doc(&read());
+        assert_eq!(read().matches("id: webserver").count(), 1, "同 id 条目应只保留一份");
+
+        // 5) 万一用户手写坏文件，报错要直接告诉他怎么改
+        let err = validate_yaml("[]\n- id: x\n  disabled: true\n").unwrap_err();
+        assert!(err.contains("多个 YAML 文档"), "{err}");
+        assert!(err.contains("删掉那行"), "报错要给出下一步动作：{err}");
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");
