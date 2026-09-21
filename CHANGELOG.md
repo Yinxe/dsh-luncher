@@ -20,6 +20,7 @@ DSH Launcher 每个版本的用户可见变化。格式参考 [Keep a Changelog]
 
 ### 新增
 
+- **首次使用引导（dsh 初始化）**：全新机器上 `~/.dsh` 还不存在，而它正是 profile、快捷配置、插件管理的根 —— 此前界面只显示一句「未找到任何 profile」，用户会以为「装好了却什么都用不了」。现在装完版本后版本页会提示「还差一步：初始化 dsh」，Profile 实例页给出一张引导卡（带 Node / dsh / npm 就绪状态）：一键以 `dsh web`（等价 `--profile web`）完成首次启动，dsh 由此写出数据目录、内置 `web` profile 与凭据文件；随后 profile 列表自动出现（空列表期间每 3 秒重扫，也可点「我在终端里跑过了，重新检测」），默认 profile 也会自动补上。插件页的空态同样改为指路到这一步。
 - **分类日志系统**：日志按子系统分文件落在 `~/.dsh-launcher/logs/` —— `app`（启动阶段/托盘/设置/环境探测/自更新）、`instance`（实例启停、发现、端口归属）、`install`（npm 命令与 PATH、退出码、stderr）、`runtime`（内置 Node 下载与解压）、`plugin`（插件任务命令与失败输出）、`profile`、`network`（registry / 渠道探测 / GitHub 加速测速）、`ui`（前端报错）、`panic`（崩溃含回溯）。每行统一为「UTC 时间 + `run=` 本次启动 + `+Nms` + 级别」，`grep ERROR install.log` 就能筛问题；默认记 INFO，需要逐次细节（实例轮询、端口归属、每条外部命令）时用环境变量 `DSH_LAUNCHER_LOG=debug` 启动。单文件超 1MB 自动滚动。
 - **设置里新增「生成诊断包」**：把环境摘要（node / npm / 内置 Node 的实际路径、已装版本、profile 列表）、设置（**凭据已脱敏**）和全部分类日志合并成一个 `diagnostics-<run>.txt`；报 bug 时发这一个文件即可，不用再逐个回答环境问题。
 - **设置里新增「打开日志目录」**：一键定位到 `~/.dsh-launcher/logs/`。

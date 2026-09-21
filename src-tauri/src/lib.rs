@@ -78,6 +78,7 @@ pub fn run() {
             commands::uninstall_version,
             commands::launch_version,
             commands::start_embedded,
+            commands::init_dsh,
             commands::stop_process,
             commands::list_processes,
             commands::list_profile_instances,

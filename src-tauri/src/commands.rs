@@ -30,6 +30,10 @@ pub struct EnvironmentInfo {
     pub runtime_dir: String,
     /// 日志目录（启动留痕 / 安装与解压的操作日志都在这里）
     pub logs_dir: String,
+    /// dsh 是否已经初始化过（`$DSH_HOME/profiles` 里有没有 profile）。
+    /// 全新机器上这是 false：此时 profile 列表、快捷配置、插件管理全都无从谈起，
+    /// 前端据此给出「首次初始化（跑一次 dsh web）」的引导。
+    pub dsh_initialized: bool,
 }
 
 #[tauri::command]
@@ -94,6 +98,7 @@ pub async fn get_environment(state: State<'_, AppState>) -> Result<EnvironmentIn
             runtime_installed: crate::runtime::runtime_installed(),
             runtime_dir: crate::runtime::runtime_dir().to_string_lossy().into_owned(),
             logs_dir: crate::diag::logs_dir().to_string_lossy().into_owned(),
+            dsh_initialized: !crate::profiles::scan_profiles().is_empty(),
         })
     })
     .await
@@ -394,6 +399,19 @@ pub async fn start_embedded(
 ) -> Result<crate::procs::ProcInfo, String> {
     let settings = state.settings.lock().unwrap().clone();
     let proc_state = procs.inner().clone();
+    start_instance(app, settings, proc_state, version, profile, args, detached).await
+}
+
+/// 真正拉起一个实例（内嵌 keeper 或独立进程）。`start_embedded` 与 `init_dsh` 共用。
+async fn start_instance(
+    app: AppHandle,
+    settings: Settings,
+    proc_state: crate::procs::ProcState,
+    version: Option<String>,
+    profile: Option<String>,
+    args: Option<String>,
+    detached: Option<bool>,
+) -> Result<crate::procs::ProcInfo, String> {
     let detached = detached.unwrap_or(settings.launch_mode == "detached");
 
     // 1) 解析目标版本 + profile 唯一性守卫（线程池执行）
@@ -547,6 +565,68 @@ pub async fn stop_profile_instance(
     tauri::async_runtime::spawn_blocking(move || crate::procs::stop_profile(&app, &procs, &profile))
         .await
         .map_err(|e| format!("停止失败: {e}"))?
+}
+
+/// 首次初始化 dsh：跑一次 `dsh web`（等价 `--profile web`）。
+///
+/// 为什么需要单独一个入口：dsh 的 `$DSH_HOME`（默认 `~/.dsh`）是**第一次运行 dsh 时**
+/// 才生成的（已实测：全新 DSH_HOME 下 `dsh web` 会写出 profiles/web、storages、
+/// .credentials.yaml 等）。在那之前 profile 列表为空 —— 启动器里基于 profile 的一切
+/// （启动实例、快捷配置、插件管理）都无从下手，用户会以为「装了但用不了」。
+#[tauri::command]
+pub async fn init_dsh(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    procs: State<'_, crate::procs::ProcState>,
+) -> Result<crate::procs::ProcInfo, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let proc_state = procs.inner().clone();
+    // 全新机器最常见的卡点是「压根没装 dsh 版本」：先拦住并给出下一步，
+    // 而不是让 resolve_target 抛一句「未找到已安装的 …」
+    let s2 = settings.clone();
+    let installed = tauri::async_runtime::spawn_blocking(move || {
+        crate::installed::collect_installed(&s2)
+    })
+    .await
+    .map_err(|e| format!("初始化失败: {e}"))?;
+    if installed.is_empty() {
+        return Err(
+            "还没有安装 dsh 版本：先到「版本」页安装一个（可点「安装最新版」），再回来做首次初始化"
+                .into(),
+        );
+    }
+    crate::diag::info(
+        "app",
+        &format!(
+            "首次初始化：以 `dsh web` 启动内置 web profile；DSH_HOME={} profiles={}",
+            crate::profiles::dsh_native_home().display(),
+            crate::profiles::profiles_dir().display()
+        ),
+    );
+    // profile 固定 "web"：这正是 `dsh web` 的等价形式（dsh 自己的 help 写明
+    // `web` 是 `--profile web` 的别名），且无需 profile 目录已存在。
+    let info = start_instance(
+        app,
+        settings,
+        proc_state,
+        None,
+        Some("web".into()),
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        crate::diag::error("app", &format!("首次初始化启动失败：{e}"));
+        format!("初始化失败：{e}")
+    })?;
+    crate::diag::info(
+        "app",
+        &format!(
+            "首次初始化已拉起：pid={} profile={} —— dsh 正在写出 $DSH_HOME（profiles/web、storages、凭据文件）",
+            info.id, info.profile
+        ),
+    );
+    Ok(info)
 }
 
 #[derive(Clone, Serialize)]

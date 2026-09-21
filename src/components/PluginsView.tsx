@@ -309,8 +309,14 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
 
   if (profiles.length === 0) {
     return (
-      <Card className="p-10 text-center text-muted-foreground">
-        未找到任何 profile（$DSH_HOME/profiles 为空）
+      <Card className="p-6 text-[12px] leading-relaxed text-muted-foreground">
+        <div className="text-sm font-medium text-foreground">还没有可用的 profile</div>
+        <p className="mt-1.5">
+          插件是按 profile 隔离安装的，所以要先有 profile。dsh 的数据目录是
+          <strong className="font-medium text-foreground"> 第一次运行 dsh 时 </strong>
+          才生成的：到「Profile 实例」页点「初始化 dsh（首次启动 web）」，或在终端里自行跑一次{" "}
+          <span className="font-mono">dsh web</span>，之后回到这里即可选择 profile。
+        </p>
       </Card>
     );
   }

@@ -59,6 +59,8 @@ export const api = {
   uninstall: (version: string) => invoke<void>("uninstall_version", { version }),
   launch: (version: string | null, args?: string | null, profile?: string | null) =>
     invoke<LaunchResult>("launch_version", { version, args, profile }),
+  /** 首次初始化：跑一次 dsh web，让 dsh 生成 $DSH_HOME 与内置 web profile */
+  initDsh: () => invoke<ProcInfo>("init_dsh"),
   startEmbedded: (
     version: string | null,
     profile?: string | null,

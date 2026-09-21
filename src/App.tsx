@@ -3,7 +3,7 @@ import {
   Puzzle, RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
   TriangleAlert, ChevronDown, CopyPlus, Info, RotateCw, FileText,
-  Pencil, Trash2, ShieldPlus, MoreHorizontal,
+  Pencil, Trash2, ShieldPlus, MoreHorizontal, Rocket, Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
@@ -168,6 +168,57 @@ export default function App() {
   const refreshInstances = useCallback(async () => {
     try { setInstances(await api.listProfileInstances()); } catch { /* ignore */ }
   }, []);
+
+  // ── 首次初始化（dsh 还没生成 $DSH_HOME 时） ────────────────
+  // dsh 的数据目录是「第一次运行 dsh」才生成的；在那之前没有任何 profile，
+  // 基于 profile 的能力（启动实例、快捷配置、插件管理）全都无从下手。
+  // 这里给出一条明确的引导：跑一次 `dsh web`（等价 --profile web）把 dsh 初始化出来。
+  const [initBusy, setInitBusy] = useState(false);
+  const initBusyRef = useRef(false);
+  const doInitDsh = useCallback(async () => {
+    if (initBusyRef.current) return;
+    initBusyRef.current = true;
+    setInitBusy(true);
+    try {
+      const info = await api.initDsh();
+      addToast(
+        "ok",
+        `已启动 dsh 首次初始化（PID ${info.id}）：正在生成数据目录与内置 web profile…`
+      );
+      await refreshInstances();
+      // dsh 写出 profiles/ 需要一两秒：这里补两次重扫，另外空列表期间还有 3 秒轮询兜底
+      window.setTimeout(() => void refreshProfiles(), 1500);
+      window.setTimeout(() => void refreshProfiles(), 4000);
+    } catch (e) {
+      addToast("err", `初始化失败：${e}`);
+    } finally {
+      initBusyRef.current = false;
+      setInitBusy(false);
+    }
+  }, [addToast, refreshInstances, refreshProfiles]);
+
+  // 还没发现任何 profile 时每 3 秒重扫一次：用户可能在终端里自己跑过 `dsh web`，
+  // 或刚点了上面的初始化 —— 界面自己长出来，不必手动点「重扫目录」。
+  useEffect(() => {
+    if (profiles.length > 0) return;
+    const t = setInterval(() => { void refreshProfiles(); }, 3000);
+    return () => clearInterval(t);
+  }, [profiles.length, refreshProfiles]);
+
+  // 首次初始化完成（profiles 从空变有内容）后补上默认 profile：
+  // 否则「启动」按钮没有目标，用户还得自己去下拉框里挑一次。
+  useEffect(() => {
+    if (profiles.length === 0) return;
+    const cur = settingsRef.current;
+    if (!cur || cur.defaultProfile) return;
+    const next = {
+      ...cur,
+      defaultProfile: profiles.find((p) => p.target === "web")?.name ?? profiles[0].name,
+    };
+    setSettings(next);
+    api.saveSettings(next).catch(() => undefined);
+  }, [profiles]);
+
 
   // ── 启动初始化 ──────────────────────────────
   useEffect(() => {
@@ -1065,6 +1116,26 @@ export default function App() {
                 </div>
               )}
 
+              {/* 默认落地页是版本页：装完版本但 dsh 还没初始化时，在这里就把下一步说清楚，
+                  否则用户会停在「装好了却什么都点不了」的状态 */}
+              {installed.length > 0 && profiles.length === 0 && (
+                <Alert>
+                  <TriangleAlert />
+                  <AlertTitle>首次使用还差一步：初始化 dsh</AlertTitle>
+                  <AlertDescription>
+                    dsh 的数据目录（<span className="font-mono">{env?.dshNativeHome ?? "~/.dsh"}</span>
+                    ）是第一次运行 dsh 时才生成的，在那之前 profile、快捷配置、插件管理都不可用。
+                    到「Profile 实例」页点一下「初始化 dsh（首次启动 web）」即可（等价于跑一次{" "}
+                    <span className="font-mono">dsh web</span>）。
+                  </AlertDescription>
+                  <AlertAction>
+                    <Button size="sm" variant="outline" onClick={() => setView("profiles")}>
+                      去初始化
+                    </Button>
+                  </AlertAction>
+                </Alert>
+              )}
+
               {/* 版本表 */}
               {rows.length > 0 && (
                 <Card className="py-0">
@@ -1135,6 +1206,68 @@ export default function App() {
                   <RefreshCw /> 重扫目录
                 </Button>
               </div>
+              {profiles.length === 0 && (
+                <Card className="gap-3 border-primary/25 bg-primary/[0.04] p-4 ring-primary/20">
+                  <div className="flex items-start gap-3">
+                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+                      <Wand2 className="h-4 w-4" />
+                    </span>
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-sm font-semibold">首次使用 dsh：先做一次初始化</h3>
+                        <Badge variant="outline">还没有 profile</Badge>
+                      </div>
+                      <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+                        启动器里的实例、快捷配置、插件管理都建立在{" "}
+                        <span className="font-mono">$DSH_HOME/profiles</span> 之上，而这个目录是{" "}
+                        <strong className="font-medium text-foreground">dsh 第一次运行时</strong>才生成的
+                        —— 也就是说需要先跑一次 <span className="font-mono">dsh web</span>。
+                        它会在 <span className="font-mono">{env?.dshNativeHome ?? "~/.dsh"}</span> 下写出
+                        内置 <span className="font-mono">web</span> profile、配置与凭据文件，之后这里的
+                        所有功能才会就绪。
+                      </p>
+                      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                        <span className="text-muted-foreground">环境</span>
+                        <Badge variant={env?.node ? "info" : "destructive"}>
+                          Node {env?.node ? `v${env.node}` : "未就绪"}
+                        </Badge>
+                        <Badge variant={installed.length > 0 ? "info" : "destructive"}>
+                          dsh {installed.length > 0 ? (settings.activeVersion || installed[0].version) : "未安装"}
+                        </Badge>
+                        <Badge variant={env?.npm ? "secondary" : "outline"}>
+                          npm {env?.npm ?? "未探测到"}
+                        </Badge>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                        {installed.length === 0 ? (
+                          <Button size="sm" onClick={() => setView("versions")}>
+                            <Rocket /> 先去安装 dsh 版本
+                          </Button>
+                        ) : !env?.node ? (
+                          <Button size="sm" onClick={() => setShowSettings(true)}>
+                            <Rocket /> 先准备 Node 运行时
+                          </Button>
+                        ) : (
+                          <Button size="sm" disabled={initBusy} onClick={() => void doInitDsh()}>
+                            {initBusy ? <Loader2 className="animate-spin" /> : <Rocket />}
+                            {initBusy ? "初始化中…" : "初始化 dsh（首次启动 web）"}
+                          </Button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            void refreshProfiles();
+                            void refreshInstances();
+                          }}
+                        >
+                          <RefreshCw /> 我在终端里跑过了，重新检测
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                </Card>
+              )}
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs text-muted-foreground">启动方式</span>
                 <Tabs

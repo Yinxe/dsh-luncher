@@ -178,6 +178,24 @@ pub fn scan_profiles_in(dir: &Path) -> Vec<ProfileInfo> {
 mod tests {
     use super::*;
 
+    /// 首次使用引导的判据：全新机器上 `$DSH_HOME`（乃至 profiles 目录）都不存在，
+    /// 扫描结果必须为空 —— 前端据此显示「初始化 dsh」引导卡，而不是让用户对着
+    /// 空下拉框猜。dsh 第一次运行（`dsh web`）之后同样这个函数才会返回 web profile。
+    #[test]
+    fn fresh_home_has_no_profiles() {
+        let tmp = std::env::temp_dir().join(format!("dsh-nohome-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            scan_profiles_in(&tmp).is_empty(),
+            "不存在的目录不应扫出任何 profile"
+        );
+        // 目录存在但没有 profile 也一样（用户把 profile 全删了）
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(tmp.join("node_modules")).unwrap();
+        assert!(scan_profiles_in(&tmp).is_empty(), "node_modules 不算 profile");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[cfg(unix)]
     #[test]
     fn scan_lists_symlinked_profile_dir_skips_broken_link() {

@@ -14,6 +14,7 @@
   - npm 全局安装（`npm root -g`）；
   - PATH 中的 `dsh` 可执行文件（顺着符号链接解析版本）。
 - **安装 / 卸载 / 重装**：未安装的版本由启动器用 npm 装进自己的数据目录（互不污染全局环境），`--loglevel info` 把每个包的真实 fetch/resolve/extract 过程实时显示在安装卡里，可取消；卸载即删除对应目录。
+- **首次使用引导**：dsh 的数据目录（`$DSH_HOME`，缺省 `~/.dsh`）是**第一次运行 dsh 时**才生成的，在那之前 profile 列表是空的，实例、快捷配置、插件管理全都无从下手。启动器会在装完版本后提示「还差一步」，并在 Profile 实例页给出一张引导卡（含 Node / dsh / npm 就绪状态），一键以 `dsh web`（等价 `--profile web`）完成初始化；dsh 写出 `profiles/web`、配置与凭据文件后，profile 列表与默认 profile 会自动就位。
 - **内嵌启动（默认）**：「启动」把 dsh 作为启动器的**子进程**运行——日志实时显示在底部进程面板（多实例 tab、运行时长、停止按钮），**退出启动器即结束所有 dsh 进程**；也可点「终端」在独立系统终端中启动（交互式 TUI 场景，不受启动器生命周期管理）。**每个 profile 同时只能运行一个实例**（内嵌与终端启动都受约束），Profile 选择器默认选中 `web`（不存在则取第一个），不提供“默认 profile”空选项。
 - **Node 运行时预装**：宿主机没有 Node/npm 时，一键下载 Node LTS 安装到 `~/.dsh-launcher/runtime/`（用户级、无需 root、不污染系统），下载默认走 npmmirror 镜像站（设置中可换 aliyun 等），npm registry 在设置中配置。
 - **选择启动**：任意已安装版本一键在**新的系统终端窗口**中启动对应版本的 `dsh`（用绝对 node + bin.js 启动，不依赖 PATH）；支持 **profile**：顶栏下拉框列出 `$DSH_HOME/profiles`（缺省 `~/.dsh/profiles`，兼容单数 `profile/`）下的所有 profile（自动跳过 `node_modules`），选中即以 `dsh --profile <名字>` 启动并可保存为默认，留空则不带 `--profile` 走 dsh 默认。可设置默认附加参数（如 `--preset qqbot`）。

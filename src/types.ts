@@ -54,6 +54,8 @@ export interface EnvironmentInfo {
   runtimeInstalled: boolean;
   runtimeDir: string;
   logsDir: string;
+  /** dsh 是否已初始化过（$DSH_HOME/profiles 里有没有 profile） */
+  dshInitialized: boolean;
 }
 
 export interface Settings {
