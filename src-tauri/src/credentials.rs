@@ -14,6 +14,8 @@ pub fn credentials_path() -> PathBuf {
 pub struct CredentialRef {
     pub name: String,
     pub value: String,
+    /// 键正上方那一行注释（`# …` 去掉 `#` 后的内容）；没有注释就是 None
+    pub note: Option<String>,
 }
 
 /// 写入载荷（Tauri command 入参）
@@ -21,6 +23,9 @@ pub struct CredentialRef {
 pub struct CredentialRefInput {
     pub name: String,
     pub value: String,
+    /// 注释：Some 时写成键上方的一行 `# 注释`，None 时若原有注释行则删掉它
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// records 里的一条内部凭据记录（dsh 自管理，启动器只读展示）
@@ -63,6 +68,7 @@ pub fn read() -> Result<CredentialFile, String> {
     }
     let doc: serde_yaml::Value =
         serde_yaml::from_str(&raw).map_err(|e| format!("凭据文件解析失败: {e}"))?;
+    let notes = read_ref_notes(&raw);
     out.version = doc.get("version").and_then(|v| v.as_i64());
     if let Some(m) = doc.get("refs").and_then(|v| v.as_mapping()) {
         for (k, v) in m {
@@ -78,6 +84,7 @@ pub fn read() -> Result<CredentialFile, String> {
             out.refs.push(CredentialRef {
                 name: name.to_string(),
                 value,
+                note: notes.get(name).cloned(),
             });
         }
     }
@@ -108,9 +115,13 @@ pub fn read() -> Result<CredentialFile, String> {
     Ok(out)
 }
 
-/// 整表保存 refs：结构化重写整个文件，其余顶层键（records / version 等）原样保留。
-/// refs 保留原文件的键序（存留条目按原位、新增条目按传入顺序追加）；写前备份，
+/// 整表保存 refs：**逐行改写**文件中 refs 块（块外的 records / version / 未知键，
+/// 以及它们自己的注释，全部逐字节保留）。refs 保留原文件的键序（存留条目按原位、
+/// 新增条目按传入顺序追加）；每个条目的注释写成它上方的一行 `# 注释`。写前备份，
 /// 写后收紧权限（去除 group/other 位）。
+///
+/// 为什么不再用 serde_yaml 整篇序列化：那会丢光文件里所有注释 —— 而注释正是这里要
+/// 维护的东西（键上方那行注释就是这条凭据的说明）。
 pub fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
     for it in items {
@@ -130,6 +141,11 @@ pub fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
         if it.value.len() > 64 * 1024 {
             return Err(format!("凭据 {name} 的值过长（> 64KB）"));
         }
+        if let Some(note) = &it.note {
+            if note.chars().count() > 500 {
+                return Err(format!("凭据 {name} 的注释过长（> 500 字）"));
+            }
+        }
     }
 
     let path = credentials_path();
@@ -140,50 +156,16 @@ pub fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("读取凭据文件失败，已拒绝写入以免覆盖现有凭据：{e}")),
     };
-    let mut doc: serde_yaml::Value = if raw.trim().is_empty() {
-        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-    } else {
-        serde_yaml::from_str(&raw).map_err(|e| format!("凭据文件解析失败，拒绝写入: {e}"))?
-    };
-    let map = doc
-        .as_mapping_mut()
-        .ok_or("凭据文件顶层不是映射，拒绝写入")?;
-
-    let mut refs = serde_yaml::Mapping::new();
-    if let Some(old) = map.get("refs").and_then(|v| v.as_mapping()) {
-        for (k, v) in old {
-            match k.as_str() {
-                // 存留条目按原顺序写入新值；未出现的 = 已删除，跳过
-                Some(name) => {
-                    if let Some(it) = items.iter().find(|it| it.name.trim() == name) {
-                        refs.insert(k.clone(), serde_yaml::Value::String(it.value.clone()));
-                    }
-                }
-                // 非字符串键不属于 refs 管理，原样保留避免静默丢数据
-                None => {
-                    refs.insert(k.clone(), v.clone());
-                }
-            }
+    if !raw.trim().is_empty() {
+        // 先整体校验一遍：顶层必须是映射、语法必须合法，否则拒绝写入
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(&raw).map_err(|e| format!("凭据文件解析失败，拒绝写入: {e}"))?;
+        if doc.as_mapping().is_none() {
+            return Err("凭据文件顶层不是映射，拒绝写入".into());
         }
     }
-    for it in items {
-        let key = serde_yaml::Value::String(it.name.trim().to_string());
-        if refs.get(&key).is_none() {
-            refs.insert(key, serde_yaml::Value::String(it.value.clone()));
-        }
-    }
-    map.insert(
-        serde_yaml::Value::String("refs".into()),
-        serde_yaml::Value::Mapping(refs),
-    );
-    if map.get("version").is_none() {
-        map.insert(
-            serde_yaml::Value::String("version".into()),
-            serde_yaml::Value::Number(serde_yaml::Number::from(1)),
-        );
-    }
 
-    let out = serde_yaml::to_string(&doc).map_err(|e| format!("序列化失败: {e}"))?;
+    let out = rewrite_refs_block(&raw, items)?;
     crate::profile_cfg::backup(&path)?;
     std::fs::create_dir_all(
         path.parent()
@@ -205,6 +187,343 @@ pub fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
     Ok(())
 }
 
+// ── refs 块的注释读写 ───────────────────────────────────────────────
+//
+// 约定（与用户看到的界面一致）：**键正上方那一行 `# 注释` 就是这条凭据的注释**。
+// 连续多行注释只取最后一行（更上面的常常是「这一组是什么」的小节注释），
+// 那些行原样留在文件里、不参与编辑。
+
+/// 顶层键名（`refs:` / `"refs":` → refs）；缩进行、注释行、非映射行返回 None
+fn top_level_key(line: &str) -> Option<String> {
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return None;
+    }
+    let t = line.trim_end();
+    if t.is_empty() || t.starts_with('#') {
+        return None;
+    }
+    let (k, _) = t.split_once(':')?;
+    let k = k.trim().trim_matches(|c| c == '"' || c == '\'');
+    if k.is_empty() {
+        None
+    } else {
+        Some(k.to_string())
+    }
+}
+
+/// 缩进宽度（tab 记 1，够用：只用来比较层级）
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start_matches([' ', '\t']).len()
+}
+
+/// 一行是不是注释
+fn is_comment(line: &str) -> bool {
+    line.trim_start().starts_with('#')
+}
+
+/// 取注释内容（去掉 `#` 与前导空格）
+fn comment_text(line: &str) -> String {
+    line.trim_start().trim_start_matches('#').trim().to_string()
+}
+
+/// 块内一个条目的键：优先用 YAML 解析（能处理带引号的键），失败再退回「第一个冒号前」
+fn entry_key(line: &str) -> Option<String> {
+    let t = line.trim_end();
+    if t.trim().is_empty() || is_comment(t) {
+        return None;
+    }
+    if let Ok(serde_yaml::Value::Mapping(m)) = serde_yaml::from_str::<serde_yaml::Value>(t) {
+        if m.len() == 1 {
+            if let Some(k) = m.keys().next().and_then(|k| k.as_str()) {
+                return Some(k.to_string());
+            }
+            return None; // 非字符串键：交给调用方按「不管理」处理
+        }
+    }
+    let (k, _) = t.split_once(':')?;
+    Some(k.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+}
+
+/// 定位顶层 `refs:` 块：[块首行号（含 refs: 那一行）, 块尾行号（不含）]。
+/// 块尾 = 下一个顶层键之前（顶层注释会先探一眼：后面跟的是顶层键就说明它属于块外）。
+fn refs_block_bounds(lines: &[&str]) -> Option<(usize, usize)> {
+    let start = lines
+        .iter()
+        .position(|l| top_level_key(l).as_deref() == Some("refs"))?;
+    let mut end = start + 1;
+    while end < lines.len() {
+        let l = lines[end];
+        if l.trim().is_empty() {
+            // 空行：只有当它后面还是块内内容时才算块内，否则留给块外（别把分隔空行吃掉）
+            let mut j = end;
+            while j < lines.len() && lines[j].trim().is_empty() {
+                j += 1;
+            }
+            match lines.get(j) {
+                Some(next) if indent_of(next) > 0 || is_comment(next) => end = j,
+                _ => break,
+            }
+            continue;
+        }
+        if indent_of(l) > 0 {
+            end += 1;
+            continue;
+        }
+        if is_comment(l) {
+            // 顶层注释：往后看第一个非注释非空行 —— 是顶层键就属于块外
+            let mut j = end + 1;
+            while j < lines.len() && (lines[j].trim().is_empty() || is_comment(lines[j])) {
+                j += 1;
+            }
+            if j < lines.len() && indent_of(lines[j]) == 0 && !is_comment(lines[j]) {
+                break;
+            }
+            end = j;
+            continue;
+        }
+        break;
+    }
+    Some((start, end))
+}
+
+/// 读出每个 ref 键正上方那一行注释（键 → 注释文本）
+fn read_ref_notes(raw: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let lines: Vec<&str> = raw.lines().collect();
+    let Some((start, end)) = refs_block_bounds(&lines) else {
+        return out;
+    };
+    // 条目缩进 = 块内第一个非空非注释行的缩进；只有这个缩进的行才算条目，
+    // 更深的是上一项的多行值（如证书块），不参与
+    let entry_indent = lines[start + 1..end]
+        .iter()
+        .find(|l| !l.trim().is_empty() && !is_comment(l))
+        .map(|l| indent_of(l));
+    let Some(entry_indent) = entry_indent else {
+        return out;
+    };
+    for i in start + 1..end {
+        let line = lines[i];
+        if line.trim().is_empty() || is_comment(line) || indent_of(line) != entry_indent {
+            continue;
+        }
+        let Some(key) = entry_key(line) else { continue };
+        // 「上一行是注释」才是注释：空行、更深缩进的续行都不算
+        let prev = i.checked_sub(1).map(|p| lines[p]).filter(|p| is_comment(p));
+        if let Some(p) = prev {
+            let text = comment_text(p);
+            if !text.is_empty() {
+                out.insert(key, text);
+            }
+        }
+    }
+    out
+}
+
+/// 生成 refs 块内容（不含 `refs:` 那一行）：注释 + 条目，块内其它内容按原样保留
+fn regenerate_refs_block(lines: &[&str], items: &[CredentialRefInput]) -> Result<String, String> {
+    let (start, end) = refs_block_bounds(lines).ok_or("内部错误：找不到 refs 块")?;
+    let body = &lines[start + 1..end];
+    let entry_indent = body
+        .iter()
+        .find(|l| !l.trim().is_empty() && !is_comment(l))
+        .map(|l| indent_of(l))
+        .unwrap_or(2);
+    let indent = " ".repeat(entry_indent);
+
+    // 把块体切成「每个条目 + 它前面那些不属于注释的原始行」
+    struct Entry {
+        key: Option<String>,     // None = 非字符串键 / 解析不出，原样保留
+        raw: Vec<String>,        // 条目自身的行（含多行值的续行）
+        pre: Vec<String>,        // 条目之前、不属于注释的原始行（空行、更上层的小节注释）
+        note_line: Option<usize>, // pre 里属于「本条目注释」的那一行下标
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        let line = body[i];
+        if line.trim().is_empty() || is_comment(line) || indent_of(line) != entry_indent {
+            pending.push(line.to_string());
+            i += 1;
+            continue;
+        }
+        let key = entry_key(line);
+        // 只有「紧邻的上一行是注释」才算这个条目的注释
+        let note_line = pending
+            .last()
+            .filter(|l| is_comment(l))
+            .map(|_| pending.len() - 1);
+        let mut raw = vec![line.to_string()];
+        i += 1;
+        while i < body.len() {
+            let l = body[i];
+            if l.trim().is_empty() || indent_of(l) > entry_indent {
+                raw.push(l.to_string());
+                i += 1;
+                continue;
+            }
+            break;
+        }
+        entries.push(Entry { key, raw, pre: std::mem::take(&mut pending), note_line });
+    }
+    // 末尾剩下的行（块尾的空行/注释）原样挂在最后一个条目后面
+    let trailing = std::mem::take(&mut pending);
+
+    let note_of = |it: &CredentialRefInput| -> Option<String> {
+        it.note
+            .as_deref()
+            .map(|n| n.trim().trim_start_matches('#').trim().replace(['\n', '\r'], " "))
+            .filter(|n| !n.is_empty())
+    };
+
+    let mut out = String::new();
+    let mut emitted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in &entries {
+        let managed = e.key.as_ref().and_then(|k| items.iter().find(|it| it.name.trim() == k));
+        let Some(it) = managed else {
+            // 已删除的条目：只丢掉它自己（连同它的注释行），上方的小节注释 / 空行留给后面
+            if e.key.is_some() {
+                for (idx, l) in e.pre.iter().enumerate() {
+                    if Some(idx) != e.note_line {
+                        out.push_str(l);
+                        out.push('\n');
+                    }
+                }
+                continue;
+            }
+            // 非字符串键等无法管理的行：原样保留（连注释一起）
+            for l in e.pre.iter().chain(e.raw.iter()) {
+                out.push_str(l);
+                out.push('\n');
+            }
+            continue;
+        };
+        let _ = managed;
+        emitted.insert(it.name.trim().to_string());
+        for (idx, l) in e.pre.iter().enumerate() {
+            if Some(idx) != e.note_line {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        if let Some(n) = note_of(it) {
+            out.push_str(&indent);
+            out.push_str("# ");
+            out.push_str(&n);
+            out.push('\n');
+        }
+        out.push_str(&indent);
+        out.push_str(&yaml_key(it.name.trim()));
+        out.push_str(": ");
+        push_scalar(&mut out, &indent, &it.value);
+        out.push('\n');
+    }
+    // 新增条目：按传入顺序追加
+    for it in items {
+        let name = it.name.trim().to_string();
+        if emitted.contains(&name) {
+            continue;
+        }
+        emitted.insert(name.clone());
+        if let Some(n) = note_of(it) {
+            out.push_str(&indent);
+            out.push_str("# ");
+            out.push_str(&n);
+            out.push('\n');
+        }
+        out.push_str(&indent);
+        out.push_str(&yaml_key(&name));
+        out.push_str(": ");
+        push_scalar(&mut out, &indent, &it.value);
+        out.push('\n');
+    }
+    for l in &trailing {
+        out.push_str(l);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// 键的 YAML 写法：安全字符裸写，其余加单引号
+fn yaml_key(name: &str) -> String {
+    if !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./@+".contains(c))
+    {
+        name.to_string()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
+}
+
+/// 值的 YAML 写法（交给 serde_yaml 处理引号 / 转义；多行值会得到块标量）
+fn yaml_scalar(value: &str) -> String {
+    let s = serde_yaml::to_string(&serde_yaml::Value::String(value.to_string())).unwrap_or_default();
+    s.trim_end_matches('\n').to_string()
+}
+
+/// 把标量写进 out：多行值（serde 给的是 `|-` 块标量，续行自带 2 空格）
+/// 的续行还要再套一层条目缩进，否则缩进深度不超过键、YAML 直接解析失败
+fn push_scalar(out: &mut String, indent: &str, value: &str) {
+    let scalar = yaml_scalar(value);
+    let mut lines = scalar.split('\n');
+    out.push_str(lines.next().unwrap_or(""));
+    for l in lines {
+        out.push('\n');
+        out.push_str(indent);
+        out.push_str(l);
+    }
+}
+
+/// 把新的 refs 块拼回原文：块外内容逐字节保留；文件里还没有 refs 块就补一个。
+fn rewrite_refs_block(raw: &str, items: &[CredentialRefInput]) -> Result<String, String> {
+    let had_trailing_newline = raw.is_empty() || raw.ends_with('\n');
+    let lines: Vec<&str> = raw.lines().collect();
+
+    let Some((start, end)) = refs_block_bounds(&lines) else {
+        // 没有 refs 块：追加一个（保留原有内容，并在需要时补 version）
+        let mut out = raw.to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.is_empty() && !out.trim_end().is_empty() {
+            out.push('\n');
+        }
+        out.push_str("refs:\n");
+        out.push_str(&regenerate_refs_block(&["refs:"], items)?);
+        if top_level_key_of_doc(&lines, "version").is_none() {
+            out.push_str("version: 1\n");
+        }
+        return Ok(out);
+    };
+
+    let block = regenerate_refs_block(&lines, items)?;
+    let mut out = String::new();
+    for l in &lines[..start] {
+        out.push_str(l);
+        out.push('\n');
+    }
+    out.push_str("refs:\n");
+    out.push_str(&block);
+    for l in &lines[end..] {
+        out.push_str(l);
+        out.push('\n');
+    }
+    if !had_trailing_newline {
+        out.pop();
+    }
+    Ok(out)
+}
+
+/// 文档里有没有某个顶层键（用于决定要不要补 version）
+fn top_level_key_of_doc(lines: &[&str], key: &str) -> Option<usize> {
+    lines
+        .iter()
+        .position(|l| top_level_key(l).as_deref() == Some(key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +541,7 @@ mod tests {
             .map(|(n, v)| CredentialRefInput {
                 name: n.to_string(),
                 value: v.to_string(),
+                note: None,
             })
             .collect()
     }
@@ -406,6 +726,7 @@ mod tests {
             .map(|r| CredentialRefInput {
                 name: r.name.clone(),
                 value: r.value.clone(),
+                note: r.note.clone(),
             })
             .collect();
         write_refs(&items).unwrap();
@@ -418,6 +739,218 @@ mod tests {
         assert_eq!(after.version, before.version, "version 不应被改写");
         // records 条目数量保持
         assert_eq!(after.records.len(), before.records.len());
+        // 注释也要逐条对上（真实文件里就有 `#LLM PROVIDER API KEY` 这类注释）
+        for (b, a) in before.refs.iter().zip(after.refs.iter()) {
+            assert_eq!(b.note, a.note, "「{}」的注释回写后应保持不变", b.name);
+        }
+        // 块外的注释（records 上方的说明等）必须还在
+        let raw_after = std::fs::read_to_string(&dir).unwrap();
+        let norm = |s: &str| s.trim_start().trim_start_matches('#').trim().to_string();
+        let after_comments: Vec<String> = raw_after.lines().filter(|l| is_comment(l)).map(norm).collect();
+        for line in real_raw.lines().filter(|l| is_comment(l)) {
+            let want = norm(line);
+            assert!(
+                after_comments.contains(&want),
+                "注释内容丢失：「{want}」不在回写结果里"
+            );
+        }
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// 注释读取：键正上方那一行注释才是注释；连续多行只取最后一行；
+    /// 空行隔开的、以及本来就没有注释的，都是 None
+    #[test]
+    fn read_picks_comment_directly_above_key() {
+        let raw = "\
+refs:
+  #LLM PROVIDER API KEY
+  A: a-value
+  # 与键之间隔了空行，不算注释
+
+  B: b-value
+  # 这一组是什么（小节注释）
+  # B 的说明
+  C: c-value
+  D: d-value
+records:
+  # records 里的注释不该被当成 refs 的
+  k:
+    kind: token
+";
+        let notes = read_ref_notes(raw);
+        assert_eq!(notes.get("A").map(String::as_str), Some("LLM PROVIDER API KEY"));
+        assert_eq!(notes.get("B"), None, "空行隔开的不算注释");
+        assert_eq!(notes.get("C").map(String::as_str), Some("B 的说明"));
+        assert_eq!(notes.get("D"), None, "没有注释就是 None");
+        assert!(!notes.contains_key("k"), "records 里的注释不属于 refs");
+    }
+
+    /// 注释写入：Some → 键上方一行 `# 注释`；None → 删掉原来那行，但不动更上面的小节注释
+    #[test]
+    fn write_emits_and_updates_note_comment() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp_home("notes");
+        std::env::set_var("DSH_HOME", &tmp);
+        let dir = credentials_path();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::write(
+            &dir,
+            "refs:\n\
+             \x20 # 这一组是什么（小节注释）\n\
+             \x20 # A 的旧说明\n\
+             \x20 A: old-a\n\
+             \x20 B: old-b\n\
+             records:\n\
+             \x20 # 记录段的注释\n\
+             \x20 k:\n\
+             \x20   kind: token\n",
+        )
+        .unwrap();
+
+        // A 改注释、B 补注释、C 新增带注释
+        write_refs(&[
+            CredentialRefInput { name: "A".into(), value: "new-a".into(), note: Some("A 的新说明".into()) },
+            CredentialRefInput { name: "B".into(), value: "old-b".into(), note: Some("B 的说明".into()) },
+            CredentialRefInput { name: "C".into(), value: "c".into(), note: Some("C 的说明".into()) },
+        ])
+        .unwrap();
+        let raw = std::fs::read_to_string(&dir).unwrap();
+        assert!(raw.contains("  # 这一组是什么（小节注释）\n"), "小节注释要留着：\n{raw}");
+        assert!(raw.contains("  # A 的新说明\n  A: new-a\n"), "{raw}");
+        assert!(!raw.contains("A 的旧说明"), "旧注释被替换：\n{raw}");
+        assert!(raw.contains("  # B 的说明\n  B: old-b\n"), "{raw}");
+        assert!(raw.contains("  # C 的说明\n  C: c\n"), "新增条目带注释：\n{raw}");
+        assert!(raw.contains("  # 记录段的注释\n"), "块外注释不能被吃掉：\n{raw}");
+
+        // 读回来注释一致
+        let info = read().unwrap();
+        let get = |n: &str| info.refs.iter().find(|r| r.name == n).unwrap().note.clone();
+        assert_eq!(get("A").as_deref(), Some("A 的新说明"));
+        assert_eq!(get("B").as_deref(), Some("B 的说明"));
+        assert_eq!(get("C").as_deref(), Some("C 的说明"));
+
+        // 清空 B 的注释 → 那一行 comment 被删掉（A/C 不受影响）
+        write_refs(&[
+            CredentialRefInput { name: "A".into(), value: "new-a".into(), note: Some("A 的新说明".into()) },
+            CredentialRefInput { name: "B".into(), value: "old-b".into(), note: None },
+            CredentialRefInput { name: "C".into(), value: "c".into(), note: None },
+        ])
+        .unwrap();
+        let raw = std::fs::read_to_string(&dir).unwrap();
+        assert!(!raw.contains("B 的说明"), "清空后注释行应删除：\n{raw}");
+        assert!(!raw.contains("C 的说明"), "{raw}");
+        assert!(raw.contains("  B: old-b\n"), "{raw}");
+        assert!(raw.contains("  # A 的新说明\n  A: new-a\n"), "{raw}");
+
+        // 删除 A：它的注释跟着走，小节注释与 records 都留下
+        write_refs(&[CredentialRefInput { name: "B".into(), value: "old-b".into(), note: None }]).unwrap();
+        let raw = std::fs::read_to_string(&dir).unwrap();
+        assert!(!raw.contains("A: new-a"), "{raw}");
+        assert!(raw.contains("  # 这一组是什么（小节注释）\n"), "{raw}");
+        assert!(raw.contains("  # 记录段的注释\n"), "{raw}");
+        assert_eq!(read().unwrap().refs.len(), 1);
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// 注释里的 `#`、值里的 `: ` / `#` / 多行内容都要能安全往返
+    #[test]
+    fn write_roundtrips_tricky_values_and_notes() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp_home("tricky");
+        std::env::set_var("DSH_HOME", &tmp);
+        let dir = credentials_path();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+
+        let pem = "-----BEGIN KEY-----\nline-2\n-----END KEY-----";
+        let items = vec![
+            CredentialRefInput {
+                name: "URL".into(),
+                value: "https://example.com/path?a=b#frag".into(),
+                note: Some("带 # 的注释：https://example.com".into()),
+            },
+            CredentialRefInput {
+                name: "PEM".into(),
+                value: pem.into(),
+                note: Some("多行值（证书）".into()),
+            },
+            CredentialRefInput {
+                name: "EMPTY".into(),
+                value: String::new(),
+                note: None,
+            },
+        ];
+        write_refs(&items).unwrap();
+
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&dir).unwrap()).unwrap();
+        assert_eq!(
+            parsed.get("refs").and_then(|r| r.get("URL")).and_then(|v| v.as_str()),
+            Some("https://example.com/path?a=b#frag"),
+            "值里的 # 不能被当成注释"
+        );
+        assert_eq!(
+            parsed.get("refs").and_then(|r| r.get("PEM")).and_then(|v| v.as_str()),
+            Some(pem)
+        );
+
+        let info = read().unwrap();
+        let url = info.refs.iter().find(|r| r.name == "URL").unwrap();
+        assert_eq!(url.note.as_deref(), Some("带 # 的注释：https://example.com"));
+        assert_eq!(url.value, "https://example.com/path?a=b#frag");
+        let pem_ref = info.refs.iter().find(|r| r.name == "PEM").unwrap();
+        assert_eq!(pem_ref.value, pem);
+        assert_eq!(pem_ref.note.as_deref(), Some("多行值（证书）"));
+        assert_eq!(info.refs.iter().find(|r| r.name == "EMPTY").unwrap().note, None);
+
+        // 原样再存一次：内容不变（幂等）
+        let again: Vec<CredentialRefInput> = info
+            .refs
+            .iter()
+            .map(|r| CredentialRefInput { name: r.name.clone(), value: r.value.clone(), note: r.note.clone() })
+            .collect();
+        write_refs(&again).unwrap();
+        let info2 = read().unwrap();
+        for (a, b) in info.refs.iter().zip(info2.refs.iter()) {
+            assert_eq!((&a.name, &a.value, &a.note), (&b.name, &b.value, &b.note));
+        }
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// 文件里还没有 refs 块（或只有 records）时补一个，且不动既有注释
+    #[test]
+    fn write_appends_refs_block_when_missing() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp_home("missing-block");
+        std::env::set_var("DSH_HOME", &tmp);
+        let dir = credentials_path();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::write(
+            &dir,
+            "# 顶部说明\nversion: 1\nrecords:\n  # 记录\n  k:\n    kind: token\n",
+        )
+        .unwrap();
+
+        write_refs(&[CredentialRefInput {
+            name: "NEW".into(),
+            value: "v".into(),
+            note: Some("新凭据".into()),
+        }])
+        .unwrap();
+        let raw = std::fs::read_to_string(&dir).unwrap();
+        assert!(raw.contains("# 顶部说明"), "{raw}");
+        assert!(raw.contains("version: 1"), "{raw}");
+        assert!(!raw.contains("version: 1\nversion"), "不该重复补 version：\n{raw}");
+        assert!(raw.contains("# 记录"), "{raw}");
+        let info = read().unwrap();
+        assert_eq!(info.refs.len(), 1);
+        assert_eq!(info.refs[0].note.as_deref(), Some("新凭据"));
+        assert_eq!(info.records.len(), 1);
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");

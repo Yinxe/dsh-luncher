@@ -542,11 +542,12 @@ export default function ModelConfigView({ onToast }: Props) {
         .filter((e) => e.name !== "" && e.value !== "");
       if (upserts.length > 0) {
         const creds = await api.getCredentials();
-        const refs = creds.refs.map((r) => ({ name: r.name, value: r.value }));
+        // 注释必须原样带上：凭据写的是整表，漏掉 note 等于把用户写的注释全删了
+        const refs = creds.refs.map((r) => ({ name: r.name, value: r.value, note: r.note }));
         for (const e of upserts) {
           const hit = refs.find((r) => r.name === e.name);
           if (hit) hit.value = e.value;
-          else refs.push({ name: e.name, value: e.value });
+          else refs.push({ name: e.name, value: e.value, note: null });
         }
         await api.writeCredentialRefs(refs);
       }

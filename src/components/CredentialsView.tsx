@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Copy, Eye, EyeOff, FolderOpen, KeyRound, Loader2, Pencil, Plus, RotateCcw, Save, Trash2,
+  Copy, Eye, EyeOff, FolderOpen, KeyRound, Loader2, MessageSquare, Pencil, Plus, RotateCcw, Save,
+  Trash2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,7 +29,16 @@ function validName(n: string): boolean {
   return n.length > 0 && n.length <= 128 && !/[\s\u0000-\u001f\u007f]/.test(n);
 }
 
-/** 管理 $DSH_HOME/.credentials.yaml：表格只列 key（名称），值仅在详情/编辑弹窗中显示 */
+/**
+ * 注释规范化：去掉首尾空白与开头的 `#`（用户可能顺手带上），空串 = 没有注释。
+ * 换行会被压成空格 —— 注释在文件里是**一行** `# …`，多行会把 YAML 注释块撑坏。
+ */
+function normalizeNote(n: string): string | null {
+  const t = n.replace(/\s+/g, " ").trim().replace(/^#+\s*/, "").trim();
+  return t === "" ? null : t;
+}
+
+/** 管理 $DSH_HOME/.credentials.yaml：表格列 key（名称）+ 注释，值仅在详情/编辑弹窗中显示 */
 export default function CredentialsView({ onToast }: Props) {
   const [data, setData] = useState<CredentialFile | null>(null);
   const [refs, setRefs] = useState<CredentialRef[]>([]);
@@ -44,6 +54,11 @@ export default function CredentialsView({ onToast }: Props) {
   const [detailRevealed, setDetailRevealed] = useState(false);
   const [editName, setEditName] = useState("");
   const [editValue, setEditValue] = useState("");
+  const [editNote, setEditNote] = useState("");
+  const [addNote, setAddNote] = useState("");
+  /** 列表里就地编辑注释：editNoteRow 非空即该行在编辑 */
+  const [editNoteRow, setEditNoteRow] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
 
   const dirty = useMemo(() => JSON.stringify(refs) !== baseline, [refs, baseline]);
 
@@ -98,10 +113,10 @@ export default function CredentialsView({ onToast }: Props) {
   const confirmAdd = useCallback(() => {
     const name = addName.trim();
     if (!validName(name) || refs.some((r) => r.name === name)) return;
-    setRefs((rs) => [...rs, { name, value: addValue }]);
+    setRefs((rs) => [...rs, { name, value: addValue, note: normalizeNote(addNote) }]);
     setAddOpen(false);
     onToast("info", `已添加「${name}」，点「保存」写入文件`);
-  }, [addName, addValue, refs, onToast]);
+  }, [addName, addValue, addNote, refs, onToast]);
 
   const openDetail = useCallback((name: string) => {
     setDetailName(name);
@@ -114,6 +129,7 @@ export default function CredentialsView({ onToast }: Props) {
     if (!cur) return;
     setEditName(cur.name);
     setEditValue(cur.value);
+    setEditNote(cur.note ?? "");
     setDetailMode("edit");
   }, [refs, detailName]);
 
@@ -122,15 +138,24 @@ export default function CredentialsView({ onToast }: Props) {
     if (!oldName) return;
     const name = editName.trim();
     if (!validName(name) || refs.some((r) => r.name === name && r.name !== oldName)) return;
-    setRefs((rs) => rs.map((r) => (r.name === oldName ? { name, value: editValue } : r)));
+    setRefs((rs) =>
+      rs.map((r) => (r.name === oldName ? { name, value: editValue, note: normalizeNote(editNote) } : r))
+    );
     setDetailName(null);
     onToast(
       "info",
       name === oldName
-        ? `已修改「${name}」的值，点「保存」写入文件`
+        ? `已修改「${name}」，点「保存」写入文件`
         : `已重命名为「${name}」，点「保存」写入文件`
     );
-  }, [detailName, editName, editValue, refs, onToast]);
+  }, [detailName, editName, editValue, editNote, refs, onToast]);
+
+  /** 列表里就地改注释：空字符串 = 不要注释（保存时会删掉那行 `# …`） */
+  const commitNote = useCallback((name: string) => {
+    const next = normalizeNote(noteDraft);
+    setRefs((rs) => rs.map((r) => (r.name === name ? { ...r, note: next } : r)));
+    setEditNoteRow(null);
+  }, [noteDraft]);
 
   const copyText = useCallback(async (text: string, label: string) => {
     try {
@@ -190,6 +215,9 @@ export default function CredentialsView({ onToast }: Props) {
         <span className="font-mono text-foreground">refs</span>
         {" "}是各处以名字引用的 API Key / 令牌（如 DEEPSEEK_API_KEY、QQ_APP_SECRET），支持增删改，
         列表只显示名称，值仅在「详情 / 编辑」弹窗中可见；
+        <span className="text-foreground">注释</span>
+        {" "}取自文件里键<b className="font-semibold text-foreground">正上方那一行</b>注释（<span className="font-mono"># …</span>），
+        可以在列表里直接点着改：填内容就会写成键上方的一行注释，清空则删掉那一行；
         <span className="font-mono text-foreground">records</span>
         {" "}是 dsh 内部会话凭据（如 web 连接密钥），由 dsh 自行维护，此处只读展示。
         保存为整表覆写 refs，records / version 等其余内容原样保留；写前自动备份（仅保留一份），
@@ -216,7 +244,7 @@ export default function CredentialsView({ onToast }: Props) {
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => { setAddName(""); setAddValue(""); setAddOpen(true); }}
+                onClick={() => { setAddName(""); setAddValue(""); setAddNote(""); setAddOpen(true); }}
               >
                 <Plus /> 添加凭据
               </Button>
@@ -226,6 +254,9 @@ export default function CredentialsView({ onToast }: Props) {
                 <TableHeader>
                   <TableRow className="bg-muted/40 hover:bg-muted/40">
                     <TableHead className="h-9 pl-4 text-[10.5px] uppercase tracking-wider">名称</TableHead>
+                    <TableHead className="h-9 text-[10.5px] uppercase tracking-wider">
+                      注释（键上方那一行）
+                    </TableHead>
                     <TableHead className="h-9 text-[10.5px] uppercase tracking-wider">长度</TableHead>
                     <TableHead className="h-9 pr-4 text-right text-[10.5px] uppercase tracking-wider">操作</TableHead>
                   </TableRow>
@@ -242,6 +273,48 @@ export default function CredentialsView({ onToast }: Props) {
                         >
                           <span className="truncate">{r.name}</span>
                         </Button>
+                      </TableCell>
+                      <TableCell className="max-w-[380px] min-w-[180px]">
+                        {editNoteRow === r.name ? (
+                          <Input
+                            autoFocus
+                            className="h-7 text-[11.5px]"
+                            placeholder="留空 = 不要注释"
+                            value={noteDraft}
+                            onChange={(e) => setNoteDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                commitNote(r.name);
+                              } else if (e.key === "Escape") {
+                                e.preventDefault();
+                                setEditNoteRow(null);
+                              }
+                            }}
+                            onBlur={() => commitNote(r.name)}
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            className="group/note flex h-6 w-full max-w-full items-center gap-1.5 rounded px-1.5 text-left transition-colors hover:bg-muted/60"
+                            title={
+                              r.note
+                                ? `${r.note}\n\n点击修改（清空即删掉这行注释）`
+                                : "点击添加注释：会写成这个键上方的一行注释"
+                            }
+                            onClick={() => {
+                              setEditNoteRow(r.name);
+                              setNoteDraft(r.note ?? "");
+                            }}
+                          >
+                            {r.note ? (
+                              <span className="truncate text-[11.5px] leading-relaxed">{r.note}</span>
+                            ) : (
+                              <span className="text-[11.5px] text-muted-foreground/60">添加注释…</span>
+                            )}
+                            <Pencil className="ml-auto size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/note:opacity-70" />
+                          </button>
+                        )}
                       </TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
                         {r.value.length > 0 ? `${r.value.length} 字符` : "空"}
@@ -283,7 +356,8 @@ export default function CredentialsView({ onToast }: Props) {
               </Table>
             ) : (
               <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-                暂无凭据——点「添加凭据」新建（名称即凭据的引用键，如 DEEPSEEK_API_KEY）
+                暂无凭据——点「添加凭据」新建（名称即凭据的引用键，如 DEEPSEEK_API_KEY；注释可选，
+                会写成该键上方的一行注释）
               </div>
             )}
           </Card>
@@ -347,6 +421,17 @@ export default function CredentialsView({ onToast }: Props) {
                 </DialogTitle>
                 <DialogDescription>凭据详情：值默认隐藏，可显示明文或直接复制。</DialogDescription>
               </DialogHeader>
+              {current.note && (
+                <div className="flex items-start gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-2">
+                  <MessageSquare className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[11px] text-muted-foreground">
+                      注释（写在 <span className="font-mono">{current.name}</span> 上方那一行）
+                    </div>
+                    <div className="text-[12.5px] leading-relaxed break-words">{current.note}</div>
+                  </div>
+                </div>
+              )}
               <div className="space-y-1.5">
                 <div className="text-[11.5px] text-muted-foreground">值 · {current.value.length} 字符</div>
                 <div className="max-h-60 min-h-20 overflow-y-auto rounded-md border bg-muted/30 p-3 font-mono text-xs break-all whitespace-pre-wrap">
@@ -417,6 +502,18 @@ export default function CredentialsView({ onToast }: Props) {
                   )}
                 </div>
                 <div className="space-y-1.5">
+                  <Label htmlFor="cred-edit-note">注释（可选）</Label>
+                  <Input
+                    id="cred-edit-note"
+                    placeholder="例如：DeepSeek 官方 key（会写成键上方的一行注释）"
+                    value={editNote}
+                    onChange={(e) => setEditNote(e.target.value)}
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    留空即删掉这个键上方的注释行；文件里更上面的注释（如小节说明）不受影响。
+                  </p>
+                </div>
+                <div className="space-y-1.5">
                   <Label htmlFor="cred-edit-value">值</Label>
                   <Textarea
                     id="cred-edit-value"
@@ -447,7 +544,7 @@ export default function CredentialsView({ onToast }: Props) {
             </DialogTitle>
             <DialogDescription>
               名称即凭据的引用键（如 DEEPSEEK_API_KEY），不能含空白或控制字符；
-              值可为任意长文本（如 Cookie）。
+              值可为任意长文本（如 Cookie）；注释会写成该键上方的一行 <span className="font-mono"># …</span>。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -473,6 +570,15 @@ export default function CredentialsView({ onToast }: Props) {
                 }
                 return null;
               })()}
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="cred-note">注释（可选）</Label>
+              <Input
+                id="cred-note"
+                placeholder="例如：DeepSeek 官方 key"
+                value={addNote}
+                onChange={(e) => setAddNote(e.target.value)}
+              />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="cred-value">值</Label>

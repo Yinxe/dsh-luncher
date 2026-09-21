@@ -1263,6 +1263,7 @@ dshp-token-meter:
         crate::credentials::write_refs(&[crate::credentials::CredentialRefInput {
             name: "TEST_MODEL_KEY_ENV".into(),
             value: "from-cred".into(),
+            note: Some("模型密钥".into()),
         }])
         .unwrap();
         assert_eq!(

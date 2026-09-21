@@ -483,6 +483,11 @@ export interface WebQuickConfigInput {
 export interface CredentialRef {
   name: string;
   value: string;
+  /**
+   * 注释：YAML 里键正上方那一行 `# 注释` 的内容。
+   * 写入时同样写成键上方的一行注释；null 表示这条凭据没有注释。
+   */
+  note: string | null;
 }
 
 /** records 里的一条内部凭据记录（dsh 自管理，只读展示；secret 值不回传前端） */
