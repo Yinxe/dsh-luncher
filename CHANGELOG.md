@@ -10,6 +10,13 @@ DSH Starter 每个版本的用户可见变化。格式参考 [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-21
+
+### 变更
+
+- **0.2.0 随改名带上的那套「旧名数据迁移」代码已全部移除，改名就是全新开始**：升级不再把 `~/.dsh-launcher` 搬到 `~/.dsh-starter`、不再识别 `# dsh-launcher:` 旧标记、不再接手 `*.launcher-bak` 旧备份、也不再回落读旧主题键 —— 那一版本来就没有对外用户，留着这套兼容只会一直占维护成本。**从 0.1.x 升上来的话请按全新安装处理**：想保留已装版本与 profile，把旧的 `~/.dsh-launcher` 目录自己改名为 `~/.dsh-starter` 即可。
+- **自建更新源（R2）换到与产品名一致的桶**：`dsh-luncher-release` → `dsh-starter-release`，公开基址随之更新。注意 **0.2.0 及更早版本读的是旧桶地址，不会自动发现这一版** —— 需要手动下载安装一次，或在设置里把更新源切到「GitHub 源」后再检查更新。
+
 ## [0.2.0] - 2026-09-21
 
 > **这一版换了名字，也换了「身份证」。** 程序改名 **DSH Starter**（旧名 `DSH Launcher` 里的
@@ -209,7 +216,8 @@ DSH Starter 每个版本的用户可见变化。格式参考 [Keep a Changelog](
 - profile 目录改为 `$DSH_HOME/profiles`（复数）并跳过 `node_modules`。
 - 插件 ID 误报、插件页 profile 下拉被字母序抢占（应为 `web`）、正式版筛选把 RC 当成预发布。
 
-[Unreleased]: https://github.com/Yinxe/dsh-starter/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Yinxe/dsh-starter/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Yinxe/dsh-starter/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Yinxe/dsh-starter/releases/tag/v0.2.0
 [0.1.2]: https://github.com/Yinxe/dsh-starter/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Yinxe/dsh-starter/releases/tag/v0.1.1
