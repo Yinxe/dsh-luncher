@@ -117,8 +117,9 @@ pub fn read() -> Result<CredentialFile, String> {
 
 /// 整表保存 refs：**逐行改写**文件中 refs 块（块外的 records / version / 未知键，
 /// 以及它们自己的注释，全部逐字节保留）。refs 保留原文件的键序（存留条目按原位、
-/// 新增条目按传入顺序追加）；每个条目的注释写成它上方的一行 `# 注释`。写前备份，
-/// 写后收紧权限（去除 group/other 位）。
+/// 新增条目按传入顺序追加）；每个条目的注释写成它上方的一行 `# 注释`。
+/// 生成结果先整体校验（合法 YAML 且顶层为映射）再**原子写盘**（unix：0600 临时
+/// 文件 + rename，避免截断窗口与半截文件），校验失败时原文件一个字节都不动。
 ///
 /// 为什么不再用 serde_yaml 整篇序列化：那会丢光文件里所有注释 —— 而注释正是这里要
 /// 维护的东西（键上方那行注释就是这条凭据的说明）。
@@ -166,41 +167,51 @@ pub fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
     }
 
     let out = rewrite_refs_block(&raw, items)?;
+    // 写前校验的是**生成结果**，不只是磁盘上的原文：逐行改写有自己的拼装逻辑，
+    // 任何缩进/引号/特殊行分隔符层面的缺陷都会先在这里被拦下（报「内部错误」，
+    // 原文件未备份未覆盖，保持原样），而不是拿坏 YAML 覆盖掉唯一的凭据文件。
+    let doc: serde_yaml::Value = serde_yaml::from_str(&out)
+        .map_err(|e| format!("内部错误：生成的凭据内容不是合法 YAML，已拒绝写入: {e}"))?;
+    if doc.as_mapping().is_none() {
+        return Err("内部错误：生成的凭据内容顶层不是映射，已拒绝写入".into());
+    }
     crate::profile_cfg::backup(&path)?;
     std::fs::create_dir_all(
         path.parent()
             .ok_or_else(|| "凭据文件路径异常：无父目录".to_string())?,
     )
     .map_err(|e| format!("创建目录失败: {e}"))?;
-    // unix 下直接以 0600 建文件：先 fs::write 再 chmod 会留一小段 0644 窗口，
-    // 明文 token 在那几毫秒里对同组/其他人可读。
+    // 原子写：unix 下先落 0600 临时文件再 rename 就位 —— 既没有「截断目标后写一半」
+    // 的半截凭据窗口（断电/被杀），也没有「先 0644 再 chmod」的明文可读窗口。
     #[cfg(unix)]
     {
         use std::io::Write as _;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| format!("写入失败: {e}"))?;
-        file.write_all(out.as_bytes())
-            .map_err(|e| format!("写入失败: {e}"))?;
+        let fname = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "credentials".into());
+        let tmp = path.with_file_name(format!("{fname}.tmp-{}", std::process::id()));
+        let wrote = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(out.as_bytes())?;
+            f.flush()
+        })();
+        if let Err(e) = wrote {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("写入失败: {e}"));
+        }
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("写入失败: {e}")
+        })?;
     }
     #[cfg(not(unix))]
     std::fs::write(&path, out).map_err(|e| format!("写入失败: {e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(&path) {
-            let mode = meta.permissions().mode() & 0o777;
-            if mode & 0o077 != 0 {
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -711,6 +722,38 @@ mod tests {
         let info = read().unwrap();
         assert_eq!(info.refs.len(), 1);
         assert_eq!(info.version, Some(1));
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// 原子写的事后核对：成功写入后目录里不得残留 `.tmp-` 临时文件，
+    /// 且多次保存（rename 覆盖自己）内容仍是最后一次的。
+    #[cfg(unix)]
+    #[test]
+    fn write_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp_home("atomic");
+        std::env::set_var("DSH_HOME", &tmp);
+        write_refs(&refs_of(&[("A", "x")])).unwrap();
+        write_refs(&refs_of(&[("A", "y"), ("B", "z")])).unwrap();
+
+        let cred = credentials_path();
+        let parent = cred.parent().unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "不应残留临时文件: {leftovers:?}");
+        let meta = std::fs::metadata(credentials_path()).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "rename 就位后权限仍是 0600，实际 {mode:#o}");
+        let info = read().unwrap();
+        assert_eq!(info.refs.len(), 2);
+        assert_eq!(info.refs.iter().find(|r| r.name == "A").unwrap().value, "y");
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");
