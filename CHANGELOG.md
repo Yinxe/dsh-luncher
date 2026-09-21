@@ -12,6 +12,7 @@ DSH Launcher 每个版本的用户可见变化。格式参考 [Keep a Changelog]
 
 ### 修复
 
+- **设置里填 `~/…` 的路径现在能用了**：启动器不经过 shell 起进程，没有任何东西会替用户展开 `~`（Windows 的 cmd 本身也不认 `~`，只有 PowerShell / git-bash 认），此前把 `~/.bun/bin/node` 填进「Node 路径」、终端路径或插件「本地 link」都会静默失败。现在这几处都会自行展开 `~`（包含 `~/` 与 `~\\`）。
 - **Windows 上不再到处弹黑色控制台窗口**：启动器是 GUI 程序，此前所有后台命令（git、npm、node、pnpm、PowerShell、tar、taskkill…）都没带「不创建控制台窗口」标志，于是进插件页、检查渠道、测 GitHub 加速时会一次闪出十几个黑窗口；现在后台命令统一隐藏窗口，只有你点「在终端中启动」时才给出可见的终端窗口。
 - **内嵌启动 dsh 时不再闪一下黑框**：同样原因，选择「在启动器内启动」时被拉起的 node 进程此前也会短暂弹出控制台窗口。
 - **Windows 上不再出现「npm 未装」/「安装 dsh 失败（os error 193）」**：官方 Node.js for Windows 会在同一个目录里同时放 `npm`（给 git-bash 用的 POSIX 脚本）和 `npm.cmd`，此前 PATH 查找先命中那个无扩展名的脚本，直接执行就报「不是有效的 Win32 应用程序」；现在优先用 `node …/node_modules/npm/bin/npm-cli.js` 执行 npm，PATH 查找也会跳过无法直接执行的无扩展名文件（`npx` / `dsh` 等同样受影响）。

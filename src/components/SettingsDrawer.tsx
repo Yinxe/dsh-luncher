@@ -337,6 +337,13 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
                   ? <span className="font-mono" title={`${env.nodePath} (v${env.node})`}>探测到 {env.nodePath} (v{env.node})</span>
                   : "dsh 依赖 Node.js，留空将自动探测"}
               </FieldDescription>
+              <FieldDescription>
+                可填相对家目录的写法（如 <span className="font-mono">~/.bun/bin/node</span>、
+                <span className="font-mono">~/.nvm/versions/node/v24/bin/node</span>），启动器会自行展开
+                <span className="font-mono"> ~ </span>
+                —— Windows 的 cmd 不认 <span className="font-mono">~</span>，在终端里验证时请用
+                PowerShell 或 <span className="font-mono">%USERPROFILE%</span>
+              </FieldDescription>
             </Field>
           </Section>
 

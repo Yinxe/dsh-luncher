@@ -841,6 +841,14 @@ pub fn plugin_install(
         .into_iter()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        // `link:~/my-plugin` 这种本地路径要展开 `~`：命令是直接交给 pnpm 的，
+        // 中途没有 shell 会替用户展开（Windows 上连 cmd 都不认 `~`）
+        .map(|s| match s.strip_prefix("link:") {
+            Some(path) if path.trim().starts_with('~') => {
+                format!("link:{}", util::expand_tilde(path).display())
+            }
+            _ => s,
+        })
         .collect();
     if raw_specs.is_empty() {
         return Err("安装规格为空".into());

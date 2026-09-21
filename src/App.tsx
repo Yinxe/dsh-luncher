@@ -826,9 +826,21 @@ export default function App() {
             <span className="hidden sm:inline">node&nbsp;</span>
             {env.node ? `v${env.node}` : "未装"}
           </Badge>
-          <Badge variant="outline" title={env.npmPath ?? ""} className="hidden font-mono lg:inline-flex">
-            <span className={`led ${env.npm ? "bg-emerald-500" : "bg-red-500"}`} />
-            npm {env.npm ?? "未装"}
+          <Badge
+            variant="outline"
+            title={
+              env.npm
+                ? (env.npmPath ?? "")
+                : env.npmPath
+                  // 解析到了文件却跑不起来（如 Windows 上解析到 git-bash 用的 npm 脚本）：
+                  // 这类问题的关键信息就是「解析到了哪个路径」，必须能直接在界面上看到
+                  ? `已解析到 ${env.npmPath}，但执行失败（不是可用的 npm？）。详见 设置 → 打开日志目录 里的 app.log`
+                  : "PATH 中没有找到 npm；可在设置里指定 Node 路径，或安装内置 Node 运行时"
+            }
+            className="hidden font-mono lg:inline-flex"
+          >
+            <span className={`led ${env.npm ? "bg-emerald-500" : env.npmPath ? "bg-amber-500" : "bg-red-500"}`} />
+            npm {env.npm ?? (env.npmPath ? "不可用" : "未装")}
           </Badge>
           <Badge variant="outline" className="hidden font-mono xl:inline-flex">{env.os}/{env.arch}</Badge>
           {/* 顶栏空白处也能拖窗口（data-tauri-drag-region 只管自己那一层，

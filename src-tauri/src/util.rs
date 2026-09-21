@@ -58,6 +58,33 @@ pub fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// 拆出 `~` / `~/` / `~\` 前缀：返回相对 home 的剩余部分。
+/// 只认 `~` 与 `~/`，不认 `~user/`（各平台展开规则不同，不猜）。
+fn strip_tilde_prefix(s: &str) -> Option<&str> {
+    if s == "~" {
+        return Some("");
+    }
+    s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\"))
+}
+
+/// 把用户输入的路径里的 `~` 展开成 home 目录。
+///
+/// 为什么必须有：启动器**不经过 shell** 起进程，没有任何东西会替用户展开 `~`。
+/// Windows 上更明显 —— cmd.exe 本来就不认 `~`（只有 PowerShell / git-bash 认），
+/// 用户从终端里学到「`~/.bun` 能用」之后，把 `~/.bun/bin/node` 填进设置就必然失败。
+/// 设置里的路径一律先过这里，避免「填了却没生效、还静默回落 PATH」。
+pub fn expand_tilde(input: &str) -> PathBuf {
+    let s = input.trim();
+    match strip_tilde_prefix(s) {
+        Some(rest) if rest.is_empty() => home_dir().unwrap_or_else(|| PathBuf::from(s)),
+        Some(rest) => match home_dir() {
+            Some(home) => home.join(rest),
+            None => PathBuf::from(s),
+        },
+        None => PathBuf::from(s),
+    }
+}
+
 /// 这个文件能不能直接交给 CreateProcess：只有真 PE（MZ 头）才行。
 /// 无扩展名的文本脚本（git-bash 用的 npm / pnpm / npx）一律不算。
 /// 非 Windows 上恒为 true（有无扩展名都能 exec）。
@@ -187,7 +214,8 @@ pub fn spawn_command(program: &Path, args: &[String]) -> Command {
 pub fn find_node(settings: &Settings) -> Option<PathBuf> {
     let o = settings.node_path.trim();
     if !o.is_empty() {
-        let p = PathBuf::from(o);
+        // `~/.bun/bin/node` 这类写法要展开：我们不起 shell，没人替用户展开
+        let p = expand_tilde(o);
         if p.is_file() {
             return Some(p);
         }
@@ -550,7 +578,7 @@ pub fn split_args(input: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_version, shell_quote, split_args};
+    use super::{expand_tilde, home_dir, is_safe_version, shell_quote, split_args, strip_tilde_prefix};
 
     /// 反例防护：除白名单外，生产代码里不得直接 `Command::new`。
     ///
@@ -593,6 +621,22 @@ mod tests {
             "下面这些地方在 Windows 上会弹控制台黑框，请改用 util::hidden_command / spawn_command：\n{}",
             offenders.join("\n")
         );
+    }
+
+    #[test]
+    fn tilde_prefix_only_accepts_home_shorthand() {
+        assert_eq!(strip_tilde_prefix("~"), Some(""));
+        assert_eq!(strip_tilde_prefix("~/x"), Some("x"));
+        assert_eq!(strip_tilde_prefix("~\\x"), Some("x"));
+        assert_eq!(strip_tilde_prefix("~x"), None, "~user 形式不展开");
+        assert_eq!(strip_tilde_prefix("x/~/y"), None, "只认开头");
+        assert_eq!(strip_tilde_prefix(""), None);
+        // 展开结果落在 home 下（home 取不到时原样返回，不 panic）
+        let expanded = expand_tilde("~/npm-probe");
+        if let Some(home) = home_dir() {
+            assert_eq!(expanded, home.join("npm-probe"));
+        }
+        assert_eq!(expand_tilde("/abs/path"), std::path::PathBuf::from("/abs/path"));
     }
 
     #[test]

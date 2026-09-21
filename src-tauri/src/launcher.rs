@@ -152,7 +152,8 @@ fn spawn_terminal(settings: &Settings, inner: &str) -> Result<(), String> {
     let override_path = settings.terminal.trim();
     let candidates: Vec<(PathBuf, Vec<String>)> =
         if !override_path.is_empty() && override_path != "auto" {
-            let p = PathBuf::from(override_path);
+            // 设置里可能填 `~/.local/bin/kitty` 这类写法：展开后再用
+            let p = crate::util::expand_tilde(override_path);
             let name = p
                 .file_name()
                 .and_then(|n| n.to_str())
