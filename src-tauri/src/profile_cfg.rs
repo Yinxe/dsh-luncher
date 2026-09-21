@@ -449,6 +449,38 @@ pub fn set_bundle_enabled(
     set_ids_disabled(profile, name, &ids, !enabled)
 }
 
+/// 顶层「空 flow 占位」行判定：profile 模板自带的 patch 文件就是
+/// 一串注释 + 一行 `[]`（顶层类型是 flow 序列）。
+fn is_empty_flow_placeholder(line: &str) -> bool {
+    leading_spaces(line) == 0 && matches!(line.trim(), "[]" | "[ ]")
+}
+
+/// 追加 block 条目之前摘掉顶层空 flow 占位行。
+///
+/// 不摘会变成「一个文件两个 YAML 文档」—— `[]` 是一个完整的 flow 序列，后面再接
+/// `- id: …` 就是新的文档，serde_yaml 直接拒绝：
+/// `deserializing from YAML containing more than one document is not supported`。
+/// 于是「关掉任意插件开关」在全新 profile 上必然失败（web 快捷配置那条路径早已
+/// 单独处理过这个占位，插件启停这条漏了）。逐行复制、保留每行原有换行，不重写整份文件。
+fn drop_empty_flow_placeholder(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for line in raw.split_inclusive('\n') {
+        if is_empty_flow_placeholder(line) {
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// 文件里是否还剩「非注释的实际内容」。
+fn has_patch_content(raw: &str) -> bool {
+    raw.lines().any(|l| {
+        let t = l.trim();
+        !t.is_empty() && !t.starts_with('#')
+    })
+}
+
 /// id 写入 YAML 条目时的安全标量：`@` 等保留字符必须引号包裹，否则解析报
 /// "found character that cannot start any token"。
 fn yaml_id_scalar(id: &str) -> String {
@@ -497,7 +529,7 @@ fn set_ids_disabled(
         if todo.is_empty() {
             return Ok(());
         }
-        let mut out = raw.clone();
+        let mut out = drop_empty_flow_placeholder(&raw);
         if !out.ends_with('\n') && !out.is_empty() {
             out.push('\n');
         }
@@ -584,6 +616,11 @@ fn set_ids_disabled(
     let mut out_text = out.join("\n");
     if !out_text.is_empty() {
         out_text.push('\n');
+    }
+    // 条目被清空后不能只剩注释：patch 文件的契约是「顶层 YAML 数组」，空文档是 null，
+    // dsh 拿到的就不再是补丁列表。这时把模板那份 `[]` 占位放回去（文件回到初始形态）。
+    if !has_patch_content(&out_text) {
+        out_text.push_str("[]\n");
     }
     // 兜底：flow 写法等无法按行处理的情况，仍有目标 id 被禁用则报错
     if let Some(id) = ids.iter().find(|id| disabled_ids_in(&out_text).contains(*id)) {
@@ -2170,6 +2207,60 @@ mod tests {
 
         // 再次启用应报“本就启用”
         assert!(set_ids_disabled("web", bundle, &ids, false).is_err());
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// Windows 用户实测报错：全新 profile 的 cordis.patch.yml 是「一串注释 + 一行 `[]`」
+    /// （模板默认内容），此时关掉任意插件开关直接失败 ——「YAML 语法错误：deserializing from
+    /// YAML containing more than one document is not supported」。
+    /// 原因：`[]` 是 flow 序列，后面再接 block 条目就变成一个文件两个 YAML 文档。
+    #[test]
+    fn bundle_toggle_works_on_template_empty_flow_placeholder() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-empty-patch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        let patch = prof_dir.join("cordis.patch.yml");
+        std::fs::write(
+            &patch,
+            "# Your patch layer for this dsh profile, applied after every bundle layer:\n\
+             # a top-level YAML array of loader patch entries (id-targeted config\n\
+             # overrides, disables, and insert lists; `!!js` expressions allowed).\n\
+             []\n",
+        )
+        .unwrap();
+
+        let ids = vec!["dshp-demo".to_string()];
+        // 关掉开关：占位行必须让位给 block 条目，否则整个操作报 YAML 多文档错误
+        set_ids_disabled("web", "@dshp/demo", &ids, true).unwrap();
+        let raw = std::fs::read_to_string(&patch).unwrap();
+        assert!(raw.contains("# Your patch layer"), "用户注释必须保留:\n{raw}");
+        assert!(raw.contains("- id: dshp-demo"));
+        assert!(!raw.contains("[]"), "空 flow 占位必须被摘掉:\n{raw}");
+        serde_yaml::from_str::<serde_yaml::Value>(&raw).expect("必须是单文档合法 YAML");
+        assert!(patch_disabled_ids("web").contains("dshp-demo"));
+
+        // 再打开：条目移除后不能只剩注释 —— patch 文件的契约是顶层数组，
+        // 空文档是 null，得把模板那份 `[]` 占位放回去
+        set_ids_disabled("web", "@dshp/demo", &ids, false).unwrap();
+        let raw = std::fs::read_to_string(&patch).unwrap();
+        assert!(raw.contains("# Your patch layer"), "用户注释必须保留:\n{raw}");
+        assert!(!raw.contains("dshp-demo"));
+        assert_eq!(
+            serde_yaml::from_str::<serde_yaml::Value>(&raw).unwrap(),
+            serde_yaml::Value::Sequence(vec![]),
+            "空补丁层应回到 `[]`，不是 null 文档:\n{raw}"
+        );
+
+        // 往返一致：再来一轮仍然可用（幂等 + 不残留坏写法）
+        set_ids_disabled("web", "@dshp/demo", &ids, true).unwrap();
+        set_ids_disabled("web", "@dshp/demo", &ids, false).unwrap();
+        let raw = std::fs::read_to_string(&patch).unwrap();
+        assert_eq!(raw.matches("[]").count(), 1, "占位只应有一行:\n{raw}");
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");

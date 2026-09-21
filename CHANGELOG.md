@@ -10,6 +10,10 @@ DSH Launcher 每个版本的用户可见变化。格式参考 [Keep a Changelog]
 
 ## [Unreleased]
 
+### 修复
+
+- **插件开关在全新 profile 上不再一按就报 YAML 错**：profile 模板自带的 `cordis.patch.yml` 是「一串注释 + 一行 `[]`」，而 `[]` 是 flow 写法 —— 启动器往后追加 `- id: …` 条目时，同一个文件里就出现了**两个 YAML 文档**，写前校验直接失败，报「YAML 语法错误：deserializing from YAML containing more than one document is not supported」，于是**任何插件的启用/停用都点不动**（快捷配置那条写入路径早有处理，插件启停这条漏了）。现在追加前先摘掉这行空占位，条目被清空后再把 `[]` 放回去，文件始终保持「单文档 + 顶层数组」的形态。
+
 ## [0.1.7] - 2026-09-21
 
 ### 修复
