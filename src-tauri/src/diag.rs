@@ -15,7 +15,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 /// 单个日志文件上限；超过就滚动一份 `.1`（只留一代，不会无限增长）
 const MAX_BYTES: u64 = 256 * 1024;
 
-fn logs_dir() -> PathBuf {
+/// 日志目录（`~/.dsh-launcher/logs/`）：设置里「打开日志目录」按钮指向它
+pub fn logs_dir() -> PathBuf {
     crate::settings::launcher_home().join("logs")
 }
 
@@ -59,6 +60,15 @@ pub fn mark(label: &str) {
         "startup.log",
         &format!("[{} +{}ms] {label}", now_ms(), since_start()),
     );
+}
+
+/// 记一条**操作**留痕（`logs/<tag>.log`）。
+///
+/// 安装 / 解压 / 克隆这类会失败、又依赖外部环境的操作，把「实际执行的命令、退出码、
+/// 报错原文、相关路径」都写进去：用户报「安装失败」时，直接让他把这个文件发过来，
+/// 不用再靠猜（os error 193 这种光看数字根本无法定位）。
+pub fn op(tag: &str, msg: &str) {
+    append(&format!("{tag}.log"), &format!("[{}] {msg}", now_ms()));
 }
 
 /// 把 panic 落到 `logs/panic.log` —— release 构建里这是唯一的崩溃线索。

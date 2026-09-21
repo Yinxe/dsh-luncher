@@ -424,6 +424,24 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
               </div>
               <FieldDescription>各版本安装在 versions/ 子目录下</FieldDescription>
             </Field>
+            <Field>
+              <FieldLabel>日志目录</FieldLabel>
+              <div className="flex items-center gap-2">
+                <span
+                  className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted-foreground"
+                  title={env?.logsDir}
+                >
+                  {env?.logsDir ?? "…"}
+                </span>
+                <Button size="sm" variant="outline" onClick={() => env && onReveal(env.logsDir)}>
+                  <FolderOpen /> 打开
+                </Button>
+              </div>
+              <FieldDescription>
+                启动耗时（startup.log）、崩溃（panic.log）、安装与解压的完整命令与报错（install.log /
+                runtime.log）；遇到问题把这里的文件发来即可定位
+              </FieldDescription>
+            </Field>
           </Section>
         </div>
 

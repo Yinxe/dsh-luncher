@@ -72,8 +72,10 @@
 ├── github-accel.json  # GitHub 加速：测速选出的代理前缀（缓存 6 小时）
 ├── runtime/           # 内置 Node 运行时（一键预装）
 │   └── node-v22.14.0/
-├── logs/              # 插件任务日志导出（内置终端「导出」按钮）
+├── logs/              # 插件任务日志导出（内置终端「导出」按钮，设置里可一键打开）
 │                      # + startup.log（启动各阶段耗时）/ panic.log（崩溃位置与消息）
+│                      # + install.log / runtime.log / env.log（安装、解压、环境探测的
+│                      #   完整命令、退出码与报错原文，排查「安装失败」看这里）
 ├── git-plugins/       # clone+link 安装的本地仓库（git pull 更新）
 │   └── owner-repo/
 └── versions/

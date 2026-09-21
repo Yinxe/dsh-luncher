@@ -28,6 +28,8 @@ pub struct EnvironmentInfo {
     /// 启动器内置 Node 运行时是否已安装
     pub runtime_installed: bool,
     pub runtime_dir: String,
+    /// 日志目录（启动留痕 / 安装与解压的操作日志都在这里）
+    pub logs_dir: String,
 }
 
 #[tauri::command]
@@ -47,9 +49,34 @@ pub async fn get_environment(state: State<'_, AppState>) -> Result<EnvironmentIn
             Some(inv) => {
                 let mut args = inv.args.clone();
                 args.push("--version".into());
-                util::run_captured(&inv.program, &args, std::time::Duration::from_secs(10))
+                let v = util::run_captured(&inv.program, &args, std::time::Duration::from_secs(10));
+                if v.is_none() {
+                    // 界面上只会显示「npm 未装」，真实原因得看日志
+                    crate::diag::op(
+                        "env",
+                        &format!(
+                            "npm --version 执行失败：{} {}\n  PATH: {}",
+                            inv.program.display(),
+                            inv.args.join(" "),
+                            std::env::var("PATH").unwrap_or_default()
+                        ),
+                    );
+                }
+                v
             }
-            None => None,
+            None => {
+                crate::diag::op(
+                    "env",
+                    &format!(
+                        "未找到 npm；node={} PATH={}",
+                        node.as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "（未找到）".into()),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                );
+                None
+            }
         };
         Ok(EnvironmentInfo {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -66,6 +93,7 @@ pub async fn get_environment(state: State<'_, AppState>) -> Result<EnvironmentIn
             profiles_dir: crate::profiles::profiles_dir().to_string_lossy().into_owned(),
             runtime_installed: crate::runtime::runtime_installed(),
             runtime_dir: crate::runtime::runtime_dir().to_string_lossy().into_owned(),
+            logs_dir: crate::diag::logs_dir().to_string_lossy().into_owned(),
         })
     })
     .await

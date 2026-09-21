@@ -53,6 +53,7 @@ export interface EnvironmentInfo {
   profilesDir: string;
   runtimeInstalled: boolean;
   runtimeDir: string;
+  logsDir: string;
 }
 
 export interface Settings {
