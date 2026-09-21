@@ -865,6 +865,15 @@ pub fn plugin_install(
     if raw_specs.is_empty() {
         return Err("安装规格为空".into());
     }
+    // 打包产物直链只允许 https：规格是原样交给 dsh/pnpm 的，pnpm 对明文 http
+    // 的压缩包照单全收，而它在传输途中可以被中间人换成任何内容（没有完整性校验）。
+    // 这是安装入口，必须在这里挡住，不能只指望上游解析不认它。
+    if let Some(bad) = raw_specs.iter().find(|s| crate::registry::is_plain_http_tarball_spec(s)) {
+        return Err(format!(
+            "打包产物直链必须使用 https（当前为明文 http）：{bad}\n\
+             明文下载的安装包可能被中途替换且无从察觉，请把链接换成 https 后重试。"
+        ));
+    }
     // github:owner/repo（含去 sha 的升级规格）在任务里先做匿名可读预检：
     // 私有仓库直接拒绝；判不出来就放行（不让网络问题挡住安装）
     let is_github = |s: &str| {

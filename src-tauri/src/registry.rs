@@ -1190,7 +1190,9 @@ pub fn parse_github_spec(input: &str) -> Option<GitHubPluginSpec> {
         None => (s, None),
     };
     let main = main.trim_end_matches('/');
-    if (main.starts_with("http://") || main.starts_with("https://"))
+    // 打包产物只认 https：明文 http 直链下载的压缩包没有任何完整性保障，
+    // 中间人可以直接换包（这里放行 = 认可它是个合法安装来源）
+    if main.starts_with("https://")
         && (main.ends_with(".tgz")
             || main.ends_with(".tar.gz")
             || main.ends_with(".tar")
@@ -1272,6 +1274,25 @@ pub fn parse_github_spec(input: &str) -> Option<GitHubPluginSpec> {
         plugin_path,
         tarball_url: None,
     })
+}
+
+/// 「打包产物直链」形态的**明文 http** 规格（.tgz/.tar.gz/.tar 或 releases/download 资产）。
+///
+/// `parse_github_spec` 已不认它（只认 https 直链），但安装命令是把规格**原样**交给
+/// dsh/pnpm 的 —— pnpm 自己会照下不误，所以真正的拦截必须发生在安装入口（见
+/// `commands::plugin_install`），这里只提供判定。
+pub fn is_plain_http_tarball_spec(s: &str) -> bool {
+    let main = s
+        .trim()
+        .split('#')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/');
+    main.starts_with("http://")
+        && (main.ends_with(".tgz")
+            || main.ends_with(".tar.gz")
+            || main.ends_with(".tar")
+            || main.contains("/releases/download/"))
 }
 
 /// git 分支/标签/提交名是否可安全用于 URL 拼接与 git 命令行。
@@ -2045,6 +2066,8 @@ mod tests {
             assert_eq!(got.tarball_url.as_deref(), Some(expect), "input={tb}");
             assert_eq!(got.owner, "", "tarball 模式不解析 owner");
         }
+        // 明文 http 直链不再被认作合法安装来源（拦截在安装入口，见下条测试）
+        assert!(parse_github_spec("http://example.com/dist/pkg.tgz").is_none());
         // 路径清洗：首尾斜杠去掉（裸 fragment 无 path: 前缀按 ref 处理，同 pnpm）
         case("github:owner/repo#path:/plugins/foo/", "owner", "repo", None, Some("plugins/foo"), false);
         // 非法：缺 repo、路径穿越、注入字符
@@ -2053,6 +2076,30 @@ mod tests {
             "github:owner/repo#path:../..", "github:owner/repo#path:a//b",
         ] {
             assert!(parse_github_spec(bad).is_none(), "bad={bad}");
+        }
+    }
+
+    /// 明文 http 的打包产物直链：安装入口靠它拒绝（规格原样交给 pnpm，解析层不认 ≠ 挡住）
+    #[test]
+    fn plain_http_tarball_spec_detected() {
+        for s in [
+            "http://example.com/dist/pkg.tgz",
+            "http://example.com/dist/pkg.tar.gz",
+            "http://example.com/dist/pkg.tar",
+            "http://github.com/o/r/releases/download/v1/pkg.tgz",
+            "http://example.com/x.tgz#path:plugins/foo",
+            " http://example.com/a.tgz/ ",
+        ] {
+            assert!(is_plain_http_tarball_spec(s), "应判为 http 直链: {s}");
+        }
+        for s in [
+            "https://example.com/dist/pkg.tgz",
+            "github:o/r",
+            "owner/repo",
+            "link:/tmp/x",
+            "http://example.com/plain-path",
+        ] {
+            assert!(!is_plain_http_tarball_spec(s), "不该判为 http 直链: {s}");
         }
     }
 
