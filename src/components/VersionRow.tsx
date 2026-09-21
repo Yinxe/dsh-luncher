@@ -1,4 +1,4 @@
-import { FolderOpen, RefreshCw } from "lucide-react";
+import { FolderOpen, RefreshCw, ScrollText } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { TableCell, TableRow } from "@/components/ui/table";
@@ -24,6 +24,8 @@ interface Props {
   onInstall: (version: string, force: boolean) => void;
   onUninstall: (version: string) => void;
   onReveal: (path: string) => void;
+  /** 打开「这个版本改了什么」（官方 Release 正文） */
+  onShowNotes: (version: string) => void;
 }
 
 /** 通道 → 左侧色轨（完整类名，保证 Tailwind 扫描到） */
@@ -47,6 +49,7 @@ const CHANNEL_V: Record<string, "default" | "success" | "warning" | "info" | "se
 
 export default function VersionTableRow({
   row, isLatestTag, busy, isActive, switchLocked, upgradeTo, onUpgrade, onSetActive, onInstall, onUninstall, onReveal,
+  onShowNotes,
 }: Props) {
   const inst = row.installed;
   const fmtDate = (iso: string | null) =>
@@ -98,6 +101,17 @@ export default function VersionTableRow({
       </TableCell>
       <TableCell className="px-3 py-2.5 text-right">
         <div className="flex flex-wrap items-center justify-end gap-1">
+          {/* 更新日志：任何版本都能点（早期版本官方没建 Release，对话框里会说明）。
+              这里用图标按钮，与「打开安装目录」同位 —— 操作列已经排到「卸载」，
+              再加一个文字按钮会把整行撑高换行 */}
+          <Button
+            size="sm"
+            variant="ghost"
+            title={`查看 dsh ${row.version} 改了什么（官方 Release 正文）`}
+            onClick={() => onShowNotes(row.version)}
+          >
+            <ScrollText />
+          </Button>
           {!inst && (
             <Button size="sm" disabled={busy} onClick={() => onInstall(row.version, false)} title="安装完成后自动设为当前版本">
               安装

@@ -877,6 +877,98 @@ fn api_budget_guard() -> Result<(), String> {
     Ok(())
 }
 
+// ── dsh 各版本的发布说明（GitHub Releases） ──────────────────────────────
+//
+// npm 的 packument 里没有 changelog（也不该为了看更新日志去下整包），官方
+// 「这个版本改了什么」只写在 GitHub Release 正文里。仓库是 monorepo，Release
+// tag 形如 `dsh-v0.1.6-alpha.2`，所以按前缀筛出 dsh 自己的版本。
+
+/// dsh 官方仓库（monorepo，CLI 在 apps/cli）
+pub const DSH_REPO: &str = "deepseek-ai/deepseek-harness";
+/// dsh Release tag 前缀（同仓库其他子项目各有各的前缀，必须筛掉）
+pub const DSH_TAG_PREFIX: &str = "dsh-v";
+
+/// 一个 dsh 版本的发布说明
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DshRelease {
+    /// 版本号（去掉 tag 前缀）
+    pub version: String,
+    /// 原始 tag，如 dsh-v0.1.6-alpha.2
+    pub tag: String,
+    /// Release 标题
+    pub title: String,
+    pub published_at: Option<String>,
+    /// 预发布标记（alpha / rc 都算）
+    pub prerelease: bool,
+    /// 正文：GitHub 上的 Markdown，中英双段，小标题是 `<h3 id="…">` 锚点
+    pub body: String,
+    pub html_url: String,
+}
+
+/// 进程内缓存：一次会话里反复开关更新日志不该反复打 GitHub。
+/// （`api_get_json` 的 ETag 缓存命中 304 时不计额度，但仍要一次网络往返。）
+static DSH_RELEASES: Mutex<Option<(Instant, Vec<DshRelease>)>> = Mutex::new(None);
+const DSH_RELEASES_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// 拉取 dsh 的全部 Release（新→旧），只保留 `dsh-v*` 前缀的那些。
+pub async fn fetch_dsh_releases(token: Option<&str>) -> Result<Vec<DshRelease>, String> {
+    if let Ok(g) = DSH_RELEASES.lock() {
+        if let Some((at, list)) = g.as_ref() {
+            if at.elapsed() < DSH_RELEASES_TTL {
+                return Ok(list.clone());
+            }
+        }
+    }
+    let url = format!("https://api.github.com/repos/{DSH_REPO}/releases?per_page=100");
+    let (status, json) = api_get_json(&url, token).await?;
+    if !(200..300).contains(&status) {
+        return Err(format!("读取 dsh 发布说明失败：GitHub 返回 HTTP {status}"));
+    }
+    let list = dsh_releases_from_json(&json)?;
+    if let Ok(mut g) = DSH_RELEASES.lock() {
+        *g = Some((Instant::now(), list.clone()));
+    }
+    Ok(list)
+}
+
+/// Release 列表 JSON → 只保留 `dsh-v*` 的版本，按版本号从新到旧排序。
+/// 单独拆出来是为了能脱离网络单测（筛选前缀 + 排序都是容易写错的地方）。
+fn dsh_releases_from_json(json: &serde_json::Value) -> Result<Vec<DshRelease>, String> {
+    let arr = json
+        .as_array()
+        .ok_or_else(|| "读取 dsh 发布说明失败：GitHub 返回的不是 Release 列表".to_string())?;
+    let mut list: Vec<DshRelease> = arr
+        .iter()
+        .filter_map(|r| {
+            let tag = r.get("tag_name").and_then(|v| v.as_str())?;
+            let version = tag.strip_prefix(DSH_TAG_PREFIX)?.to_string();
+            Some(DshRelease {
+                version,
+                tag: tag.to_string(),
+                title: r
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(tag)
+                    .to_string(),
+                published_at: r.get("published_at").and_then(|v| v.as_str()).map(String::from),
+                prerelease: r.get("prerelease").and_then(|v| v.as_bool()).unwrap_or(false),
+                body: r.get("body").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                html_url: r.get("html_url").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            })
+        })
+        .collect();
+    if list.is_empty() {
+        return Err(format!(
+            "没有从 {DSH_REPO} 读到任何 {DSH_TAG_PREFIX}* 的 Release —— 官方改了发布方式？"
+        ));
+    }
+    // GitHub 本身按发布时间倒序返回，这里再按版本号兜一层，免得补发/草稿打乱顺序
+    list.sort_by(|a, b| crate::semver::compare(&b.version, &a.version));
+    Ok(list)
+}
+
 /// 带额度守卫 + token 的 GitHub API GET，返回 (状态码, JSON)
 async fn api_get_json(url: &str, token: Option<&str>) -> Result<(u16, serde_json::Value), String> {
     api_budget_guard()?;
@@ -1778,6 +1870,45 @@ mod tests {
         // 关键：非 alpha/beta/rc 的预发布不再被误标成 stable
         assert_eq!(derive_channel("0.1.6-next.1"), "pre");
         assert_eq!(derive_channel("0.1.6-canary.2"), "pre");
+    }
+
+    /// dsh 发布说明：只收 `dsh-v*` 前缀、按版本号倒序、字段缺省要能兜住
+    #[test]
+    fn dsh_releases_filter_prefix_and_sort() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"[
+              {"tag_name":"web-v1.0.0","name":"web 1.0","body":"x","html_url":"u","prerelease":false},
+              {"tag_name":"dsh-v0.1.2-rc.1","name":"v0.1.2-rc.1","body":"中文说明","html_url":"https://x/1","prerelease":true,
+               "published_at":"2026-09-03T06:06:07Z"},
+              {"tag_name":"dsh-v0.1.6-alpha.2","name":"","body":"","html_url":"","prerelease":true},
+              {"tag_name":"dsh-v0.1.5-rc.2","name":"v0.1.5-rc.2","html_url":"https://x/2"}
+            ]"#,
+        )
+        .unwrap();
+        let list = dsh_releases_from_json(&json).unwrap();
+        // 非 dsh 前缀的 tag 被筛掉；0.1.6-alpha.2 > 0.1.5-rc.2 > 0.1.2-rc.1
+        let versions: Vec<&str> = list.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(versions, vec!["0.1.6-alpha.2", "0.1.5-rc.2", "0.1.2-rc.1"]);
+        assert_eq!(list[2].tag, "dsh-v0.1.2-rc.1");
+        assert_eq!(list[2].body, "中文说明");
+        assert_eq!(list[2].published_at.as_deref(), Some("2026-09-03T06:06:07Z"));
+        // name 为空时退回 tag、缺 body/html_url/published_at 也不 panic
+        assert_eq!(list[0].title, "dsh-v0.1.6-alpha.2");
+        assert!(list[0].body.is_empty());
+        assert_eq!(list[0].html_url, "");
+        assert_eq!(list[1].published_at, None);
+        assert!(!list[1].prerelease);
+    }
+
+    /// 一个 dsh Release 也没有（全是别的子项目）：要明确报错而不是回一个空列表
+    #[test]
+    fn dsh_releases_errors_when_none_match() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"[{"tag_name":"web-v1.0.0","name":"web 1.0"}]"#).unwrap();
+        let err = dsh_releases_from_json(&json).unwrap_err();
+        assert!(err.contains(DSH_TAG_PREFIX), "报错应点明前缀：{err}");
+        let not_array = dsh_releases_from_json(&serde_json::json!({"message":"Not Found"})).unwrap_err();
+        assert!(not_array.contains("不是 Release 列表"), "{not_array}");
     }
 
 

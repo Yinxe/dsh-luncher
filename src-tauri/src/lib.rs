@@ -126,6 +126,7 @@ pub fn run() {
             commands::search_registry_packages,
             commands::get_github_rate_limit,
             commands::check_channels,
+            commands::dsh_release_notes,
             commands::check_plugin_updates,
             commands::read_global_config,
             commands::write_global_config,

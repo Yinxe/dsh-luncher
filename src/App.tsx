@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Puzzle, RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
-  TriangleAlert, ChevronDown, CopyPlus, Info, RotateCw, FileText,
+  TriangleAlert, ChevronDown, CopyPlus, Info, RotateCw, FileText, ScrollText,
   Pencil, Trash2, ShieldPlus, MoreHorizontal, Rocket, Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Toaster } from "@/components/ui/sonner";
+import { cmpVer } from "@/lib/version";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
@@ -42,6 +43,7 @@ import VersionRow from "./components/VersionRow";
 import SettingsDrawer from "./components/SettingsDrawer";
 import UpdateBanner from "./components/UpdateBanner";
 import AppSidebar from "./components/AppSidebar";
+import DshChangelogDialog from "./components/DshChangelogDialog";
 import type {
   EnvironmentInfo, InstalledVersion, LauncherUpdateStatus, ProcEntry,
   ProcExitEvent, ProcLogEvent, ProfileInfo, ProfileInstance, ProfileTarget,
@@ -101,6 +103,8 @@ export default function App() {
   const [instances, setInstances] = useState<ProfileInstance[]>([]);
   const [view, setView] = useState<View>("versions");
   const [verScope, setVerScope] = useState<"all" | "installed">("all");
+  /** 更新日志对话框当前定位的 dsh 版本（null = 关闭） */
+  const [notesVersion, setNotesVersion] = useState<string | null>(null);
   const [verType, setVerType] = useState<"all" | "stable" | "pre">("all");
   /** 各 profile 配置折叠面板的展开状态 */
   const [expandedProfiles, setExpandedProfiles] = useState<Record<string, boolean>>({});
@@ -1116,6 +1120,15 @@ export default function App() {
                 <span className="text-xs text-muted-foreground">
                   {filteredVerRows.length} / {rows.length} 个版本
                 </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={rows.length === 0}
+                  title="逐个查看各版本 dsh 改了什么（官方 GitHub Release 正文）"
+                  onClick={() => setNotesVersion(rows[0]?.version ?? null)}
+                >
+                  <ScrollText /> 更新日志
+                </Button>
                 <Button variant="outline" size="sm" disabled={remoteLoading} onClick={refreshRemote}>
                   <RefreshCw className={remoteLoading ? "animate-spin" : ""} /> 刷新版本
                 </Button>
@@ -1181,6 +1194,7 @@ export default function App() {
                           onInstall={(v, force) => doInstall(v, force)}
                           onUninstall={doUninstall}
                           onReveal={(p) => api.reveal(p).catch((e) => addToast("err", String(e)))}
+                          onShowNotes={(v) => setNotesVersion(v)}
                         />
                       ))}
                       {filteredVerRows.length === 0 && (
@@ -1538,12 +1552,14 @@ export default function App() {
           {view === "credentials" && <CredentialsView onToast={addToast} />}
         </div>
 
-        {/* 状态栏：窄窗口只留官方源，其余按断点逐级收起 */}
-        <footer className="flex h-7 shrink-0 items-center gap-4 border-t border-border bg-card px-3 text-[11px] text-muted-foreground lg:px-4">
-          <span className="truncate">官方源 {env.registry}</span>
-          <span className="hidden truncate font-mono lg:inline" title={env.dshHome}>{env.dshHome}</span>
-          <span className="ml-auto hidden shrink-0 xl:inline">退出启动器会结束所有内嵌 dsh 进程；关闭窗口最小化到托盘</span>
-        </footer>
+        {/* dsh 更新日志：版本表里的「更新日志」按钮与工具栏按钮都从这里打开 */}
+        <DshChangelogDialog
+          open={notesVersion !== null}
+          initialVersion={notesVersion}
+          versions={rows.map((r) => r.version)}
+          onClose={() => setNotesVersion(null)}
+          onOpenUrl={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
+        />
       </SidebarInset>
 
       <ProcessSidePanel
@@ -1677,17 +1693,6 @@ export default function App() {
 }
 
 // ── 本地辅助 ───────────────────────────────
-function cmpVer(a: string, b: string): number {
-  const core = (v: string) => v.replace(/^v/, "").split("-")[0].split(".").map((x) => parseInt(x, 10) || 0);
-  const ca = core(a); const cb = core(b);
-  for (let i = 0; i < 3; i++) if ((ca[i] ?? 0) !== (cb[i] ?? 0)) return (ca[i] ?? 0) - (cb[i] ?? 0);
-  const pa = a.includes("-") ? a.split("-").slice(1).join("-") : "";
-  const pb = b.includes("-") ? b.split("-").slice(1).join("-") : "";
-  if (pa === pb) return 0;
-  if (!pa) return 1;
-  if (!pb) return -1;
-  return pa.localeCompare(pb);
-}
 
 interface MergedRow {
   version: string;

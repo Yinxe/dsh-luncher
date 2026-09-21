@@ -313,6 +313,20 @@ export interface ProfileDetail {
   patchEntries: PatchEntryInfo[];
 }
 
+/**
+ * 一个 dsh 版本的发布说明（来自官方 monorepo 的 GitHub Release，tag 前缀 `dsh-v`）。
+ * 正文是中英双段 Markdown，小标题用 `<h3 id="cn-…">` 这类锚点标记语言分段。
+ */
+export interface DshRelease {
+  version: string;
+  tag: string;
+  title: string;
+  publishedAt: string | null;
+  prerelease: boolean;
+  body: string;
+  htmlUrl: string;
+}
+
 /** npm registry 搜索结果（安装对话框：先搜索 → 看描述 → 再安装） */
 export interface PackageSearchItem {
   name: string;
