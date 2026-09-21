@@ -760,25 +760,25 @@ pub fn set_allow_builds(profile_dir: &Path, packages: &[String]) -> Result<Vec<S
         .iter()
         .map(|(k, v)| format!("  {}: {v}", quote_yaml_key(k)))
         .collect();
-    let block_text = format!("allowBuilds:{eol}{}{eol}", block.join(eol));
+    // 合并结果（一个 `allowBuilds:` 头 + 全部条目），行尾留给最后统一 join
+    let mut block_lines: Vec<String> = Vec::with_capacity(block.len() + 1);
+    block_lines.push("allowBuilds:".to_string());
+    block_lines.extend(block);
 
-    // 丢掉所有旧的 allowBuilds 块（条目已并入 map），再把合并结果插到原位置
+    // 丢掉所有旧的 allowBuilds 块（条目已并入 map），再把合并结果插到原位置。
+    // 每一行都先剥掉可能存在的 `\r`（CRLF 文件的 split('\n') 会把 `\r` 留在行尾），
+    // 最后统一用 join(eol) 拼回 —— 否则旧行带 `\r`、新块不带，就成了混合行尾。
+    let trailing_newline = yaml.ends_with('\n');
     let mut out: Vec<String> = Vec::new();
     let mut inserted = false;
     let mut in_block = false;
-    let mut first_block_line: Option<usize> = None;
     for line in yaml.split('\n') {
         let bare = line.strip_suffix('\r').unwrap_or(line);
         let top_level = !bare.starts_with(' ') && !bare.starts_with('\t');
         if top_level {
             if bare.trim_start().starts_with("allowBuilds:") {
                 if !inserted {
-                    if first_block_line.is_none() {
-                        first_block_line = Some(out.len());
-                    }
-                    for l in block_text.trim_end_matches(eol).split(eol) {
-                        out.push(l.to_string());
-                    }
+                    out.extend(block_lines.iter().cloned());
                     inserted = true;
                 }
                 in_block = true;
@@ -789,20 +789,25 @@ pub fn set_allow_builds(profile_dir: &Path, packages: &[String]) -> Result<Vec<S
         if in_block {
             continue; // 旧块的内容整体丢弃（已并入 map）
         }
-        out.push(line.to_string());
+        out.push(bare.to_string());
     }
-    let mut text = out.join("\n");
-    if !inserted {
-        // 没有 allowBuilds 块：追加到文件末尾（保住原有换行风格）
-        let trimmed = text.trim_end_matches(['\n', '\r']).to_string();
-        text = if trimmed.is_empty() {
-            block_text.clone()
+    // 原位替换：split 自然保留了「原文末尾是否有换行」的信息（末尾换行 → 最后一段是空串），
+    // join 回去即还原，不需要再补。追加：先裁掉尾部换行，拼上块再按原风格补回。
+    let text = if inserted {
+        out.join(eol)
+    } else {
+        let trimmed = out.join(eol).trim_end_matches(['\n', '\r']).to_string();
+        let block_text = block_lines.join(eol);
+        let mut t = if trimmed.is_empty() {
+            block_text
         } else {
-            format!("{trimmed}{eol}{eol}{}", block_text.replace(eol, eol))
+            format!("{trimmed}{eol}{eol}{block_text}")
         };
-    } else if !text.ends_with('\n') {
-        text.push('\n');
-    }
+        if trailing_newline {
+            t.push_str(eol);
+        }
+        t
+    };
 
     backup_once(&file)?;
     std::fs::write(&file, text).map_err(|e| format!("写入 {} 失败: {e}", file.display()))?;
@@ -846,6 +851,14 @@ mod tests {
         // CRLF 保留，且只有一个 allowBuilds 块（多了就是非法 YAML）
         assert!(text.contains("\r\n"), "应保留 CRLF");
         assert_eq!(text.matches("allowBuilds:").count(), 1, "{text}");
+        // 行尾必须**统一**：插进去的新块过去用 `\n`，与旧行的 `\r\n` 混在一起，
+        // 严格解析器会报错 —— 每个 `\n` 前面都得是 `\r`
+        let bytes: Vec<char> = text.chars().collect();
+        for (idx, c) in bytes.iter().enumerate() {
+            if *c == '\n' {
+                assert!(idx > 0 && bytes[idx - 1] == '\r', "第 {idx} 个换行是裸 LF（行尾混了）：{text:?}");
+            }
+        }
         // @scope 键必须加引号，否则整个 yaml 对之后所有 pnpm 运行都失效
         assert!(text.contains("'@scope/native-thing': true"), "{text}");
         // 合并后仍然是合法 YAML 且能读回来
