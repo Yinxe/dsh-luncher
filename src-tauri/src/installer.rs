@@ -215,8 +215,20 @@ fn run_install(
         ));
     }
 
-    // 把 child 交给状态以便取消
-    *state.child.lock().unwrap() = Some(child);
+    // 把 child 交给状态以便取消。同一临界区内补查「取消早于登记」的窗口：
+    // cancel() 置标记后 child 还没交进来会 take 到 None，不补杀的话 npm 会
+    // 一路跑完、还按成功收尾。标记是 SeqCst，置位先于 cancel 的 take，
+    // 因此这里在锁内的 load 必然看到它，两条路径合起来无泄漏。
+    {
+        let mut guard = state.child.lock().unwrap();
+        *guard = Some(child);
+        if state.cancelled.load(Ordering::SeqCst) {
+            if let Some(mut c) = guard.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    }
 
     let status: Option<std::process::ExitStatus> = loop {
         {

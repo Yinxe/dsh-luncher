@@ -1369,7 +1369,19 @@ fn run_streamed<R: Runtime>(
     if let Some(err) = child.stderr.take() {
         readers.push(spawn_reader(app.clone(), handle.clone(), id, err, "stderr", tail.clone()));
     }
-    *handle.child.lock().unwrap() = Some(child);
+    // 登记 child 与复查取消标记放在同一临界区：cancel() 若在登记前触发，
+    // 它 take 到 None 就没杀成；这里补杀，否则 pnpm 会在后台继续写目录，
+    // 而任务已被判取消、job 槽位也放开了（见 cancel() 的置位顺序，SeqCst）。
+    {
+        let mut guard = handle.child.lock().unwrap();
+        *guard = Some(child);
+        if handle.cancelled.load(Ordering::SeqCst) {
+            if let Some(mut c) = guard.take() {
+                kill_tree(&mut c);
+                let _ = c.wait();
+            }
+        }
+    }
 
     // 与 installer.rs 相同：轮询 try_wait，便于取消时把 child 取走 kill
     let status = loop {
