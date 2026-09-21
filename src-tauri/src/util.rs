@@ -48,7 +48,38 @@ pub fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// 构建 Command，Windows 上自动包装 .cmd/.bat
+/// 隐藏控制台窗口（Windows）。
+///
+/// **所有后台命令都必须走这个标志**：启动器是 GUI 进程，起控制台子进程（git / npm /
+/// node / powershell / tar / taskkill…）时不设 `CREATE_NO_WINDOW`，每一个都会在屏幕上
+/// 弹一个黑框。进插件页、探渠道、测加速时一次会起十几个 git，用户看到的就是
+/// 「一进页面一堆黑窗口」。
+///
+/// 唯一的例外是**用户明确要一个终端窗口**的场景（「在新终端里启动 dsh」，
+/// 见 `launcher::spawn_terminal`）—— 那里必须保持可见，别顺手加进来。
+pub fn hide_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
+/// 后台命令的统一构造入口：Windows 上默认隐藏控制台窗口。
+/// 直接写 `Command::new` 会漏掉 `CREATE_NO_WINDOW`，新增代码请用这个。
+pub fn hidden_command<P: AsRef<std::ffi::OsStr>>(program: P) -> Command {
+    let mut c = Command::new(program);
+    hide_window(&mut c);
+    c
+}
+
+/// 构建 Command，Windows 上自动包装 .cmd/.bat，并隐藏控制台窗口。
+/// 只用于**后台**命令；要让用户看到终端窗口请直接用 `Command::new`（见 `hide_window`）。
 pub fn spawn_command(program: &Path, args: &[String]) -> Command {
     #[cfg(windows)]
     {
@@ -58,7 +89,7 @@ pub fn spawn_command(program: &Path, args: &[String]) -> Command {
             .map(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
             .unwrap_or(false);
         if is_script {
-            let mut c = Command::new("cmd");
+            let mut c = hidden_command("cmd");
             c.arg("/C").arg(program);
             for a in args {
                 c.arg(a);
@@ -66,7 +97,7 @@ pub fn spawn_command(program: &Path, args: &[String]) -> Command {
             return c;
         }
     }
-    let mut c = Command::new(program);
+    let mut c = hidden_command(program);
     for a in args {
         c.arg(a);
     }
@@ -425,6 +456,49 @@ pub fn split_args(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{is_safe_version, shell_quote, split_args};
+
+    /// 反例防护：除白名单外，生产代码里不得直接 `Command::new`。
+    ///
+    /// 启动器是 GUI 进程，Windows 上起控制台子进程时只要没设 `CREATE_NO_WINDOW`，就会
+    /// 在屏幕上弹一个黑框 —— 进插件页 / 探渠道 / 测加速时一次十几个 git，用户看到的就是
+    /// 「一进页面一堆黑窗口」（GitHub issue #1 报告里的第二段）。新增后台命令请走
+    /// `util::hidden_command` / `util::spawn_command`。
+    #[test]
+    fn production_spawns_go_through_hidden_command() {
+        // 白名单只有两个：util 是统一出口本身；launcher 那个是用户**明确要的**可见终端窗口
+        fn violation(file: &str, line: &str) -> bool {
+            if file == "util.rs" || file == "launcher.rs" {
+                return false;
+            }
+            line.contains("Command::new(")
+        }
+        // 匹配器自检：抓不到反例的话这个测试就是假绿
+        assert!(violation("plugin.rs", r#"let c = Command::new("git");"#));
+        assert!(!violation("launcher.rs", r#"Command::new("cmd")"#));
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("读不到 src 目录").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).unwrap();
+            // 只扫生产代码：各文件的测试模块都写在 `#[cfg(test)]` 之后
+            let prod = text.split("#[cfg(test)]").next().unwrap_or("");
+            for (i, line) in prod.lines().enumerate() {
+                if violation(&file, line) {
+                    offenders.push(format!("{file}:{} {}", i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "下面这些地方在 Windows 上会弹控制台黑框，请改用 util::hidden_command / spawn_command：\n{}",
+            offenders.join("\n")
+        );
+    }
 
     #[test]
     fn safe_versions() {

@@ -390,7 +390,7 @@ fn resolve_bundle_ids(
     bundles: &[String],
 ) -> std::collections::BTreeMap<String, Vec<String>> {
     if let Ok((node, bin_js)) = resolve_dsh_bin(settings) {
-        let out = std::process::Command::new(&node)
+        let out = util::hidden_command(&node)
             .arg(&bin_js)
             .arg("--profile")
             .arg(profile)
@@ -1391,7 +1391,7 @@ fn init_profile_from_template(
     template: &str,
 ) -> Result<(), String> {
     let (node, bin_js) = resolve_dsh_bin(settings)?;
-    let out = std::process::Command::new(&node)
+    let out = util::hidden_command(&node)
         .arg(&bin_js)
         .arg("--profile")
         .arg(name)
@@ -1993,7 +1993,7 @@ mod tests {
 
         // 造一个本地 git 仓库，远端指向一个私有 GitHub 仓库（git ls-remote 会要凭据、API 会 404）
         let git = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
+            let ok = util::hidden_command("git")
                 .args(args)
                 .current_dir(&clone)
                 .env("GIT_AUTHOR_NAME", "t")

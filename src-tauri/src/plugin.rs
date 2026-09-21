@@ -430,7 +430,7 @@ fn kill_tree(child: &mut Child) {
     #[cfg(not(unix))]
     {
         let pid = child.id().to_string();
-        let _ = std::process::Command::new("taskkill")
+        let _ = util::hidden_command("taskkill")
             .args(["/PID", &pid, "/T", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

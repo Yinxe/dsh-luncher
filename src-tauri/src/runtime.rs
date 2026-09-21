@@ -213,7 +213,7 @@ fn extract(app: &tauri::AppHandle, archive: &Path) -> Result<(), String> {
             psq(&archive.to_string_lossy()),
             psq(&root.to_string_lossy())
         );
-        let out = std::process::Command::new("powershell")
+        let out = crate::util::hidden_command("powershell")
             .args(["-NoProfile", "-Command", &ps])
             .output()
             .map_err(|e| format!("调用 PowerShell 失败: {e}"))?;
@@ -224,7 +224,7 @@ fn extract(app: &tauri::AppHandle, archive: &Path) -> Result<(), String> {
             ));
         }
     } else {
-        let out = std::process::Command::new("tar")
+        let out = crate::util::hidden_command("tar")
             .args(["-xJf", &archive.to_string_lossy(), "-C", &root.to_string_lossy()])
             .output()
             .map_err(|e| format!("调用 tar 失败（需要 xz 支持）: {e}"))?;

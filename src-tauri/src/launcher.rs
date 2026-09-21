@@ -126,6 +126,8 @@ fn spawn_terminal(settings: &Settings, inner: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn spawn_terminal(settings: &Settings, inner: &str) -> Result<(), String> {
+    // 这里是**唯一**故意不隐藏控制台窗口的地方：用户点「在终端中启动」，要的就是一个
+    // 能看见的终端窗口。除此之外任何后台命令都必须走 `util::hidden_command` / `spawn_command`。
     // 优先 Windows Terminal
     if let Some(wt) = util::which("wt") {
         let _ = std::process::Command::new(wt)

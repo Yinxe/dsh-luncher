@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -92,7 +92,7 @@ pub fn spawn_embedded(
     let node = util::find_node(settings)
         .ok_or_else(|| "未找到 Node.js，无法启动 dsh".to_string())?;
 
-    let mut cmd = Command::new(&node);
+    let mut cmd = util::hidden_command(&node);
     cmd.arg(&bin_js);
     let prof = profile.trim();
     if !prof.is_empty() {
@@ -184,7 +184,7 @@ pub fn spawn_detached(
     let node = util::find_node(settings)
         .ok_or_else(|| "未找到 Node.js，无法启动 dsh".to_string())?;
 
-    let mut cmd = Command::new(&node);
+    let mut cmd = util::hidden_command(&node);
     cmd.arg(&bin_js);
     let prof = profile.trim();
     if !prof.is_empty() {
@@ -208,6 +208,8 @@ pub fn spawn_detached(
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        // DETACHED_PROCESS 已表示「不分配控制台」（会覆盖 hidden_command 的
+        // CREATE_NO_WINDOW，两者语义一致：都不会弹黑框）
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
     }
     cmd.stdin(Stdio::null());
@@ -626,9 +628,7 @@ fn force_kill_pid(pid: u32) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        let mut cmd = std::process::Command::new("taskkill");
-        hide_window(&mut cmd);
-        let out = cmd
+        let out = util::hidden_command("taskkill")
             .args(["/F", "/PID", &pid.to_string()])
             .output()
             .map_err(|e| format!("执行 taskkill 失败: {e}"))?;
@@ -663,18 +663,6 @@ fn detached_marker(pid: u32) -> bool {
         })
         .unwrap_or(false)
 }
-
-/// Windows 下生成的控制台子进程不弹窗（启动器为 GUI 程序）
-#[cfg(windows)]
-fn hide_window(cmd: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    cmd.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn hide_window(_cmd: &mut Command) {}
 
 /// 全平台进程枚举 (pid, cmdline 单行空格分隔)：Linux 读 /proc；macOS 用
 /// `ps -axo pid=,command=`；Windows 用 PowerShell CIM（EncodedCommand 免引号转义）。
@@ -835,8 +823,7 @@ fn forget_pid(pid: u32) {
 /// 没有超时的 `.output()` 在子进程卡死时会永久占住调用线程。
 #[cfg(any(target_os = "macos", windows))]
 fn run_capture_hidden(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
-    let mut cmd = Command::new(program);
-    hide_window(&mut cmd);
+    let mut cmd = util::hidden_command(program);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1390,6 +1377,7 @@ pub fn stop_profile(app: &AppHandle, state: &ProcState, profile: &str) -> Result
 mod tests {
     use super::*;
     use crate::util::DSH_ENV_LOCK;
+    use std::process::Command;
 
     #[test]
     fn is_dsh_cmdline_matches_npm_shim() {
