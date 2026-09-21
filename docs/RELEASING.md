@@ -108,14 +108,19 @@ npm run notes:archive    # 从 CHANGELOG 重新生成 docs/releases/vX.Y.Z.md
   同名，一旦让这个不编译的作业写缓存，就会把一份空 target 写进同一个 key —— 而缓存条目
   不可覆盖，发版那次反而只能拿到空缓存（污染）。恢复命中同样算「访问」，够用了。
 
-三个前提要知道：
+三点要知道（前两条是读 `Swatinem/rust-cache` 源码确认的）：
 
-- 缓存 key 里带 OS/架构与 `Cargo.lock` 哈希（`shared-key: tauri-release` 让两个作业命中
-  同一份），**`Cargo.toml` 一改就换 key**：依赖变动的那次发版仍然是冷编译；
-- GitHub 单仓库缓存上限 10GB（够：本机 `target/release` 4GB，压缩后每平台约 1～1.5GB），
-  超限会按 LRU 淘汰；
-- 针对第二段（最终链接，137～266s）：可选的下一步是把 `[profile.release] lto = "thin"`
-  关掉（`lto = false`），代价是二进制略大、运行性能略降 —— 这是**取舍**，要改先实测。
+- **版本号变动不会让缓存失效**：它算 key 时会把 manifest 里的 `version` 统一改写成
+  `0.0.0`，缓存前缀只含 `shared-key` + OS/架构 + rustc 版本 + 环境变量；即便真改了依赖，
+  它也把前缀当 `restore-keys` 用 —— 仍能恢复到上一份 `target`，剩下的交给 cargo 自己的
+  指纹做增量编译。所以**不存在「依赖一变就又冷编译 10 分钟」**这回事；
+- **缓存条目不可覆盖**：命中同一个 key 时 `actions/cache` 不会再写。这是保活作业必须
+  `save-if: false` 的原因 —— 一个不编译的作业若把空 `target` 写进 `tauri-release`，
+  发版那次反而只能拿到空缓存，而且要等 7 天淘汰才恢复；
+- 容量与第二段：GitHub 单仓库缓存上限 10GB（本机 `target/release` 4GB，压缩后每平台
+  约 1～1.5GB，够用），超限按 LRU 淘汰。而**最终 thin-LTO 链接（137～266s）缓存动不了**：
+  可选的下一步是 `[profile.release] lto = "thin"` → `false`，代价是二进制略大、运行性能
+  略降 —— 这是取舍，要改先实测，别凭感觉换。
 
 另外有个坑：**发新版期间别再往 main 推提交**。版本门禁查的是「已经*正式发布*的版本」，
 而打包中的 Release 还停在草稿状态 —— 此时推 main 会通过门禁、再起一整轮三端构建
