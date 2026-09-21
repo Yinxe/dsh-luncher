@@ -14,24 +14,24 @@ interface Note {
   warn?: string;
 }
 
-/** 安装说明里出现的文件名必须跟着版本走，所以整段都是按 version 现算的 */
+/** 安装说明里的文件名必须跟着版本走，所以整段都是按 version 现算的 */
 function notesFor(platform: "windows" | "macos" | "linux", version: string): Note[] {
   const v = version || "0.1.x";
   if (platform === "windows") {
     return [
       {
         title: "安装向导（.exe，推荐）",
-        body: "双击运行，安装器会自动处理提权并创建开始菜单 / 桌面快捷方式；之后的应用内自动更新也走这个包。",
-        warn: "安装包未做代码签名，SmartScreen 可能提示「Windows 已保护你的电脑」：点「更多信息」→「仍要运行」即可。",
+        body: "双击运行，安装器会处理提权并创建快捷方式；之后的应用内自动更新也走这个包。",
+        warn: "安装包未做代码签名，SmartScreen 可能提示「Windows 已保护你的电脑」：点「更多信息 → 仍要运行」即可。",
       },
       {
         title: "MSI 静默部署",
-        body: "给企业环境用组策略或命令行批量安装时选 .msi：",
+        body: "组策略或命令行批量安装时选 .msi：",
         code: `msiexec /i DSH.Launcher_${v}_x64_en-US.msi /qn`,
       },
       {
         title: "首次启动",
-        body: "启动器会探测机器上的 Node / npm / dsh。一个都没有也能用：设置里可一键下载 Node LTS 到 ~/.dsh-launcher/runtime，用户级安装、不需要管理员权限。",
+        body: "启动器会探测机器上的 Node / npm / dsh；一个都没有也能用 —— 设置里可一键下载 Node LTS 到自己的数据目录，免管理员权限。",
       },
     ];
   }
@@ -39,25 +39,25 @@ function notesFor(platform: "windows" | "macos" | "linux", version: string): Not
     return [
       {
         title: "拖进「应用程序」",
-        body: "打开 .dmg，把 DSH Launcher 拖到「应用程序」。这个包是通用二进制，Apple Silicon 与 Intel 用的是同一个文件。",
+        body: "打开 .dmg，把 DSH Launcher 拖进「应用程序」。通用二进制，Apple Silicon 与 Intel 用同一个文件。",
       },
       {
         title: "首次打开被系统拦下",
-        body: "应用没有做 Apple 公证，首次打开可能提示「无法验证开发者」。在「系统设置 → 隐私与安全性」里点「仍要打开」，或者执行：",
+        body: "应用没有做 Apple 公证，可能提示「无法验证开发者」。在「系统设置 → 隐私与安全性」点「仍要打开」，或者执行：",
         code: `xattr -dr com.apple.quarantine "/Applications/DSH Launcher.app"`,
       },
       {
         title: "自动更新包不用手装",
-        body: ".app.tar.gz 是 Tauri updater 的签名产物，客户端会在应用内自己下载替换；人手安装请用 .dmg。",
+        body: ".app.tar.gz 是客户端在应用内替换 .app 用的产物，人手安装请用 .dmg。",
       },
     ];
   }
   return [
     {
       title: "AppImage（免安装）",
-      body: "一个文件就是整份程序，不需要 root，也不会写系统目录：",
+      body: "一个文件就是整份程序，不需要 root，也不写系统目录：",
       code: `chmod +x DSH.Launcher_${v}_amd64.AppImage\n./DSH.Launcher_${v}_amd64.AppImage`,
-      warn: "极简发行版可能缺 FUSE，装一下 libfuse2（Debian/Ubuntu）即可运行。",
+      warn: "极简发行版可能缺 FUSE，装一下 libfuse2（Debian / Ubuntu）即可运行。",
     },
     {
       title: "Debian / Ubuntu",
@@ -71,10 +71,16 @@ function notesFor(platform: "windows" | "macos" | "linux", version: string): Not
     },
     {
       title: "更新方式的差别",
-      body: "AppImage 可以在原位静默替换自己；.deb / .rpm 属于系统级安装，更新时会弹出授权窗口（pkexec / sudo），必须有人在电脑前。",
+      body: "AppImage 可以在原位静默替换自己；.deb / .rpm 属于系统级安装，更新时会弹授权窗口，得有人在电脑前。",
     },
   ];
 }
+
+const TABS = [
+  { id: "windows", label: "Windows" },
+  { id: "macos", label: "macOS" },
+  { id: "linux", label: "Linux" },
+] as const;
 
 export function InstallNotes({ state }: { state: ReleaseState }) {
   const version = state.version ?? "0.1.x";
@@ -87,42 +93,41 @@ export function InstallNotes({ state }: { state: ReleaseState }) {
           kicker="安装"
           id="install"
           title="三个平台，各三步"
-          lead="安装包不带运行时依赖，也不需要管理员权限（系统级安装包除外）。下面是每个平台最常见的两个坑：代码签名提示与 FUSE 依赖。"
+          lead="安装包自带运行时探测，不需要管理员权限（系统级安装包除外）。每个平台最容易被系统拦下的地方，下面都给了处理办法。"
         />
       </Reveal>
 
       <Reveal delay={80} className="mt-10">
         <Tabs defaultValue="windows">
-          <TabsList variant="line" className="gap-6 border-b border-hairline pb-0">
-            <TabsTrigger value="windows" className="gap-2 text-[13.5px]">
-              <PlatformMark platform="windows" className="size-3.5" />
-              Windows
-            </TabsTrigger>
-            <TabsTrigger value="macos" className="gap-2 text-[13.5px]">
-              <PlatformMark platform="macos" className="size-3.5" />
-              macOS
-            </TabsTrigger>
-            <TabsTrigger value="linux" className="gap-2 text-[13.5px]">
-              <PlatformMark platform="linux" className="size-3.5" />
-              Linux
-            </TabsTrigger>
-          </TabsList>
+          <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 border-b border-hairline">
+            <TabsList variant="line" className="h-9 gap-6 rounded-none p-0">
+              {TABS.map((tab) => (
+                <TabsTrigger key={tab.id} value={tab.id} className="gap-2 rounded-none px-0 text-[13.5px]">
+                  <PlatformMark platform={tab.id} className="size-3.5" />
+                  {tab.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            <span className="eyebrow hidden sm:inline">安装包 5 – 86 MB</span>
+          </div>
 
-          {(["windows", "macos", "linux"] as const).map((platform) => (
-            <TabsContent key={platform} value={platform} className="pt-8">
-              <ol className="space-y-4">
-                {notesFor(platform, version).map((note, i) => (
-                  <li key={note.title} className="panel p-5">
+          {TABS.map((tab) => (
+            <TabsContent key={tab.id} value={tab.id} className="pt-2">
+              <ol className="grid gap-x-12 lg:grid-cols-2">
+                {notesFor(tab.id, version).map((note, i) => (
+                  <li key={note.title} className="min-w-0 border-t border-hairline py-6">
                     <div className="flex items-baseline gap-3">
-                      <span className="eyebrow shrink-0 text-primary">步骤 {i + 1}</span>
+                      <span className="num text-[11.5px] text-primary">
+                        {String(i + 1).padStart(2, "0")}
+                      </span>
                       <h3 className="text-[15px] font-medium">{note.title}</h3>
                     </div>
                     {note.body ? (
-                      <p className="mt-2.5 max-w-[74ch] text-[13.5px] text-muted-foreground">{note.body}</p>
+                      <p className="mt-2 ml-7 max-w-[62ch] text-[13.5px] break-words text-muted-foreground">{note.body}</p>
                     ) : null}
                     {note.code ? <CodeBlock code={note.code} /> : null}
                     {note.warn ? (
-                      <p className="mt-3 flex items-start gap-2 text-[12.5px] text-warn">
+                      <p className="mt-3 ml-7 flex items-start gap-2 text-[12.5px] break-words text-warn">
                         <TriangleAlertIcon className="mt-[3px] size-3.5 shrink-0" />
                         <span>{note.warn}</span>
                       </p>
@@ -135,22 +140,28 @@ export function InstallNotes({ state }: { state: ReleaseState }) {
         </Tabs>
       </Reveal>
 
-      <Reveal delay={120} className="mt-6">
-        <div className="panel flex flex-wrap items-start gap-3 p-5">
+      {/* 数据目录：两个路径分清楚，这是新用户最容易混的地方 */}
+      <Reveal delay={120} className="mt-6 grid gap-x-12 gap-y-6 border-t border-hairline pt-8 lg:grid-cols-2">
+        <div className="flex items-start gap-3">
           <TerminalIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-          <div className="min-w-0 flex-1">
-            <p className="text-[13.5px]">
-              装完不用配环境变量。启动器把 dsh 版本装到{" "}
-              <code className="num rounded bg-muted px-1.5 py-0.5 text-[12.5px]">~/.dsh-launcher/versions/&lt;版本&gt;</code>
-              ，把内置 Node 放在同级的{" "}
-              <code className="num rounded bg-muted px-1.5 py-0.5 text-[12.5px]">runtime/</code>
-              ，互不干扰、也不污染全局 npm。
+          <div>
+            <h3 className="text-[14px] font-medium">启动器的数据</h3>
+            <p className="mt-1.5 text-[13px] text-muted-foreground">
+              <code className="num rounded bg-code px-1.5 py-0.5 text-[12.5px]">~/.dsh-launcher/</code> —— 版本装在{" "}
+              <span className="num text-[12.5px]">versions/&lt;版本&gt;</span>、内置 Node 在{" "}
+              <span className="num text-[12.5px]">runtime/</span>、日志在{" "}
+              <span className="num text-[12.5px]">logs/</span>。各版本互不干扰，也不污染全局 npm。
             </p>
-            <p className="mt-2 max-w-[80ch] text-[12.5px] text-muted-foreground">
-              dsh 自己的数据目录仍是{" "}
-              <code className="num text-[12px]">$DSH_HOME</code>（默认{" "}
-              <code className="num text-[12px]">~/.dsh</code>）：profile、插件与凭据都在那儿 ——
-              全新机器上第一次运行 dsh 才会生成，启动器的首次使用引导会替你跑这一步。
+          </div>
+        </div>
+        <div className="flex items-start gap-3">
+          <TerminalIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <div>
+            <h3 className="text-[14px] font-medium">dsh 自己的数据</h3>
+            <p className="mt-1.5 text-[13px] text-muted-foreground">
+              <code className="num rounded bg-code px-1.5 py-0.5 text-[12.5px]">$DSH_HOME</code>（默认{" "}
+              <span className="num text-[12.5px]">~/.dsh</span>）—— profile、插件与凭据都在那儿；全新机器上第一次
+              运行 dsh 才会生成，启动器的首次使用引导会替你跑这一步。
             </p>
           </div>
         </div>
@@ -161,7 +172,7 @@ export function InstallNotes({ state }: { state: ReleaseState }) {
 
 function CodeBlock({ code }: { code: string }) {
   return (
-    <div className="group/code mt-3 flex items-start gap-3 rounded-lg border border-hairline bg-ink/60 px-3.5 py-3">
+    <div className="mt-3 ml-7 flex min-w-0 items-start gap-3 rounded-lg border border-hairline bg-code px-3.5 py-3">
       <pre className="num min-w-0 flex-1 overflow-x-auto text-[12.5px] leading-6 whitespace-pre text-foreground/90">
         {code}
       </pre>

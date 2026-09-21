@@ -57,7 +57,7 @@ export const ASSETS: AssetDef[] = [
     ghName: (v) => `DSH.Launcher_${v}_x64-setup.exe`,
     r2Key: "windows-x64-setup.exe",
     recommended: true,
-    blurb: "双击安装，自动创建开始菜单与桌面快捷方式；应用内自动更新走这个包。",
+    blurb: "双击安装，自动建快捷方式；应用内更新也走这个包。",
   },
   {
     id: "win-msi",
@@ -67,7 +67,7 @@ export const ASSETS: AssetDef[] = [
     arch: "x64",
     ghName: (v) => `DSH.Launcher_${v}_x64_en-US.msi`,
     r2Key: "windows-x64.msi",
-    blurb: "给企业环境用 msiexec / 组策略批量部署；个人用户装上面的 .exe 更省事。",
+    blurb: "企业环境用 msiexec、组策略批量部署。",
   },
   {
     id: "linux-appimage",
@@ -78,7 +78,7 @@ export const ASSETS: AssetDef[] = [
     ghName: (v) => `DSH.Launcher_${v}_amd64.AppImage`,
     r2Key: "linux-x86_64.AppImage",
     recommended: true,
-    blurb: "单个可执行文件就是整份程序，chmod +x 直接跑；应用内自更新会在原位替换它，不需要 root。",
+    blurb: "一个文件就是整份程序：chmod +x 直接跑，自更新原位替换，不需要 root。",
   },
   {
     id: "linux-deb",
@@ -88,7 +88,7 @@ export const ASSETS: AssetDef[] = [
     arch: "amd64",
     ghName: (v) => `DSH.Launcher_${v}_amd64.deb`,
     r2Key: "linux-x86_64.deb",
-    blurb: "由包管理器处理依赖与卸载；应用内更新需要弹窗授权（pkexec/sudo）。",
+    blurb: "包管理器负责依赖与卸载；系统级安装，更新时需要授权。",
   },
   {
     id: "linux-rpm",
@@ -98,7 +98,7 @@ export const ASSETS: AssetDef[] = [
     arch: "x86_64",
     ghName: (v) => `DSH.Launcher-${v}-1.x86_64.rpm`,
     r2Key: "linux-x86_64.rpm",
-    blurb: "rpm -U 安装，行为同 .deb：系统级安装、更新需要授权。",
+    blurb: "rpm -U 安装，行为同 .deb。",
   },
   {
     id: "mac-dmg",
@@ -109,7 +109,7 @@ export const ASSETS: AssetDef[] = [
     ghName: (v) => `DSH.Launcher_${v}_universal.dmg`,
     r2Key: null,
     recommended: true,
-    blurb: "一个包同时覆盖 M 系列与 Intel，拖进「应用程序」即可；自建源暂未托管 DMG，走 GitHub 直链。",
+    blurb: "Apple Silicon 与 Intel 通用，拖进「应用程序」即可。",
   },
   {
     id: "mac-app-tar",
@@ -120,7 +120,7 @@ export const ASSETS: AssetDef[] = [
     ghName: (v) => `DSH.Launcher_${v}_universal.app.tar.gz`,
     r2Key: "darwin-universal.app.tar.gz",
     updaterOnly: true,
-    blurb: "Tauri updater 用的签名产物，由客户端在应用内自动替换 .app，不适合手动安装。",
+    blurb: "Tauri 更新器专用产物，由客户端在应用内替换 .app，不用手装。",
   },
 ];
 

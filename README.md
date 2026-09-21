@@ -178,8 +178,10 @@ npm run release        # 同上（别名）
 
 ### 下载页（GitHub Pages）
 
-`site/` 是一份独立的 **Vite + React + shadcn/ui + Tailwind v4** 站点：介绍产品、给出各平台安装包直链。
-与主程序共用品牌色与字体（Geist / Geist Mono / Archivo），但不共享构建产物，互不影响。
+`site/` 是一份独立的 **Vite + React + shadcn/ui + Tailwind v4** 站点：介绍产品、给出各平台安装包直链，
+并把 README 里的功能按领域铺成一张「全部能力」清单。与主程序共用品牌色与字体（Geist / Geist Mono / Archivo），
+但不共享构建产物，互不影响。**默认亮色主题**（右上角可切暗色，选择记在 localStorage 里；
+首帧主题由 `index.html` 的内联脚本决定，避免闪光）。
 
 ```sh
 cd site && npm ci

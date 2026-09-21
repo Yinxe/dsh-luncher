@@ -1,15 +1,15 @@
 import { ExternalLinkIcon } from "lucide-react";
 
-import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { Button } from "@/components/ui/button";
 import { Reveal } from "@/components/site/reveal";
-import { SectionHeading } from "@/components/site/section-heading";
-import { CHANGELOG_URL, REPO_URL, type ReleaseState } from "@/lib/release";
+import { SectionEyebrow } from "@/components/site/section-heading";
+import { REPO_URL, type ReleaseState } from "@/lib/release";
 
+/**
+ * 常见问题：左侧悬挂标题 + 右侧问题列表（两栏）。
+ * 不用卡片包一层 —— 手风琴自带分隔线与展开状态，再套一层框只是多一层噪音。
+ */
 export function Faq({ state }: { state: ReleaseState }) {
   const v = state.version ? `v${state.version}` : "当前版本";
 
@@ -18,8 +18,19 @@ export function Faq({ state }: { state: ReleaseState }) {
       q: "要先装 Node.js 吗？",
       a: (
         <>
-          不必须。启动器自带探测：机器上已有 Node / npm 会直接用；一个都没有时，设置里可以一键把
-          Node LTS 下载到自己的数据目录（免 root、走国内镜像），后续 dsh 版本与插件都跑在这份运行时上。
+          不必须。启动器自带探测：机器上已有 Node / npm 会直接用；一个都没有时，设置里可以一键把 Node LTS
+          下载到自己的数据目录（免 root、走国内镜像），后续 dsh 版本与插件都跑在这份运行时上。
+        </>
+      ),
+    },
+    {
+      q: "支持哪些系统？",
+      a: (
+        <>
+          Windows 10 / 11（x64）、macOS 10.15+（通用二进制，Apple Silicon 与 Intel 同一个包）、
+          主流的 glibc 发行版 Linux（x86_64）。Linux 托盘需要{" "}
+          <code className="num text-[12px]">libayatana-appindicator3</code>（deb / rpm 会声明这个依赖）；
+          极简发行版跑 AppImage 需要自备 FUSE。
         </>
       ),
     },
@@ -28,14 +39,14 @@ export function Faq({ state }: { state: ReleaseState }) {
       a: (
         <>
           不会。每个 dsh 版本装在{" "}
-          <code className="num text-[12px]">~/.dsh-launcher/versions/&lt;版本&gt;</code>{" "}
-          的独立目录里，互不干扰，也不动全局 npm 前缀；卸载就是删目录。插件装在 profile 自己的{" "}
+          <code className="num text-[12px]">~/.dsh-launcher/versions/&lt;版本&gt;</code> 的独立目录里，
+          互不干扰，也不动全局 npm 前缀；卸载就是删目录。插件装在 profile 自己的{" "}
           <code className="num text-[12px]">node_modules</code> 里。
         </>
       ),
     },
     {
-      q: "dsh 是什么？和这个启动器什么关系？",
+      q: "DeepSeek Harness 是什么？和这个启动器什么关系？",
       a: (
         <>
           dsh 是{" "}
@@ -47,8 +58,8 @@ export function Faq({ state }: { state: ReleaseState }) {
           >
             @deepseek-ai/dsh
           </a>
-          （DeepSeek Harness CLI）。本启动器是社区做的第三方图形外壳：负责把它装好、跑起来、
-          并管住 profile、插件与模型配置。所有插件与 profile 操作都调用 dsh 官方命令，不私改它的配置文件结构。
+          （DeepSeek Harness CLI）。本启动器是社区做的第三方图形启动器：负责把它装好、拉起来，并管住 profile、
+          插件与模型配置。所有插件与 profile 操作都调用 dsh 官方命令，不私改它的配置文件结构。
         </>
       ),
     },
@@ -57,8 +68,8 @@ export function Faq({ state }: { state: ReleaseState }) {
       a: (
         <>
           默认自建源（Cloudflare R2），GitHub Release 作为兜底，设置里可二选一。安装包用内置公钥验签，
-          签名不匹配直接拒绝安装 —— 即使地址被代理或镜像改写，也无法投毒。当前版本 {v}，本页顶部的切换器
-          可以看两条源此刻各自是否可达。
+          签名不匹配直接拒绝安装 —— 即使地址被代理或镜像改写，也无法投毒。当前版本 {v}，
+          本页顶部的读数条能看到两条源此刻各自是否可达。
         </>
       ),
     },
@@ -66,12 +77,11 @@ export function Faq({ state }: { state: ReleaseState }) {
       q: "macOS 说「无法验证开发者」怎么办？",
       a: (
         <>
-          应用没有做 Apple 公证。首次打开时在「系统设置 → 隐私与安全性」点「仍要打开」，
-          或执行{" "}
+          应用没有做 Apple 公证。首次打开时在「系统设置 → 隐私与安全性」点「仍要打开」，或执行{" "}
           <code className="num text-[12px]">
             xattr -dr com.apple.quarantine "/Applications/DSH Launcher.app"
           </code>
-          。详见上面的安装说明。
+          。上面的安装说明里也有这条。
         </>
       ),
     },
@@ -79,8 +89,7 @@ export function Faq({ state }: { state: ReleaseState }) {
       q: "数据都存在哪？怎么彻底删掉？",
       a: (
         <>
-          启动器数据在{" "}
-          <code className="num text-[12px]">~/.dsh-launcher/</code>
+          启动器数据在 <code className="num text-[12px]">~/.dsh-launcher/</code>
           （设置、内置运行时、git 插件克隆、分类日志、各版本目录）；dsh 自己的数据仍在{" "}
           <code className="num text-[12px]">$DSH_HOME</code>（默认{" "}
           <code className="num text-[12px]">~/.dsh</code>），profile 与凭据都在那儿。
@@ -92,7 +101,7 @@ export function Faq({ state }: { state: ReleaseState }) {
       q: "怎么反馈问题？",
       a: (
         <>
-          设置 → 「生成诊断包」：它会合并环境摘要、设置（凭据已脱敏）与全部日志，发这一个文件到{" "}
+          设置 →「生成诊断包」：它会合并环境摘要、设置（凭据已脱敏）与全部日志，发这一个文件到{" "}
           <a
             href={`${REPO_URL}/issues`}
             target="_blank"
@@ -101,7 +110,7 @@ export function Faq({ state }: { state: ReleaseState }) {
           >
             Issues
           </a>{" "}
-          即可。
+          即可，不用逐个回答「node 装哪了」「npm 是哪个」。
         </>
       ),
     },
@@ -109,47 +118,43 @@ export function Faq({ state }: { state: ReleaseState }) {
 
   return (
     <section className="mx-auto max-w-[1180px] px-5 py-20 sm:px-8 sm:py-24">
-      <Reveal>
-        <SectionHeading
-          index="07"
-          kicker="常见问题"
-          id="faq"
-          title="装之前想知道的那几件事"
-          action={
-            <a
-              href={CHANGELOG_URL}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="eyebrow hidden items-center gap-1.5 hover:text-foreground sm:flex"
-            >
-              更新日志
-              <ExternalLinkIcon className="size-3" />
+      <div className="grid gap-x-12 gap-y-8 lg:grid-cols-[300px_minmax(0,1fr)]">
+        <Reveal className="lg:sticky lg:top-20 lg:self-start">
+          <SectionEyebrow index="07" kicker="常见问题" />
+          <h2 className="section-title mt-5">装之前想知道的那几件事</h2>
+          <p className="mt-3 max-w-[32ch] text-[13.5px] text-muted-foreground">
+            没覆盖到的疑问欢迎直接提 issue —— 带上「生成诊断包」的文件，能省掉一轮来回。
+          </p>
+          <Button asChild variant="outline" size="sm" className="mt-5">
+            <a href={`${REPO_URL}/issues`} target="_blank" rel="noreferrer noopener">
+              去提 issue
+              <ExternalLinkIcon className="size-3.5" />
             </a>
-          }
-        />
-      </Reveal>
+          </Button>
+        </Reveal>
 
-      <Reveal delay={80} className="mt-10">
-        <Accordion type="single" collapsible className="panel divide-y divide-hairline overflow-hidden px-5 sm:px-6">
-          {items.map((item, i) => (
-            <AccordionItem key={item.q} value={`item-${i}`} className="border-hairline">
-              <AccordionTrigger className="py-4 text-[14.5px] hover:no-underline">
-                <span className="flex items-baseline gap-3">
-                  <span className="num text-[11.5px] text-muted-foreground">
-                    {String(i + 1).padStart(2, "0")}
+        <Reveal delay={80}>
+          <Accordion type="single" collapsible className="divide-y divide-hairline border-t border-hairline">
+            {items.map((item, i) => (
+              <AccordionItem key={item.q} value={`item-${i}`} className="border-hairline">
+                <AccordionTrigger className="group/faq py-4 text-[14.5px] hover:no-underline">
+                  <span className="flex items-baseline gap-3 pr-4">
+                    <span className="num text-[11.5px] text-muted-foreground">
+                      {String(i + 1).padStart(2, "0")}
+                    </span>
+                    <span className="group-hover/faq:text-primary">{item.q}</span>
                   </span>
-                  {item.q}
-                </span>
-              </AccordionTrigger>
-              <AccordionContent className="pb-5">
-                <div className="max-w-[80ch] pl-8 text-[13.5px] leading-[1.85] text-muted-foreground">
-                  {item.a}
-                </div>
-              </AccordionContent>
-            </AccordionItem>
-          ))}
-        </Accordion>
-      </Reveal>
+                </AccordionTrigger>
+                <AccordionContent className="pb-5">
+                  <div className="max-w-[72ch] pl-8 text-[13.5px] leading-[1.85] break-words text-muted-foreground">
+                    {item.a}
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            ))}
+          </Accordion>
+        </Reveal>
+      </div>
     </section>
   );
 }

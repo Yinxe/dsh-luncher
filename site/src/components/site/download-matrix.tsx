@@ -1,19 +1,10 @@
-import {
-  ChevronDownIcon,
-  DownloadIcon,
-  ExternalLinkIcon,
-  TriangleAlertIcon,
-} from "lucide-react";
+import { ChevronDownIcon, DownloadIcon, ExternalLinkIcon, TriangleAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "cn";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CopyButton } from "@/components/site/copy-button";
 import { PlatformMark } from "@/components/site/icons";
@@ -23,7 +14,7 @@ import { SourceSwitch } from "@/components/site/source-switch";
 import type { DownloadRow, ReleaseController } from "@/hooks/use-release";
 import { copyText } from "@/lib/copy";
 import { formatBytes, shortenUrl } from "@/lib/format";
-import { GH_RELEASES_URL, detectPlatform, type PlatformId } from "@/lib/release";
+import { GH_RELEASES_URL, R2_BASE, detectPlatform, type PlatformId } from "@/lib/release";
 
 const ORDER: { id: PlatformId; label: string; hint: string }[] = [
   { id: "windows", label: "Windows", hint: "Windows 10 / 11 · x64" },
@@ -55,9 +46,7 @@ export function DownloadMatrix({ controller }: { controller: ReleaseController }
       source === "r2"
         ? `# DSH Launcher ${state.version ? `v${state.version}` : ""} 直链（自建源 · Cloudflare R2，地址永久不变）`
         : `# DSH Launcher ${state.version ? `v${state.version}` : ""} 直链（GitHub Release，与版本绑定）`;
-    const body = installable
-      .map((r) => `- ${r.label}（${r.arch}）：${r.url}`)
-      .join("\n");
+    const body = installable.map((r) => `- ${r.label}（${r.arch}）：${r.url}`).join("\n");
     const ok = await copyText(`${header}\n${body}\n`);
     toast[ok ? "success" : "error"](ok ? `已复制 ${installable.length} 条直链` : "复制失败，请手动选中");
   }
@@ -69,20 +58,24 @@ export function DownloadMatrix({ controller }: { controller: ReleaseController }
           index="01"
           kicker="下载"
           id="download"
-          title="按平台取包，直链就在行里"
+          title="全部安装包与直链"
           lead={
             source === "r2" ? (
               <>
-                当前是<strong className="text-foreground">自建源（Cloudflare R2）</strong>：
-                地址与版本无关（<span className="font-mono text-[13px]">…/latest/windows-x64-setup.exe</span>），
-                发布时同名覆盖，所以一条链接可以长期用；末尾的{" "}
-                <span className="font-mono text-[13px]">?v=</span> 只是给 CDN 的缓存指纹，去掉也照样能下。
+                当前是<strong className="text-foreground">自建源</strong>：地址与版本无关，发布时同名覆盖，
+                一条链接可以长期用。两条通道的差别在{" "}
+                <a
+                  href="#sources"
+                  className="text-foreground underline decoration-border decoration-dotted underline-offset-4"
+                >
+                  更新源
+                </a>{" "}
+                一节。
               </>
             ) : (
               <>
-                当前是<strong className="text-foreground">GitHub Release</strong>：
-                地址与版本绑定（<span className="font-mono text-[13px]">…/releases/download/v{state.version ?? "x.y.z"}/…</span>），
-                永久有效，适合固定版本归档；国内直连可能连不上，慢的话切回自建源。
+                当前是<strong className="text-foreground">GitHub Release</strong>：地址与版本绑定、永久有效，
+                适合固定版本归档；国内直连可能连不上，慢的话切回自建源。
               </>
             )
           }
@@ -100,7 +93,7 @@ export function DownloadMatrix({ controller }: { controller: ReleaseController }
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-muted/30 px-4 py-3 sm:px-5">
                   <PlatformMark platform={group.id} className="size-4 text-muted-foreground" />
                   <span className="text-[13.5px] font-medium">{group.label}</span>
-                  <span className="eyebrow">{group.hint}</span>
+                  <span className="eyebrow hidden sm:inline">{group.hint}</span>
                   {platform === group.id ? (
                     <Badge variant="secondary" className="ml-1 h-5">
                       你的系统
@@ -125,13 +118,11 @@ export function DownloadMatrix({ controller }: { controller: ReleaseController }
       {updaterRows.length > 0 ? (
         <Reveal delay={120} className="mt-4">
           <Collapsible>
-            <div className="panel overflow-hidden">
+            <div className="rounded-xl border border-hairline">
               <CollapsibleTrigger className="group/upd flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 sm:px-5">
                 <ChevronDownIcon className="size-4 text-muted-foreground transition-transform group-data-[state=open]/upd:rotate-180" />
-                <span className="text-[13.5px]">自动更新产物（由客户端使用，不用手装）</span>
-                <span className="num ml-auto text-[11.5px] text-muted-foreground">
-                  {updaterRows.length} 个
-                </span>
+                <span className="text-[13.5px]">自动更新产物（客户端使用，不用手装）</span>
+                <span className="num ml-auto text-[11.5px] text-muted-foreground">{updaterRows.length} 个</span>
               </CollapsibleTrigger>
               <CollapsibleContent>
                 <ul className="border-t border-hairline">
@@ -151,9 +142,10 @@ export function DownloadMatrix({ controller }: { controller: ReleaseController }
         </Reveal>
       ) : null}
 
-      <Reveal delay={140} className="mt-5 flex flex-wrap items-center gap-3">
+      <Reveal delay={140} className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-3">
         <Button type="button" variant="outline" size="sm" onClick={copyAll} disabled={installable.length === 0}>
-          复制全部直链（{installable.length}）
+          复制全部直链
+          <span className="num text-[11.5px] text-muted-foreground">{installable.length}</span>
         </Button>
         <Button asChild variant="ghost" size="sm" className="text-muted-foreground">
           <a href={GH_RELEASES_URL} target="_blank" rel="noreferrer noopener">
@@ -161,10 +153,13 @@ export function DownloadMatrix({ controller }: { controller: ReleaseController }
             <ExternalLinkIcon className="size-3.5" />
           </a>
         </Button>
+        <span className="num hidden text-[11.5px] text-muted-foreground lg:inline">
+          清单基址 {R2_BASE.replace("https://", "")}
+        </span>
         {state.settled && !state.version ? (
           <span className="flex items-center gap-1.5 text-[12.5px] text-warn">
             <TriangleAlertIcon className="size-3.5" />
-            没读到任何版本号：自建源的固定键地址仍然可用（路径与版本无关），但 GitHub 直链需要版本号
+            没读到版本号：自建源的固定键地址仍然可用（路径与版本无关），GitHub 直链需要版本号
           </span>
         ) : null}
       </Reveal>
@@ -180,7 +175,7 @@ function AssetRow({ row, detected }: { row: DownloadRow; detected: boolean }) {
       className="row-rail not-last:border-t not-last:border-hairline"
       data-active={row.recommended ? "true" : "false"}
     >
-      <div className="flex flex-col gap-3 py-4 pl-5 pr-4 sm:flex-row sm:items-center sm:gap-6 sm:pl-6 sm:pr-5">
+      <div className="flex flex-col gap-3 py-4 pl-5 pr-4 lg:flex-row lg:items-center lg:gap-6 lg:pl-6 lg:pr-5">
         <div className="flex min-w-0 flex-1 items-start gap-3">
           <span className="num mt-[3px] flex h-5 shrink-0 items-center rounded border border-border px-1.5 text-[10.5px] uppercase text-muted-foreground">
             {row.ext}
@@ -189,7 +184,7 @@ function AssetRow({ row, detected }: { row: DownloadRow; detected: boolean }) {
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[14.5px] font-medium">{row.label}</span>
               {row.recommended ? (
-                <Badge className="h-5 bg-primary/15 text-[11px] text-primary" variant="secondary">
+                <Badge className="h-5 bg-primary/12 text-[11px] text-primary" variant="secondary">
                   推荐
                 </Badge>
               ) : null}
@@ -205,18 +200,18 @@ function AssetRow({ row, detected }: { row: DownloadRow; detected: boolean }) {
                 </Badge>
               ) : null}
             </div>
-            <p className="mt-1.5 max-w-[60ch] text-[12.5px] text-muted-foreground">{row.blurb}</p>
-            <p className="num mt-1.5 text-[11.5px] text-muted-foreground/80">{row.arch}</p>
+            <p className="mt-1 text-[12.5px] text-muted-foreground">{row.blurb}</p>
+            <p className="num mt-1 text-[11.5px] text-muted-foreground">{row.arch}</p>
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2 sm:gap-3">
-          <span className="num w-[68px] text-right text-[12.5px] text-muted-foreground">
+        <div className="flex shrink-0 items-center gap-2 lg:gap-3">
+          <span className="num w-[64px] text-right text-[12.5px] text-muted-foreground">
             {formatBytes(row.bytes)}
           </span>
           {row.url ? <CopyButton text={row.url} iconOnly label="复制直链" /> : null}
           {row.url ? (
-            <Button asChild size="sm" variant={row.recommended ? "default" : "outline"} className="h-8">
+            <Button asChild size="sm" variant={row.recommended ? "default" : "outline"} className="h-8 w-[74px]">
               <a
                 href={row.url}
                 target="_blank"
@@ -240,14 +235,14 @@ function AssetRow({ row, detected }: { row: DownloadRow; detected: boolean }) {
       </div>
 
       {row.url ? (
-        <div className="flex items-center gap-3 pb-4 pl-5 pr-4 sm:pl-6 sm:pr-5">
+        <div className="flex items-center gap-3 pb-4 pl-5 pr-4 lg:pl-6 lg:pr-5">
           {/* min-w-0 + flex-1：直链是 nowrap，不这样写它会把整行撑出视口 */}
           <span className="url-line min-w-0 flex-1 truncate" title={row.url}>
-            {shortenUrl(row.url, 96)}
+            {shortenUrl(row.url, 104)}
           </span>
         </div>
       ) : (
-        <p className={cn("pb-4 pl-5 pr-4 text-[12px] text-muted-foreground sm:pl-6 sm:pr-5")}>
+        <p className={cn("pb-4 pl-5 pr-4 text-[12px] text-muted-foreground lg:pl-6 lg:pr-5")}>
           {row.unavailable} ——{" "}
           <a
             href={GH_RELEASES_URL}
@@ -257,7 +252,7 @@ function AssetRow({ row, detected }: { row: DownloadRow; detected: boolean }) {
           >
             到 GitHub Release 下载
           </a>
-          ，或切到 GitHub 源。
+          ，或把上面的源切成 GitHub。
         </p>
       )}
     </li>

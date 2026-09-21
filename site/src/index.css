@@ -1,14 +1,18 @@
 /*
  * DSH Launcher 下载页 —— 设计系统
  *
- * 方向：「控制台蓝图」。深蓝墨底 + DeepSeek 蓝信号色 + 发丝级网格/刻度，
+ * 方向：「控制台蓝图」。深蓝墨底（亮色为主题纸底）+ DeepSeek 蓝信号色 + 发丝级网格与刻度，
  * 看起来像启动器自己的一个面板，而不是一张通用落地页。
  *
  * 三件事在这里定死：
- * 1. 字体 —— 展示字 Archivo（宽体、工业标牌感，拉丁文/数字）+ 正文 Geist（与启动器一致）
+ * 1. 字体 —— 展示字 Archivo（宽体、工业标牌感，拉丁与数字）+ 正文 Geist（与启动器一致）
  *    + Geist Mono（版本号、直链、体积一律等宽，像读日志）；中文回落到系统 CJK 字体。
- * 2. 颜色 —— 只有一档暗色主题（`<html class="dark">`），亮色保留一套同族底价以便将来切换。
+ * 2. 颜色 —— **亮暗双主题**（跟随系统，也可手动切）：语义分工固定 ——
+ *    蓝＝品牌与动作，绿＝可用/推荐，琥珀＝需要注意。两个主题共用同一套语义。
  * 3. 氛围 —— 点阵、顶光、胶片颗粒、刻度线全部是 CSS，没有图片、没有额外请求。
+ *
+ * 换主题时不要漏掉「氛围类」变量（--dot / --glow / --panel-tint / --code-bg）：它们是
+ * 亮色下最容易露馅的地方（暗色点阵搬到纸底上会像脏点，代码块会变成一块黑砖）。
  */
 
 @import "tailwindcss";
@@ -20,36 +24,51 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ── 亮色：暖纸底 + 深蓝信号 ───────────────────────────────── */
 :root {
-  /* 亮色（同族底价：奶油纸 + 信号绿，与启动器亮色主题同源，本页默认不用） */
   --radius: 0.5rem;
-  --background: #fbf7ef;
-  --foreground: #14181f;
-  --card: #ffffff;
-  --card-foreground: #14181f;
-  --popover: #ffffff;
-  --popover-foreground: #14181f;
-  --primary: #2f6bff;
-  --primary-foreground: #ffffff;
-  --secondary: #eff2f8;
-  --secondary-foreground: #14181f;
-  --muted: #f1f3f8;
-  --muted-foreground: #6b7280;
-  --accent: #e8ecf7;
-  --accent-foreground: #14181f;
-  --destructive: #d92d20;
-  --border: #dfe3ec;
-  --input: #dfe3ec;
-  --ring: #2f6bff;
 
-  --signal: #12855a;
+  --background: #faf8f3;
+  --foreground: #12161f;
+  --card: #ffffff;
+  --card-foreground: #12161f;
+  --popover: #ffffff;
+  --popover-foreground: #12161f;
+  --primary: #2b46d9;
+  --primary-foreground: #ffffff;
+  --secondary: #eff1f7;
+  --secondary-foreground: #1b2130;
+  --muted: #f2f0ea;
+  --muted-foreground: #5f6675;
+  --accent: #e9ecf9;
+  --accent-foreground: #12161f;
+  --destructive: #c02626;
+  --border: rgba(18, 22, 31, 0.13);
+  --input: rgba(18, 22, 31, 0.17);
+  --ring: #2b46d9;
+
+  --signal: #0f7a52;
   --signal-foreground: #ffffff;
-  --warn: #b45309;
-  --ink: #05070c;
-  --hairline: rgba(20, 24, 31, 0.1);
-  --rail: rgba(20, 24, 31, 0.06);
+  --warn: #8a4a0c;
+
+  --hairline: rgba(18, 22, 31, 0.13);
+  --rail: rgba(18, 22, 31, 0.06);
+
+  /* 氛围类：见文件头第 3 条 */
+  --dot: rgba(18, 22, 31, 0.07);
+  --glow: rgba(43, 70, 217, 0.1);
+  --panel-tint: rgba(18, 22, 31, 0.02);
+  --panel-shadow: 0 1px 2px rgba(18, 22, 31, 0.06), 0 10px 28px -18px rgba(18, 22, 31, 0.25);
+  --code-bg: rgba(18, 22, 31, 0.05);
+  --grain-blend: multiply;
+  --grain-opacity: 0.035;
+  --selection-bg: rgba(43, 70, 217, 0.22);
+  --selection-fg: #12161f;
+  /* 填充式主按钮的底色：白字压在 --primary 上要有 4.5:1，亮色下两者相同 */
+  --primary-solid: #2b46d9;
 }
 
+/* ── 暗色：墨蓝底 + DeepSeek 蓝 ─────────────────────────────── */
 .dark {
   --background: #05070c;
   --foreground: #e8ecf6;
@@ -57,7 +76,9 @@
   --card-foreground: #e8ecf6;
   --popover: #0b111c;
   --popover-foreground: #e8ecf6;
-  --primary: #4d6bfe;
+  /* 暗色下 --primary 主要当"小字与描边色"用：深底上 #4d6bfe 只有 ~4.5:1，11px 的编号/徽标
+     会掉到 4.0 以下，所以取同色系浅一档（#7d93ff）；实色按钮另有 --primary-solid。 */
+  --primary: #7d93ff;
   --primary-foreground: #ffffff;
   --secondary: #121a29;
   --secondary-foreground: #cdd6ea;
@@ -68,15 +89,27 @@
   --destructive: #ff6b6b;
   --border: rgba(150, 175, 230, 0.14);
   --input: rgba(150, 175, 230, 0.18);
-  --ring: #4d6bfe;
+  --ring: #4d6bfe; /* 焦点环仍用品牌蓝：#4d6bfe 在深底上做 2px 描边足够醒目 */
 
-  /* 本页语义色：signal = 可用/推荐，warn = 需要注意（如自建源未托管） */
   --signal: #3ddc97;
   --signal-foreground: #04140d;
   --warn: #ffb37a;
-  --ink: #05070c;
+
   --hairline: rgba(150, 175, 230, 0.14);
   --rail: rgba(150, 175, 230, 0.07);
+
+  --dot: rgba(150, 175, 230, 0.07);
+  --glow: rgba(77, 107, 254, 0.16);
+  --panel-tint: rgba(150, 175, 230, 0.05);
+  --panel-shadow: none;
+  --code-bg: rgba(150, 175, 230, 0.06);
+  --grain-blend: overlay;
+  --grain-opacity: 0.05;
+  --selection-bg: rgba(77, 107, 254, 0.42);
+  --selection-fg: #ffffff;
+  /* 白字压在 #4d6bfe 上只有 4.33:1（不到 AA 的 4.5:1）—— 
+     --primary 保留品牌色用于描边、指示灯与小字，实色按钮单独压深一档（白字 5.4:1） */
+  --primary-solid: #3f5be8;
 }
 
 @theme inline {
@@ -88,6 +121,7 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-primary-solid: var(--primary-solid);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
@@ -101,9 +135,9 @@
   --color-signal: var(--signal);
   --color-signal-foreground: var(--signal-foreground);
   --color-warn: var(--warn);
-  --color-ink: var(--ink);
   --color-hairline: var(--hairline);
   --color-rail: var(--rail);
+  --color-code: var(--code-bg);
 
   --radius-sm: calc(var(--radius) - 3px);
   --radius-md: calc(var(--radius) - 1px);
@@ -138,11 +172,11 @@
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-size: 15px;
-    line-height: 1.65;
-    /* 点阵 + 顶部冷光：整页氛围的地基，不做成图片 */
+    line-height: 1.7;
+    /* 顶部冷光 + 点阵：整页氛围的地基，两个主题共用结构、只换颜色 */
     background-image:
-      radial-gradient(120% 60% at 50% -10%, rgba(77, 107, 254, 0.16), transparent 60%),
-      radial-gradient(circle at 1px 1px, rgba(150, 175, 230, 0.07) 1px, transparent 0);
+      radial-gradient(120% 55% at 50% -12%, var(--glow), transparent 60%),
+      radial-gradient(circle at 1px 1px, var(--dot) 1px, transparent 0);
     background-size:
       100% 100%,
       22px 22px;
@@ -150,9 +184,21 @@
     overflow-x: hidden;
   }
 
+  /* 主题切换时的过渡：只给颜色，不动布局（避免整页重排的廉价感） */
+  body,
+  .panel,
+  .grain,
+  header,
+  footer {
+    transition:
+      background-color 220ms ease,
+      border-color 220ms ease,
+      color 220ms ease;
+  }
+
   ::selection {
-    background: color-mix(in oklab, var(--primary) 45%, transparent);
-    color: #fff;
+    background: var(--selection-bg);
+    color: var(--selection-fg);
   }
 
   :focus-visible {
@@ -180,6 +226,20 @@
   }
 }
 
+/*
+ * 填充式主按钮在暗色下换用 --primary-solid（原因见 .dark 里的注释）。
+ * ⚠️ 这条规则**故意不放进 @layer**：Tailwind v4 的层序是 theme → base → components → utilities，
+ * utilities 层里的 `bg-primary` 会盖掉 components 层里的同名声明 —— 放进 @layer 会静默失效
+ * （我第一版就踩了：按钮量出来还是 4.33）。未分层的规则优先级高于所有分层规则，这里才生效。
+ * 只覆盖底色与 hover；尺寸、圆角、焦点环、禁用态仍由 shadcn 的 Button 决定。
+ */
+.dark [data-slot="button"][data-variant="default"] {
+  background-color: var(--primary-solid);
+}
+.dark [data-slot="button"][data-variant="default"]:hover {
+  background-color: color-mix(in oklab, var(--primary-solid), white 10%);
+}
+
 @layer components {
   /* ── 排版 ───────────────────────────────────── */
 
@@ -196,17 +256,17 @@
   .text-display-cjk {
     font-family: var(--font-display);
     font-weight: 700;
-    letter-spacing: -0.01em;
-    line-height: 1.12;
+    letter-spacing: -0.015em;
+    line-height: 1.14;
     text-wrap: balance;
   }
 
-  /* 区块编号 / 状态标签：等宽、大写字距 —— 全页的“仪表盘”记号 */
+  /* 区块编号 / 状态标签：等宽、大写字距 —— 全页的「仪表盘」记号 */
   .eyebrow {
     font-family: var(--font-mono);
     font-size: 11px;
     font-weight: 500;
-    letter-spacing: 0.2em;
+    letter-spacing: 0.18em;
     text-transform: uppercase;
     color: var(--muted-foreground);
   }
@@ -225,18 +285,18 @@
 
   /* ── 面板 ───────────────────────────────────── */
 
-  /* 控制台面板：极淡的顶面高光 + 1px 边框，靠内描边而不是阴影区分层次 */
+  /* 控制台面板：极淡的顶面高光 + 1px 边框；亮色下再补一层很浅的投影区分层次 */
   .panel {
     position: relative;
     background:
-      linear-gradient(180deg, rgba(150, 175, 230, 0.05), transparent 40%),
-      color-mix(in oklab, var(--card) 92%, transparent);
+      linear-gradient(180deg, var(--panel-tint), transparent 42%),
+      color-mix(in oklab, var(--card) 94%, transparent);
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
-    backdrop-filter: blur(2px);
+    box-shadow: var(--panel-shadow);
   }
 
-  /* 图纸方角：四角刻度，用于「实时状态」这类重点面板 */
+  /* 图纸方角：四角刻度，用于重点面板 */
   .corners::before,
   .corners::after {
     content: "";
@@ -259,14 +319,14 @@
     border-bottom: 1px solid;
   }
 
-  /* 胶片颗粒：压住大色块，避免“网页感” */
+  /* 胶片颗粒：压住大色块，避免「网页感」 */
   .grain {
     position: fixed;
     inset: 0;
     z-index: 0;
     pointer-events: none;
-    opacity: 0.05;
-    mix-blend-mode: overlay;
+    opacity: var(--grain-opacity);
+    mix-blend-mode: var(--grain-blend);
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
   }
 
@@ -294,9 +354,7 @@
   /* ── 下载行：hover 时左侧信号轨滑出 ───────────── */
   .row-rail {
     position: relative;
-    transition:
-      background-color 200ms ease,
-      border-color 200ms ease;
+    transition: background-color 200ms ease;
   }
   .row-rail::before {
     content: "";
@@ -333,13 +391,28 @@
     animation: rise 720ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
-  /* 直链等宽文本：截断时必须看得见“这是条 URL” */
+  /* 直链等宽文本 */
   .url-line {
     font-family: var(--font-mono);
     font-size: 11.5px;
     line-height: 1.5;
     color: var(--muted-foreground);
     word-break: break-all;
+  }
+
+  /* 章节主标题：比首屏低两档，层级靠字号拉开而不是靠加粗 */
+  .section-title {
+    font-family: var(--font-display);
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    line-height: 1.16;
+    text-wrap: balance;
+    font-size: 1.6rem;
+  }
+  @media (min-width: 640px) {
+    .section-title {
+      font-size: 1.95rem;
+    }
   }
 
   /* 表格/网格共用的发丝分隔，避免每处都写 border 类 */

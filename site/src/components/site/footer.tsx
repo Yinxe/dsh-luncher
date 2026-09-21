@@ -53,16 +53,16 @@ export function Footer({ state }: { state: ReleaseState }) {
 
   return (
     <footer className="mt-8 border-t border-hairline">
-      <div className="mx-auto max-w-[1180px] px-5 py-14 sm:px-8">
+      <div className="mx-auto max-w-[1180px] px-5 py-12 sm:px-8">
         <div className="grid gap-10 lg:grid-cols-12">
           <div className="lg:col-span-5">
             <div className="flex items-center gap-2.5">
               <WhaleMark className="size-[22px] text-primary" />
               <span className="text-display text-[12.5px] tracking-[0.22em] uppercase">DSH Launcher</span>
             </div>
-            <p className="mt-4 max-w-[42ch] text-[13px] text-muted-foreground">
-              @deepseek-ai/dsh（DeepSeek Harness CLI）的跨平台图形启动器。
-              本页只是它的介绍与下载入口 —— 页面上的版本号、体积与直链都是打开时现拉的。
+            <p className="mt-4 max-w-[40ch] text-[13px] text-muted-foreground">
+              DeepSeek Harness（@deepseek-ai/dsh）的跨平台图形启动器。
+              这一页只是它的介绍与下载入口 —— 上面的版本号、体积与直链都是打开时现拉的。
             </p>
             <div className="mt-5 flex items-center gap-2">
               <a
