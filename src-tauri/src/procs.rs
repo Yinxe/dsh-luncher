@@ -294,6 +294,10 @@ pub fn spawn_detached(
         })
         .ok();
 
+    // 进程表快照里还没有这个新 pid（Windows TTL 8 秒、枚举本身还要 1 秒级），
+    // 立刻要求重算一轮：实例在新表里可被认成 dsh，避免「刚起来就被当成 PID 复用」。
+    invalidate_process_cache();
+
     Ok(ProcInfo {
         id,
         version: target.version.clone(),
@@ -651,6 +655,19 @@ pub fn validate_detached_registry() -> Vec<DetachedRecord> {
         match check_pid(r.pid) {
             // 确认已死 / PID 已被复用成别的程序 → 清掉
             PidCheck::NotDsh => {
+                // 例外：登记比当前进程表还新 —— 这张表拍完之后它才起来，查不到是必然，
+                // 此刻清掉就等于把刚拉起的独立进程的日志通道（log_file）永久丢掉。
+                // 保守留到下一轮枚举（TTL 8 秒内），那时表比启动时刻新，判定才作数。
+                if snapshot_predates(r.started_at) {
+                    crate::diag::debug("instance", || {
+                        format!(
+                            "独立进程 pid={} profile={:?} 晚于当前进程表快照，暂不判定存活（下一轮枚举再见分晓）",
+                            r.pid, r.profile
+                        )
+                    });
+                    valid.push(r);
+                    continue;
+                }
                 crate::diag::info(
                     "instance",
                     &format!(
@@ -735,6 +752,10 @@ fn detached_marker(pid: u32) -> bool {
 /// 4. **枚举失败 ≠ 进程不存在**：`ok=false` 时调用方不得据此清掉实例登记（见 `check_pid`）。
 struct ProcessSnapshot {
     at: Instant,
+    /// 这份表**建立时的墙钟毫秒**（与 `DetachedRecord::started_at` 同一把钟）。
+    /// 用途只有一个：判断「某进程是在这张表拍完之后才起来的」——那时表里查不到它
+    /// 属于正常，不能据此说它已经死了（见 `snapshot_predates`）。
+    taken_at_ms: u64,
     /// 进程状态已变化（停止 / 杀掉实例后置位）——下次读取需要重算
     stale: bool,
     /// 本轮是否拿到了完整进程表
@@ -777,6 +798,29 @@ fn read_snapshot() -> Option<(bool, Arc<Vec<(u32, String)>>)> {
 
 fn snapshot_is_fresh(s: &ProcessSnapshot) -> bool {
     !s.stale && s.at.elapsed() < snapshot_ttl()
+}
+
+/// 当前进程表快照的墙钟拍摄时刻（毫秒）；还没有任何快照时为 `None`。
+fn snapshot_taken_at_ms() -> Option<u64> {
+    snapshot_cache()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.taken_at_ms)
+}
+
+/// 这份进程表是不是**早于**该时刻拍的（表里查不到那时还没起来的进程，属于正常）。
+///
+/// 为什么必须区分：Windows 上枚举一轮要起 PowerShell（1s 级），快照 TTL 8 秒。
+/// 独立进程刚被拉起、前端立刻就轮询校验时，手里往往还是**拉起之前**那张表 ——
+/// 查不到新 pid 便被当成「陈旧登记」清掉，而注册表里的 `log_file` 是实例终端
+/// 读取独立进程日志的**唯一**来源：清掉之后实例日志文件还在、终端却永远读不到，
+/// 界面上它还会降级成「不是启动器拉起的」。
+/// 快照晚于进程启动（或一样早）时 `check_pid` 的判定才是可信的，照常清理。
+fn snapshot_predates(started_at_ms: u64) -> bool {
+    snapshot_taken_at_ms()
+        .map(|taken| taken <= started_at_ms)
+        .unwrap_or(true)
 }
 
 /// 后台线程：维护进程表快照，并保证**任何时刻只有一个枚举在跑**。
@@ -834,6 +878,7 @@ pub fn refresh_process_snapshot() {
     let (ok, list) = enumerate_processes_uncached();
     *snapshot_cache().lock().unwrap() = Some(ProcessSnapshot {
         at: Instant::now(),
+        taken_at_ms: now_millis(),
         stale: false,
         ok,
         list: Arc::new(list),
@@ -1532,6 +1577,71 @@ mod tests {
         // remove_detached_record：只摘掉指定 PID，不动其它条目
         remove_detached_record(u32::MAX);
         assert!(!read_detached_registry().iter().any(|r| r.pid == u32::MAX));
+    }
+
+    /// Windows 回归：独立进程**刚拉起**时，存活校验手里往往还是「拉起之前」那张进程表
+    /// （枚举一轮要 1 秒级、TTL 8 秒）。表里当然没有新 pid —— 不得据此当成陈旧登记清掉：
+    /// 注册表里的 `log_file` 是实例终端读取独立进程日志的唯一来源，清掉之后就是
+    /// 「日志文件里明明有内容，侧边实例终端却什么都读不到」，实例还会降级成「非内嵌」。
+    #[test]
+    fn fresh_detached_record_survives_snapshot_taken_before_it_started() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+
+        // 表先拍一轮（守护线程的常态），进程"随后"才起来
+        refresh_process_snapshot();
+        let started_at = now_millis();
+        let taken = snapshot_taken_at_ms().expect("刚刷过，快照应存在");
+        assert!(started_at >= taken, "登记时刻不应早于快照拍摄时刻");
+        // 表与登记同龄（或更早）→ 查不到不能作数；登记远早于表 → 表的判定才可信
+        assert!(snapshot_predates(taken));
+        assert!(!snapshot_predates(taken.saturating_sub(60_000)));
+
+        // u32::MAX 必然不是本机进程：check_pid 一定回 NotDsh，唯一能救它的是「表比登记旧」
+        let log_path = tmp.join("web-fresh.log");
+        std::fs::write(&log_path, "booting…\ndsh web: http://127.0.0.1:39998/?token=t\n").unwrap();
+        append_detached_record(&DetachedRecord {
+            pid: u32::MAX,
+            profile: "web-fresh".into(),
+            version: "0.0.0".into(),
+            started_at,
+            log_file: log_path.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+
+        // 把快照钉在「登记之前」：消除并行跑测试时别的用例恰好刷新快照的时序抖动，
+        // 让这一轮校验手里的表就是生产里那张「拉起之前」的表
+        {
+            let mut guard = snapshot_cache().lock().unwrap();
+            let snap = guard.as_mut().expect("刚刷过，快照应存在");
+            snap.taken_at_ms = started_at.saturating_sub(1);
+        }
+
+        let valid = validate_detached_registry();
+        assert!(
+            valid.iter().any(|r| r.pid == u32::MAX),
+            "刚拉起、进程表还没重算的独立进程不能被当成陈旧登记清掉"
+        );
+        // 该实例的日志通道必须还在：实例终端就是按 PID 从这里读日志的
+        let (_p, text, _cut) = read_instance_log_tail(u32::MAX, 4096)
+            .unwrap()
+            .expect("登记保留时实例终端应能读到独立进程日志");
+        assert!(text.contains("dsh web: http://127.0.0.1:39998/"), "日志内容: {text:?}");
+
+        // 真正重算过一轮、表已晚于启动时刻后仍查不到 → 这时才判定已死并清理
+        std::thread::sleep(Duration::from_millis(20));
+        refresh_process_snapshot();
+        assert!(
+            validate_detached_registry().is_empty(),
+            "表比登记新之后，确认不存在的 PID 应被清掉"
+        );
+        assert!(read_instance_log_tail(u32::MAX, 4096).unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::remove_var("DSH_LAUNCHER_HOME");
     }
 
     /// issue #1 回归：存活 / 端口归属判定必须走内存快照，**绝不能逐 PID 起子进程**。
