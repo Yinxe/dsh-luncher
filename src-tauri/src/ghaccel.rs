@@ -245,6 +245,37 @@ pub fn rewrite(url: &str, prefix: &str) -> String {
     u.to_string()
 }
 
+/// 「前缀代理 + 原始地址」→ 原始地址（不是这种形式就返回 `None`）。
+///
+/// 为什么必须有这个反向操作：代理前缀是**临时的**（会限速、会 403、会换域名、会跑路），
+/// 而 `origin` 是**永久的**。一旦 `<前缀>https://github.com/...` 被写进远端，
+/// 代理一失效这个仓库就永久 `pull` 不动；而且我们的加速注入
+/// （`url.<前缀>.insteadOf`）只匹配 `https://github.com/`，对已经被污染的地址**完全不生效**。
+/// 用户手抄带前缀的 clone 地址后「之后就一直不能 pull 了」就是这个形态。
+///
+/// 所以：clone 前先把输入地址还原，已有的克隆在 fetch/pull 前把 `origin` 修回来。
+/// 判定**不查内置前缀清单**（用户可能用清单外的代理，例如 `github.dpik.top`）：
+/// 只要 `https://github.com/` 出现在非开头位置，它前面那截就当作代理前缀切掉。
+///
+/// 不处理的形态：path 风格代理（`https://hub.xxx/o/r`，信息不足以还原）、
+/// `git@github.com:` 这类 SSH 地址（那是用户自己的认证方式，不该被悄悄改成 https）。
+pub fn strip_proxy_prefix(url: &str) -> Option<String> {
+    const GH: &str = "https://github.com/";
+    let u = url.trim();
+    if u.is_empty() {
+        return None;
+    }
+    // 只做 ASCII 小写化，字节下标与原文一致，可以安全切片
+    let lower = u.to_ascii_lowercase();
+    if lower.starts_with(GH) {
+        return None;
+    }
+    let i = lower.find(GH)?;
+    // 统一成规范的小写 scheme + host，路径部分保持原样（大小写敏感）
+    let clean = format!("{GH}{}", &u[i + GH.len()..]);
+    (clean.len() > GH.len()).then_some(clean)
+}
+
 /// 最快且满足能力要求的前缀
 pub fn best_for(accel: &GhAccel, need_git: bool) -> Option<&ProxyNode> {
     if need_git {
@@ -503,6 +534,35 @@ mod tests {
         // 非法前缀 → 不注入任何变量（宁可不加速，也不能给 git 塞坏配置）
         assert!(git_env_for("a.example").is_empty());
         assert!(git_env_for("  ").is_empty());
+    }
+
+    /// 脏地址（前缀 + 原始地址）必须能被还原成原始地址：否则 origin 里写着死代理，
+    /// 且 insteadOf 注入对它无效 —— 用户实际就是这么卡住「再也 pull 不动」的。
+    #[test]
+    fn strip_proxy_prefix_recovers_canonical_url() {
+        // 内置清单里的前缀
+        assert_eq!(
+            strip_proxy_prefix("https://gh-proxy.com/https://github.com/o/r"),
+            Some("https://github.com/o/r".into())
+        );
+        // 清单外的代理（用户手抄的那种）同样能还原
+        assert_eq!(
+            strip_proxy_prefix("https://github.dpik.top/https://github.com/zhu1090093659/dsh-web"),
+            Some("https://github.com/zhu1090093659/dsh-web".into())
+        );
+        // 大小写混乱也归一
+        assert_eq!(
+            strip_proxy_prefix("https://GH.example/HTTPS://GitHub.com/O/R"),
+            Some("https://github.com/O/R".into())
+        );
+        // 干净的地址、SSH 形式、别的平台：一律不动
+        assert_eq!(strip_proxy_prefix("https://github.com/o/r"), None);
+        assert_eq!(strip_proxy_prefix("https://github.com/o/r.git"), None);
+        assert_eq!(strip_proxy_prefix("git@github.com:o/r.git"), None);
+        assert_eq!(strip_proxy_prefix("https://gitlab.com/o/r"), None);
+        // path 风格代理信息不足，不做猜测
+        assert_eq!(strip_proxy_prefix("https://hub.fastgit.org/o/r"), None);
+        assert_eq!(strip_proxy_prefix(""), None);
     }
 
     #[test]

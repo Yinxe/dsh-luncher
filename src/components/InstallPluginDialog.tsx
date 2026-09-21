@@ -160,13 +160,25 @@ function accelText(a: GhAccel | null): string {
  */
 type EffectiveGit = { kind: "accel"; url: string } | { kind: "direct"; why: string };
 
+/**
+ * 「代理前缀 + 原始地址」→ 原始地址（与后端 `ghaccel::strip_proxy_prefix` 同一条规则）。
+ *
+ * 用户可能粘一个带前缀的地址（自己抄的、或旧版本留下的）。前缀只用于本次加速，
+ * 绝不能进 origin —— 代理会失效，写进去就永久 pull 不动了。
+ */
+function stripProxyPrefix(url: string): string {
+  const GH = "https://github.com/";
+  const i = url.toLowerCase().indexOf(GH);
+  return i <= 0 ? url : `${GH}${url.slice(i + GH.length)}`;
+}
+
 function effectiveGit(
   raw: string,
   on: boolean,
   accel: GhAccel | null,
   preferred: string,
 ): EffectiveGit | null {
-  const url = normalizeGitUrl(raw);
+  const url = stripProxyPrefix(normalizeGitUrl(raw));
   if (!url) return null;
   if (/^(git@|ssh:\/\/|git:\/\/)/.test(url)) {
     return { kind: "direct", why: "SSH 形式的地址不会被改写，想走加速请改用 https 地址" };
@@ -310,6 +322,11 @@ export default function InstallPluginDialog({
   }, [cloneInput, cloneRef, accelOn, clonePath]);
 
   const accelSummary = useMemo(() => accelText(accelInfo), [accelInfo]);
+  // 粘进来的地址带代理前缀（用户自己抄的）：要明确告诉他会按原始地址克隆
+  const clonePastedWithPrefix = useMemo(() => {
+    const raw = normalizeGitUrl(cloneInput);
+    return Boolean(raw) && stripProxyPrefix(raw) !== raw;
+  }, [cloneInput]);
   // 本次 clone 真正会请求的地址（直连时给出原因），见 effectiveGit
   const cloneEffective = useMemo(
     () => effectiveGit(cloneInput, accelOn, accelInfo, accelPreferred),
@@ -568,6 +585,13 @@ export default function InstallPluginDialog({
                   但候选与 <span className="font-mono">lib/</span> 判定就是安装用的那份工作树（不再查 jsDelivr 索引）。
                 </FieldDescription>
                 {/* git 的 insteadOf 在进程内部改写地址，命令行里永远是原地址 —— 这里明写实际请求 */}
+                {clonePastedWithPrefix && (
+                  <p className="text-[10.5px] leading-relaxed text-amber-600">
+                    地址里带着代理前缀：会按原始地址
+                    <span className="font-mono"> {stripProxyPrefix(normalizeGitUrl(cloneInput))} </span>
+                    克隆（前缀只用于本次加速，不会写进仓库的 origin）。
+                  </p>
+                )}
                 {cloneEffective && (
                   <p className="font-mono text-[10.5px] leading-relaxed text-muted-foreground">
                     {cloneEffective.kind === "accel" ? (

@@ -1083,6 +1083,9 @@ pub async fn probe_clone_repo(
     if url.is_empty() {
         return Err("git 远端地址为空".into());
     }
+    // 输入里带了代理前缀就先剥掉：代理只用于本次加速，写进 origin 会在代理失效后
+    // 让这个克隆永久拉不动（用户手抄带前缀的地址后正是这样卡住的）
+    let url = crate::ghaccel::strip_proxy_prefix(&url).unwrap_or(url);
     if !(url.starts_with("http://")
         || url.starts_with("https://")
         || url.starts_with("git@")
@@ -1134,6 +1137,9 @@ pub async fn probe_clone_repo(
             }
         }
         let existed = root_clone.join(".git").is_dir();
+        // 老克隆的 origin 可能是代理地址（手抄的 URL / 旧版本留下的）：先修回来 ——
+        // 否则本次加速对它无效（insteadOf 只认 https://github.com/），代理一挂就永久拉不动
+        let _ = crate::plugin::fix_proxied_remote(&root_clone);
         let timeout = std::time::Duration::from_secs(if existed { 180 } else { 300 });
         if existed {
             let dir = root_clone.to_string_lossy().into_owned();

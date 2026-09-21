@@ -126,6 +126,19 @@ pub enum Step {
     Dsh { args: Vec<String> },
     /// 安装前预检远端可匿名访问（放任务里跑：点击立即有反馈，不必让 UI 等网络）
     ProbeRemote { url: String },
+    /// 内部步骤：把已经被代理前缀污染的 `origin` 还原成原始地址
+    ///
+    /// 代理是临时的、`origin` 是永久的：`<前缀>https://github.com/...` 一旦落进配置，
+    /// 代理失效后就永久 pull 不动（用户实际踩过），而且加速注入只认
+    /// `https://github.com/`、对脏地址无效。**修不了不中断任务**，照原样继续。
+    FixRemote { dir: PathBuf },
+    /// 内部步骤：修掉 git 的「中断克隆」哨兵 HEAD
+    ///
+    /// `git clone` 中途被打断（断网、超时被杀）会留下 `ref: refs/heads/.invalid`：
+    /// 这个名字不合法、文件却真实存在，于是之后每一次 `git pull` 都必然失败
+    /// （`cannot lock ref 'HEAD': reference already exists`），用户点几次「更新」都不会好。
+    /// **修不了不中断任务**，后面的 pull 会照常给出真实错误。
+    FixHead { dir: PathBuf },
     /// 内部步骤：删除目录（克隆出的本地仓库）
     RmDir { path: PathBuf },
     /// 内部步骤：只写一行提示
@@ -404,8 +417,7 @@ fn emit_job<R: Runtime>(app: &AppHandle<R>, handle: &Arc<JobHandle>) {
 }
 
 /// `git clone` 因目标目录已存在而失败 —— 重试时必然遇到，按"用已存在的仓库继续"处理
-fn looks_like_clone_exists(program: &str, args: &[String], out: &str) -> bool {
-    program == "git"
+fn looks_like_clone_exists(program: &str, args: &[String], out: &str) -> bool {    program == "git"
         && args.first().map(String::as_str) == Some("clone")
         && (out.contains("already exists")
             || out.contains("已存在")
@@ -440,12 +452,66 @@ fn github_urls_in(steps: &[Step]) -> Vec<String> {
     out
 }
 
+/// 把本地克隆的 `origin` 从「代理前缀 + 原始地址」还原成原始地址。
+///
+/// 返回 `Some((旧, 新))` 表示确实改了；已经是干净地址返回 `None`。
+/// 读不到 origin（新目录 / 没有远端）不算错误，同样返回 `None`。
+pub fn fix_proxied_remote(dir: &Path) -> Result<Option<(String, String)>, String> {
+    let git = PathBuf::from("git");
+    let d = dir.to_string_lossy().into_owned();
+    let read = |args: Vec<String>| {
+        util::run_captured_in(
+            &git,
+            &args,
+            None,
+            &[],
+            std::time::Duration::from_secs(10),
+        )
+    };
+    let Some((ok, out)) = read(vec![
+        "-C".into(),
+        d.clone(),
+        "remote".into(),
+        "get-url".into(),
+        "origin".into(),
+    ]) else {
+        return Err("启动 git 失败（确认 git 在 PATH 中）".into());
+    };
+    // 没有 origin 或目录不是仓库：按「无需处理」对待，不要打断任务
+    if !ok {
+        return Ok(None);
+    }
+    let old = out.trim();
+    let Some(new) = crate::ghaccel::strip_proxy_prefix(old) else {
+        return Ok(None);
+    };
+    let Some((ok, err)) = read(vec![
+        "-C".into(),
+        d,
+        "remote".into(),
+        "set-url".into(),
+        "origin".into(),
+        new.clone(),
+    ]) else {
+        return Err("启动 git 失败".into());
+    };
+    if !ok {
+        return Err(format!("git remote set-url 失败：{}", err.trim()));
+    }
+    crate::diag::info(
+        "plugin",
+        &format!("origin 从代理地址还原为原始地址：{old} → {new}"),
+    );
+    Ok(Some((old.to_string(), new)))
+}
+
 /// 结束子进程**及其整个进程组**。
 ///
 /// pnpm / node / sh 都会派生子进程（构建、sleep 等），只 kill 直接子进程时，
 /// 孙进程仍持有 stdout/stderr 管道，读取线程不会返回，任务看起来「卡住不结束」。
 /// 因此 spawn 时把子进程设为新进程组组长（unix），取消时按组下发 SIGKILL。
-fn kill_tree(child: &mut Child) {    #[cfg(unix)]
+fn kill_tree(child: &mut Child) {
+    #[cfg(unix)]
     {
         let pid = child.id() as i32;
         // 负 pid = 发往整个进程组；失败再退回只杀直接子进程
@@ -603,6 +669,42 @@ pub fn start_job<R: Runtime>(
                                 ),
                             );
                         }
+                    }
+                }
+                Step::FixRemote { dir } => {
+                    // 只修「前缀 + 原始地址」这种能被机械还原的形态；修不了就当无事发生
+                    match fix_proxied_remote(dir) {
+                        Ok(Some((old, new))) => {
+                            emit_line(
+                                &app,
+                                &handle,
+                                id,
+                                "info",
+                                &format!("⚠ 远端地址带着代理前缀（代理只用于加速，不该写进 origin），已还原为原始地址：\n   {old}\n   → {new}"),
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(e) => emit_line(
+                            &app,
+                            &handle,
+                            id,
+                            "info",
+                            &format!("（检查远端地址时出错，按原样继续：{e}）"),
+                        ),
+                    }
+                }
+                Step::FixHead { dir } => {
+                    // 只修「git 自己的中断克隆哨兵」这一种形态；别的 HEAD 一律不动
+                    match fix_broken_head(dir) {
+                        Ok(Some(msg)) => emit_line(&app, &handle, id, "info", &format!("⚠ {msg}")),
+                        Ok(None) => {}
+                        Err(e) => emit_line(
+                            &app,
+                            &handle,
+                            id,
+                            "info",
+                            &format!("（检查 HEAD 时出错，按原样继续：{e}）"),
+                        ),
                     }
                 }
                 Step::RmDir { path } => {
@@ -1085,7 +1187,10 @@ fn describe_first_step(steps: &[Step]) -> String {
             Step::Cmd { label, .. } => return label.clone(),
             Step::Dsh { args } => return format!("dsh plugin {}", args.join(" ")),
             Step::RmDir { path } => return format!("rm -rf {}", path.display()),
-            Step::Note { .. } | Step::ProbeRemote { .. } => continue,
+            Step::Note { .. }
+            | Step::ProbeRemote { .. }
+            | Step::FixRemote { .. }
+            | Step::FixHead { .. } => continue,
         }
     }
     String::new()
@@ -1352,7 +1457,11 @@ fn build_steps(clone_root: &Path, plugin_dir: &Path) -> Vec<Step> {
 pub fn steps_for_clone_install(
     input: &CloneInstallInput,
 ) -> Result<(Vec<Step>, PathBuf), String> {
-    let url = input.url.trim();
+    let raw_url = input.url.trim();
+    // 输入里带了代理前缀就先剥掉：代理是临时的，写进 origin 就会在代理失效后永久拉不动；
+    // 剥掉之后本次加速照旧生效（走 insteadOf 注入），而 origin 永远是原始地址。
+    let stripped = crate::ghaccel::strip_proxy_prefix(raw_url);
+    let url = stripped.as_deref().unwrap_or(raw_url);
     if url.is_empty() {
         return Err("git 远端地址为空".into());
     }
@@ -1384,6 +1493,9 @@ pub fn steps_for_clone_install(
         steps.push(Step::Note {
             text: format!("已存在本地克隆，先同步远端：{}", root.display()),
         });
+        // 老克隆的 origin 可能是代理地址（手抄的 URL / 旧版本留下的）：先修回来，
+        // 否则它既不走本次的加速注入，代理一挂就永久拉不动
+        steps.push(Step::FixRemote { dir: root.clone() });
         steps.push(Step::Cmd {
             program: "git".into(),
             args: vec!["-C".into(), dir.clone(), "fetch".into(), "--all".into(), "--prune".into()],
@@ -1449,6 +1561,9 @@ pub fn steps_for_pull_update_root(
         Step::Note {
             text: format!("git pull（{}）", root.display()),
         },
+        // 先修远端：origin 若被写成代理地址，代理一失效就永久 pull 不动，
+        // 而且加速注入只认 https://github.com/、对脏地址无效
+        Step::FixRemote { dir: root.clone() },
         Step::Cmd {
             program: "git".into(),
             args: vec!["-C".into(), root.to_string_lossy().into_owned(), "pull".into(), "--ff-only".into()],
@@ -2086,29 +2201,120 @@ mod tests {
             other => panic!("末步应为 dsh plugin add，实际 {other:?}"),
         }
 
-        // 已存在克隆：改为 fetch + pull，不再 clone
+        // 已存在克隆：先修远端（origin 别留着代理前缀）→ fetch + pull，不再 clone
         std::fs::create_dir_all(root.join(".git")).unwrap();
         let (steps2, _) = steps_for_clone_install(&input).unwrap();
         assert!(matches!(&steps2[0], Step::Note { .. }), "steps2={steps2:?}");
+        assert!(
+            matches!(&steps2[1], Step::FixRemote { .. }),
+            "已存在的克隆必须先修远端，steps2={steps2:?}"
+        );
         assert!(steps2.iter().any(|s| matches!(
             s,
             Step::Cmd { args, .. } if args.iter().any(|a| a == "fetch")
         )));
 
-        // pull 升级：git pull --ff-only → 构建 → 重新 link
+        // pull 升级：先修远端 → git pull --ff-only → 构建 → 重新 link
         let (steps3, _) = steps_for_pull_update_root(&root, Some("plugins/mcwiki-search"), true).unwrap();
         assert!(matches!(&steps3[0], Step::Note { .. }));
-        match &steps3[1] {
+        assert!(
+            matches!(&steps3[1], Step::FixRemote { .. }),
+            "pull 之前必须先修远端，steps3={steps3:?}"
+        );
+        match &steps3[2] {
             Step::Cmd { args, .. } => {
                 assert!(args.iter().any(|a| a == "pull"));
                 assert!(args.iter().any(|a| a == "--ff-only"));
             }
-            other => panic!("pull 升级第 2 步应为 git pull，实际 {other:?}"),
+            other => panic!("pull 升级第 3 步应为 git pull，实际 {other:?}"),
         }
         // 非 git 目录必须被拒
         assert!(steps_for_pull_update_root(&tmp, None, false).is_err());
 
         std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 输入里带代理前缀时必须先剥掉：代理是临时的，写进 origin 就永久污染
+    /// （用户手抄一次带前缀的 clone 地址，之后再也 pull 不动就是这么来的）。
+    #[test]
+    fn proxied_clone_url_is_normalized() {
+        let _env = util::DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-clone-dirty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+
+        let input = CloneInstallInput {
+            url: "https://github.dpik.top/https://github.com/Yinxe/deepseek-harness-plugins".into(),
+            git_ref: None,
+            sub_path: None,
+            build: false,
+        };
+        let (steps, root) = steps_for_clone_install(&input).unwrap();
+        match &steps[0] {
+            Step::Cmd { args, label, .. } => {
+                assert!(
+                    args.iter().any(|a| a == "https://github.com/Yinxe/deepseek-harness-plugins"),
+                    "clone 用的必须是原始地址：{args:?}"
+                );
+                assert!(
+                    !args.iter().any(|a| a.contains("dpik.top")),
+                    "代理前缀不能进 origin：{args:?}"
+                );
+                assert!(!label.contains("dpik.top"), "命令行提示也不该带前缀：{label}");
+            }
+            other => panic!("首步应为 git clone，实际 {other:?}"),
+        }
+        // 目录名按原始地址推导
+        assert_eq!(root, tmp.join(".dsh-launcher/git-plugins/Yinxe-deepseek-harness-plugins"));
+
+        std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 已存在的克隆：origin 带着代理前缀时必须被还原，且操作幂等
+    #[test]
+    fn fix_proxied_remote_repairs_origin() {
+        let tmp = std::env::temp_dir().join(format!("dsh-fixremote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let git = |args: &[&str]| {
+            let ok = util::hidden_command("git")
+                .args(args)
+                .current_dir(&tmp)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?} 失败");
+        };
+        git(&["init", "-q"]);
+        // 模拟用户手抄/旧版本留下的脏远端
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.dpik.top/https://github.com/Yinxe/deepseek-harness-plugins.git",
+        ]);
+        assert_eq!(
+            fix_proxied_remote(&tmp).unwrap(),
+            Some((
+                "https://github.dpik.top/https://github.com/Yinxe/deepseek-harness-plugins.git".into(),
+                "https://github.com/Yinxe/deepseek-harness-plugins.git".into()
+            ))
+        );
+        // 幂等：已经是干净地址就不再动
+        assert_eq!(fix_proxied_remote(&tmp).unwrap(), None);
+        // 干净地址 + SSH 形式都不动
+        git(&["remote", "set-url", "origin", "git@github.com:o/r.git"]);
+        assert_eq!(fix_proxied_remote(&tmp).unwrap(), None);
+        // 没有 origin 的目录（例如刚 create_dir_all 出来的）不算错误
+        let empty = tmp.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(fix_proxied_remote(&empty).unwrap(), None);
+
         std::fs::remove_dir_all(&tmp).ok();
     }
 
