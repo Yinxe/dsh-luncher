@@ -412,13 +412,40 @@ fn looks_like_clone_exists(program: &str, args: &[String], out: &str) -> bool {
             || out.contains("would be overwritten"))
 }
 
+/// 任务里出现的 github 地址（clone 的远端、安装前的预检地址），去重、保持顺序。
+///
+/// 用途只有一个：在任务日志里明写「实际请求会变成什么」。git 的 `insteadOf` 是在
+/// git 进程内部改写的，命令行那行仍然是原地址，用户从输出里看不出加速有没有生效。
+fn github_urls_in(steps: &[Step]) -> Vec<String> {
+    fn push(out: &mut Vec<String>, raw: &str) {
+        let u = raw.trim();
+        if crate::ghaccel::is_github_url(u) && !out.iter().any(|x| x == u) {
+            out.push(u.to_string());
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for s in steps {
+        match s {
+            Step::Cmd { args, .. } => {
+                for a in args {
+                    if a.starts_with("http") || a.starts_with("git@") {
+                        push(&mut out, a);
+                    }
+                }
+            }
+            Step::ProbeRemote { url } => push(&mut out, url),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// 结束子进程**及其整个进程组**。
 ///
 /// pnpm / node / sh 都会派生子进程（构建、sleep 等），只 kill 直接子进程时，
 /// 孙进程仍持有 stdout/stderr 管道，读取线程不会返回，任务看起来「卡住不结束」。
 /// 因此 spawn 时把子进程设为新进程组组长（unix），取消时按组下发 SIGKILL。
-fn kill_tree(child: &mut Child) {
-    #[cfg(unix)]
+fn kill_tree(child: &mut Child) {    #[cfg(unix)]
     {
         let pid = child.id() as i32;
         // 负 pid = 发往整个进程组；失败再退回只杀直接子进程
@@ -468,17 +495,22 @@ pub fn start_job<R: Runtime>(
         let p = settings.github_proxy.trim();
         if p.is_empty() { None } else { Some(p.to_string()) }
     };
-    let accel_envs: Vec<(String, String)> = if settings.github_accel {
+    // 前缀只挑一次：既用来构造给 git 的环境变量，也用来在日志里写「实际请求地址」。
+    // 两边各算一次的话，改动挑选规则时就会出现「日志写 A、git 走 B」。
+    let accel_prefix: Option<String> = if settings.github_accel {
         if crate::ghaccel::ensure_cached(crate::ghaccel::CACHE_TTL_SECS).is_none() {
             // 首次使用：后台测速，本次任务先按普通网络跑
             crate::ghaccel::spawn_refresh(settings.github_proxy_extra.clone(), false);
         }
         crate::ghaccel::current()
-            .map(|a| crate::ghaccel::git_env(&a, accel_pref.as_deref()))
-            .unwrap_or_default()
+            .and_then(|a| crate::ghaccel::pick_prefix(&a, accel_pref.as_deref(), true))
     } else {
-        Vec::new()
+        None
     };
+    let accel_envs: Vec<(String, String)> = accel_prefix
+        .as_deref()
+        .map(crate::ghaccel::git_env_for)
+        .unwrap_or_default();
 
     let state2 = state.clone();
     std::thread::spawn(move || {
@@ -488,20 +520,50 @@ pub fn start_job<R: Runtime>(
         // 变更前的 profile 清单快照（安装后校验 / 卸载后对账用）
         let mut pre_snapshot: Option<crate::verify::ProfileSnapshot> = None;
 
-        if !accel_envs.is_empty() {
-            if let Some(accel) = crate::ghaccel::current() {
+        // 「到底走没走代理」必须能从日志里看出来：git 的 insteadOf 是在进程内部改写的，
+        // 命令行那行 `$ git clone https://github.com/…` 永远是原地址 —— 不额外写一行，
+        // 用户只能猜（而且很容易以为加速没生效）。
+        let links = github_urls_in(&req.steps);
+        match (&accel_prefix, settings.github_accel, links.is_empty()) {
+            (Some(p), _, false) => {
+                if let Some(accel) = crate::ghaccel::current() {
+                    emit_line(
+                        &app,
+                        &handle,
+                        id,
+                        "info",
+                        &format!(
+                            "⚡ GitHub 加速：{}（{} 小时前测速，本次任务里的 github 链接都会拼上该前缀）",
+                            crate::ghaccel::summary(&accel, accel_pref.as_deref(), true),
+                            accel.age_secs() / 3600
+                        ),
+                    );
+                }
+                for l in &links {
+                    // git 只改写 https://github.com/ 前缀，SSH 形式不在匹配范围里
+                    let shown = if l.starts_with("git@") || l.starts_with("ssh://") {
+                        format!("{l}（SSH 形式不会被改写，想走加速请改用 https 地址）")
+                    } else {
+                        format!("{l} → {}", crate::ghaccel::rewrite(l, p))
+                    };
+                    emit_line(&app, &handle, id, "info", &format!("⚡ 实际请求：{shown}"));
+                }
+            }
+            (None, true, false) => {
+                let reason = if crate::ghaccel::current().is_none() {
+                    "还没测速（首次使用会在后台测，本次先直连；也可到设置里点「测速」立刻生效）"
+                } else {
+                    "测速结果里没有支持 git 的前缀（只放行文件下载的代理 clone 会 403），可在设置里补充自建代理"
+                };
                 emit_line(
                     &app,
                     &handle,
                     id,
                     "info",
-                    &format!(
-                        "⚡ GitHub 加速：{}（{} 小时前测速，本次任务里的 github 链接都会拼上该前缀）",
-                        crate::ghaccel::summary(&accel, accel_pref.as_deref(), true),
-                        accel.age_secs() / 3600
-                    ),
+                    &format!("⚠ 本次未走 GitHub 加速：{reason}"),
                 );
             }
+            _ => {}
         }
 
         for step in &req.steps {

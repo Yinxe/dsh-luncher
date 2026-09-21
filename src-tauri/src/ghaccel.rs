@@ -412,7 +412,22 @@ pub async fn refresh(extra: &str, force: bool) -> Result<GhAccel, String> {
 
 /// 给 git 子进程的 `insteadOf` 环境变量：已有克隆执行 pull 也会走代理
 pub fn git_env(accel: &GhAccel, preferred: Option<&str>) -> Vec<(String, String)> {
-    let Some(prefix) = pick_prefix(accel, preferred, true) else {
+    match pick_prefix(accel, preferred, true) {
+        Some(prefix) => git_env_for(&prefix),
+        None => Vec::new(),
+    }
+}
+
+/// 已知前缀时的同一份环境变量。
+///
+/// 单独暴露是为了让**日志与 git 用的是同一个前缀**：调用方先 `pick_prefix` 一次，
+/// 既拿它写「实际请求 <url> → <改写后地址>」，又拿它构造 env —— 两边各算一次的话，
+/// 将来任何一处改了挑选规则都会出现「日志写 A、git 走 B」。
+///
+/// ⚠️ 只覆盖 `https://github.com/`：`git@github.com:owner/repo`（SSH）不在
+/// `insteadOf` 的匹配范围里，想走加速必须换成 https 地址（`rewrite` 只用于下载直链）。
+pub fn git_env_for(prefix: &str) -> Vec<(String, String)> {
+    let Some(prefix) = normalize_prefix(prefix) else {
         return Vec::new();
     };
     vec![
@@ -468,6 +483,26 @@ mod tests {
         // 与内置重复的只留一个
         assert_eq!(list.iter().filter(|p| *p == "https://gh-proxy.com/").count(), 1);
         assert!(list.iter().all(|p| p.starts_with("https://")));
+    }
+
+    /// insteadOf 的 key 形态很容易写坏（一个字符不对 git 就整串忽略、静默直连），
+    /// 所以把三件套逐字钉住 —— 这条断言就是「加速到底有没有生效」的第一道防线。
+    #[test]
+    fn git_env_pins_the_insteadof_key() {
+        let env: std::collections::HashMap<_, _> =
+            git_env_for("https://gh-proxy.com").into_iter().collect();
+        assert_eq!(env.get("GIT_CONFIG_COUNT").map(String::as_str), Some("1"));
+        assert_eq!(
+            env.get("GIT_CONFIG_KEY_0").map(String::as_str),
+            Some("url.https://gh-proxy.com/https://github.com/.insteadOf")
+        );
+        assert_eq!(
+            env.get("GIT_CONFIG_VALUE_0").map(String::as_str),
+            Some("https://github.com/")
+        );
+        // 非法前缀 → 不注入任何变量（宁可不加速，也不能给 git 塞坏配置）
+        assert!(git_env_for("a.example").is_empty());
+        assert!(git_env_for("  ").is_empty());
     }
 
     #[test]

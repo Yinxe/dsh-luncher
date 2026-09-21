@@ -151,6 +151,46 @@ function accelText(a: GhAccel | null): string {
 }
 
 /**
+ * 本次 clone 的**实际请求地址**。
+ *
+ * 为什么要在界面上算一遍：git 的改写（`url.<前缀>.insteadOf`）发生在 git 进程内部，
+ * 命令行那行永远是原地址 —— 光看地址框和终端输出，没法判断加速到底有没有生效。
+ * 规则必须与后端 `ghaccel::pick_prefix` 一致：指定的前缀能用就用它，否则退回第一个
+ * 支持 git 的前缀；只改写 `https://github.com/`（SSH 形式不在匹配范围里）。
+ */
+type EffectiveGit = { kind: "accel"; url: string } | { kind: "direct"; why: string };
+
+function effectiveGit(
+  raw: string,
+  on: boolean,
+  accel: GhAccel | null,
+  preferred: string,
+): EffectiveGit | null {
+  const url = normalizeGitUrl(raw);
+  if (!url) return null;
+  if (/^(git@|ssh:\/\/|git:\/\/)/.test(url)) {
+    return { kind: "direct", why: "SSH 形式的地址不会被改写，想走加速请改用 https 地址" };
+  }
+  if (!/^https?:\/\/github\.com\//i.test(url)) {
+    return { kind: "direct", why: "非 github 域名，加速不会介入" };
+  }
+  if (!on) return { kind: "direct", why: "本次任务关掉了加速" };
+  if (!accel || accel.nodes.length === 0) {
+    return { kind: "direct", why: "还没测速，点右侧「测速」后生效" };
+  }
+  const gitNodes = accel.nodes.filter((n) => n.gitMs != null);
+  if (gitNodes.length === 0) {
+    return { kind: "direct", why: "测速结果里没有支持 git 的前缀" };
+  }
+  const want = preferred.trim();
+  // 设置里可能填的是不带尾斜杠的形式，后端 normalize_prefix 会补上，这里对齐
+  const wantNorm = want && !want.endsWith("/") ? `${want}/` : want;
+  const pick = gitNodes.find((n) => n.prefix === wantNorm) ?? gitNodes[0];
+  const p = pick.prefix.endsWith("/") ? pick.prefix : `${pick.prefix}/`;
+  return { kind: "accel", url: url.startsWith(p) ? url : `${p}${url}` };
+}
+
+/**
  * 插件的三种安装方式（全部由后端走官方 `dsh plugin` 命令，输出进内置终端）：
  * 1. NPM 包 —— registry 搜索 / 精确规格；版本号可检测更新
  * 2. 链接直装 —— 本地 link 路径、仓库插件链接或 .tgz 直链；无版本渠道，仅手动重装
@@ -186,6 +226,8 @@ export default function InstallPluginDialog({
   const [accelInfo, setAccelInfo] = useState<GhAccel | null>(null);
   const [accelLoading, setAccelLoading] = useState(false);
   const [accelErr, setAccelErr] = useState<string | null>(null);
+  /** 设置里固定的前缀（留空 = 自动挑最快）。界面要按同一条规则算实际请求地址 */
+  const [accelPreferred, setAccelPreferred] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -196,7 +238,9 @@ export default function InstallPluginDialog({
     setCloneErr(null); setCloneProbe(null);
     setAccelErr(null);
     // 加速开关的默认值跟着设置走（clone 页仍可临时改成本次不加速）
-    api.getSettings().then((s) => setAccelOn(s.githubAccel)).catch(() => undefined);
+    api.getSettings()
+      .then((s) => { setAccelOn(s.githubAccel); setAccelPreferred(s.githubProxy); })
+      .catch(() => undefined);
     // 已缓存的测速结果先显示出来；没有缓存就等用户点「测速」或探测时自动跑
     api.getGithubAccel(false).then(setAccelInfo).catch(() => undefined);
   }, [open]);
@@ -266,6 +310,11 @@ export default function InstallPluginDialog({
   }, [cloneInput, cloneRef, accelOn, clonePath]);
 
   const accelSummary = useMemo(() => accelText(accelInfo), [accelInfo]);
+  // 本次 clone 真正会请求的地址（直连时给出原因），见 effectiveGit
+  const cloneEffective = useMemo(
+    () => effectiveGit(cloneInput, accelOn, accelInfo, accelPreferred),
+    [cloneInput, accelOn, accelInfo, accelPreferred],
+  );
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -518,6 +567,19 @@ export default function InstallPluginDialog({
                   （插件页「本地克隆仓库」里一键执行）。<strong>探测 = 先克隆再本地扫描</strong>：慢一点，
                   但候选与 <span className="font-mono">lib/</span> 判定就是安装用的那份工作树（不再查 jsDelivr 索引）。
                 </FieldDescription>
+                {/* git 的 insteadOf 在进程内部改写地址，命令行里永远是原地址 —— 这里明写实际请求 */}
+                {cloneEffective && (
+                  <p className="font-mono text-[10.5px] leading-relaxed text-muted-foreground">
+                    {cloneEffective.kind === "accel" ? (
+                      <>
+                        实际请求：<span className="text-foreground">{cloneEffective.url}</span>
+                        <span className="ml-1">（git 会自行改写，命令行里仍是原地址）</span>
+                      </>
+                    ) : (
+                      <>实际请求：直连原地址 —— {cloneEffective.why}</>
+                    )}
+                  </p>
+                )}
               </Field>
 
               <div className="space-y-2 rounded-lg border border-border bg-background/50 px-3 py-2.5">
