@@ -4,6 +4,9 @@ use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Listener, Manager};
 
+use crate::profiles::ProfileInfo;
+use crate::procs::ProfileInstance;
+
 const TRAY_ID: &str = "main-tray";
 
 /// 上次菜单内容签名：内容没变不 set_menu，避免菜单无谓重建/闪动
@@ -44,13 +47,27 @@ fn display_name(profile: &str) -> &str {
     }
 }
 
+/// 采集托盘菜单需要的数据：会枚举进程 / 扫盘 / 探端口（Windows 上一次枚举 1s 级），
+/// **只能在后台线程调用**，理由见 `refresh_async`。
+fn collect(app: &AppHandle) -> (Vec<ProfileInfo>, Vec<ProfileInstance>) {
+    let procs = app.state::<crate::procs::ProcState>();
+    (
+        crate::profiles::scan_profiles(),
+        crate::procs::profile_instances(procs.inner()),
+    )
+}
+
 /// 按当前 profile 运行状态组装菜单，返回菜单与内容签名。
 /// profile 段为纯状态展示（不可点击）：● 运行中 / ○ 未运行。
-fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, String)> {
-    let procs = app.state::<crate::procs::ProcState>();
-    let instances = crate::procs::profile_instances(procs.inner());
-    let known = crate::profiles::scan_profiles();
-
+///
+/// `probing` = 还没做过第一次检测（启动瞬间），此时显示「正在检测实例…」，
+/// 而不是让用户看到一句错误的「未发现 dsh profile」。
+fn build_menu(
+    app: &AppHandle,
+    known: &[ProfileInfo],
+    instances: &[ProfileInstance],
+    probing: bool,
+) -> tauri::Result<(Menu<tauri::Wry>, String)> {
     let mut items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
     items.push(Box::new(MenuItem::with_id(
         app,
@@ -63,7 +80,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, String)> {
 
     let mut sig = String::new();
     let mut listed: Vec<String> = Vec::new();
-    for p in &known {
+    for p in known {
         let running = instances.iter().any(|i| i.profile == p.name);
         sig.push_str(&format!("{}={};", p.name, running as u8));
         items.push(Box::new(MenuItem::with_id(
@@ -80,7 +97,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, String)> {
         listed.push(p.name.clone());
     }
     // 运行中但磁盘上已不存在的 profile（如配置目录启动后被删）
-    for i in &instances {
+    for i in instances {
         if listed.contains(&i.profile) {
             continue;
         }
@@ -94,11 +111,16 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, String)> {
         )?));
     }
     if items.len() == 2 {
-        sig.push('-');
+        // 签名必须让「检测中」和「确实没有 profile」区分开，否则菜单不会从前者换成后者
+        sig.push_str(if probing { "probing;" } else { "-" });
         items.push(Box::new(MenuItem::with_id(
             app,
-            "no-profile",
-            "未发现 dsh profile",
+            if probing { "probing" } else { "no-profile" },
+            if probing {
+                "正在检测实例…"
+            } else {
+                "未发现 dsh profile"
+            },
             false,
             None::<&str>,
         )?));
@@ -118,10 +140,12 @@ fn build_menu(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, String)> {
     Ok((menu, sig))
 }
 
-/// 按当前状态刷新托盘菜单（内容变化才真正 set_menu）
+/// 按当前状态刷新托盘菜单（内容变化才真正 set_menu）。
+/// ⚠️ 只在后台线程调用：`collect` 会枚举系统进程。
 pub fn refresh(app: &AppHandle) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
-    let Ok((menu, sig)) = build_menu(app) else { return };
+    let (known, instances) = collect(app);
+    let Ok((menu, sig)) = build_menu(app, &known, &instances, false) else { return };
     let state = app.state::<MenuState>();
     {
         let mut last = state.0.lock().unwrap();
@@ -147,7 +171,11 @@ fn refresh_async(app: &AppHandle) {
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     app.manage(MenuState::default());
 
-    let menu = build_menu(app)?.0;
+    // 初始菜单里**不含任何进程枚举**：`setup` 跑在主线程上，而枚举进程（Windows 起
+    // PowerShell、逐个探端口）会把它占住几秒，窗口能出现却一直白屏「未响应」
+    // （WebView2 拿不到消息泵，渲染不出来）——这正是 issue #1 的现场。
+    // 真实状态交给下面的 refresh_async 在后台线程补上，通常几百毫秒内就到位。
+    let menu = build_menu(app, &[], &[], true)?.0;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -174,7 +202,8 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
         builder = builder.icon(icon);
     }
     builder.build(app)?;
-    refresh(app);
+    // 后台补齐真实状态（含已知 profile 与运行中的实例）
+    refresh_async(app);
 
     // 内嵌进程启停即时刷新
     let app_exit = app.clone();

@@ -78,17 +78,20 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 }
 
 #[tauri::command]
-pub fn save_settings(
+pub async fn save_settings(
     state: State<'_, AppState>,
     procs: State<'_, crate::procs::ProcState>,
     settings: Settings,
 ) -> Result<(), String> {
-    // 有实例运行时禁止切换当前版本：所有 profile 实例都基于 active 版本启动
-    {
-        let current = state.settings.lock().unwrap();
-        if !current.active_version.is_empty() && current.active_version != settings.active_version {
-            ensure_no_running_instance(&procs)?;
-        }
+    // 有实例运行时禁止切换当前版本：所有 profile 实例都基于 active 版本启动。
+    // 这个守卫要枚举系统进程（Windows 上要起 PowerShell，1s 级），必须离开主线程 ——
+    // 同步命令跑在主线程上，会把界面冻住（与 GitHub issue #1 同一类问题）。
+    let current = state.settings.lock().unwrap().clone();
+    if !current.active_version.is_empty() && current.active_version != settings.active_version {
+        let proc_state = procs.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || ensure_no_running_instance(&proc_state))
+            .await
+            .map_err(|e| format!("保存设置失败: {e}"))??;
     }
     settings::save_settings(&settings)?;
     *state.settings.lock().unwrap() = settings;
@@ -145,7 +148,7 @@ pub async fn list_installed(
 }
 
 #[tauri::command]
-pub fn install_version(
+pub async fn install_version(
     app: AppHandle,
     state: State<'_, AppState>,
     install_state: State<'_, InstallState>,
@@ -156,24 +159,31 @@ pub fn install_version(
     if !util::is_safe_version(&version) {
         return Err("非法版本号".into());
     }
-    // 安装会清空该版本的目录，正在运行时一律拒绝；force 只是前端区分"重装"的标记
-    for p in crate::procs::list(&procs) {
-        if p.version == version {
+    let settings = state.settings.lock().unwrap().clone();
+    let proc_state = procs.inner().clone();
+    let install_state = install_state.inner().clone();
+    // 安装会清空该版本的目录，正在运行时一律拒绝；force 只是前端区分"重装"的标记。
+    // 这里的守卫要枚举系统进程（Windows 上 1s 级），放后台线程执行。
+    tauri::async_runtime::spawn_blocking(move || {
+        for p in crate::procs::list(&proc_state) {
+            if p.version == version {
+                return Err(format!(
+                    "dsh {version} 正在运行（PID {}），请先停止实例后再安装/重装",
+                    p.id
+                ));
+            }
+        }
+        if let Some(pid) = external_pid_on_version(&version) {
             return Err(format!(
-                "dsh {version} 正在运行（PID {}），请先停止实例后再安装/重装",
-                p.id
+                "dsh {version} 正在被外部实例使用（PID {pid}），请先停止后再安装/重装"
             ));
         }
-    }
-    if let Some(pid) = external_pid_on_version(&version) {
-        return Err(format!(
-            "dsh {version} 正在被外部实例使用（PID {pid}），请先停止后再安装/重装"
-        ));
-    }
-    let _ = force;
-    let settings = state.settings.lock().unwrap().clone();
-    installer_start(&app, &install_state, &settings, &version)?;
-    Ok(true)
+        let _ = force;
+        installer_start(&app, &install_state, &settings, &version)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("安装启动失败: {e}"))?
 }
 
 fn installer_start(
@@ -196,33 +206,40 @@ pub fn get_install_status(install_state: State<'_, InstallState>) -> Option<Stri
 }
 
 #[tauri::command]
-pub fn uninstall_version(
+pub async fn uninstall_version(
     state: State<'_, AppState>,
     procs: State<'_, crate::procs::ProcState>,
     version: String,
 ) -> Result<(), String> {
-    // 该版本正在内嵌运行时不允许删除其安装目录
-    for p in crate::procs::list(&procs) {
-        if p.version == version {
+    let active_version = state.settings.lock().unwrap().active_version.clone();
+    let proc_state = procs.inner().clone();
+    // 外部实例检查要枚举系统进程（Windows 上 1s 级）：放后台线程，别冻住界面
+    tauri::async_runtime::spawn_blocking(move || {
+        // 该版本正在内嵌运行时不允许删除其安装目录
+        for p in crate::procs::list(&proc_state) {
+            if p.version == version {
+                return Err(format!(
+                    "dsh {version} 正在运行（PID {}），请先停止再卸载",
+                    p.id
+                ));
+            }
+        }
+        // 终端/外部启动的实例跑在该版本目录上时同样禁止卸载
+        if let Some(pid) = external_pid_on_version(&version) {
             return Err(format!(
-                "dsh {version} 正在运行（PID {}），请先停止再卸载",
-                p.id
+                "dsh {version} 正在被外部实例使用（PID {pid}），请先停止后再卸载"
             ));
         }
-    }
-    // 终端/外部启动的实例跑在该版本目录上时同样禁止卸载
-    if let Some(pid) = external_pid_on_version(&version) {
-        return Err(format!(
-            "dsh {version} 正在被外部实例使用（PID {pid}），请先停止后再卸载"
-        ));
-    }
-    // 当前使用中的版本不允许卸载，避免所有 profile 失去运行基础
-    if state.settings.lock().unwrap().active_version == version {
-        return Err(format!(
-            "{version} 是当前使用版本，请先在侧栏切换到其他版本后再卸载"
-        ));
-    }
-    crate::installer::uninstall_managed(&version)
+        // 当前使用中的版本不允许卸载，避免所有 profile 失去运行基础
+        if active_version == version {
+            return Err(format!(
+                "{version} 是当前使用版本，请先在侧栏切换到其他版本后再卸载"
+            ));
+        }
+        crate::installer::uninstall_managed(&version)
+    })
+    .await
+    .map_err(|e| format!("卸载失败: {e}"))?
 }
 
 /// 外部（终端）启动的 dsh 实例正运行在该版本目录上时，返回其 PID
@@ -480,18 +497,23 @@ pub struct InstanceLog {
 /// 读取独立进程实例的日志尾部（内嵌实例走日志管道，外部实例没有文件日志 → None）。
 /// 只按 PID 从注册表解析路径，避免把「读任意文件」暴露给前端。
 #[tauri::command]
-pub fn read_instance_log(
+pub async fn read_instance_log(
     pid: u32,
     max_bytes: Option<u32>,
 ) -> Result<Option<InstanceLog>, String> {
-    let max = max_bytes.unwrap_or(64 * 1024) as usize;
-    Ok(crate::procs::read_instance_log_tail(pid, max)?.map(|(path, content, truncated)| {
-        InstanceLog {
-            path,
-            content,
-            truncated,
-        }
-    }))
+    // 读注册表 + 读日志文件（最多 64KB）都是阻塞 I/O，放后台线程执行
+    tauri::async_runtime::spawn_blocking(move || {
+        let max = max_bytes.unwrap_or(64 * 1024) as usize;
+        Ok(crate::procs::read_instance_log_tail(pid, max)?.map(|(path, content, truncated)| {
+            InstanceLog {
+                path,
+                content,
+                truncated,
+            }
+        }))
+    })
+    .await
+    .map_err(|e| format!("读取实例日志失败: {e}"))?
 }
 
 /// profile 还有实例在运行时不允许改名/删除：会让运行中的实例指向错目录
@@ -514,18 +536,26 @@ fn ensure_profile_idle(procs: &crate::procs::ProcState, name: &str) -> Result<()
 /// 重命名 profile。dsh 内置保留 profile（headless/web/desktop）由后端拒绝。
 /// 默认 profile 若指向它，一并跟随改名，避免启动器指向不存在的名字。
 #[tauri::command]
-pub fn rename_profile(
+pub async fn rename_profile(
     state: State<'_, AppState>,
     procs: State<'_, crate::procs::ProcState>,
     name: String,
     new_name: String,
 ) -> Result<String, String> {
     let old = name.trim().to_string();
-    ensure_profile_idle(&procs, &old)?;
-    crate::profile_cfg::rename_profile(&old, &new_name)?;
     let new = new_name.trim().to_string();
-    // 独立进程登记表里也记着 profile 名，不同步会在实例列表里留下旧名的幽灵条目
-    crate::procs::rename_detached_profile(&old, &new);
+    let proc_state = procs.inner().clone();
+    // ensure_profile_idle 会枚举实例（含系统进程），放后台线程执行
+    let (old2, new2) = (old.clone(), new.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_profile_idle(&proc_state, &old2)?;
+        crate::profile_cfg::rename_profile(&old2, &new2)?;
+        // 独立进程登记表里也记着 profile 名，不同步会在实例列表里留下旧名的幽灵条目
+        crate::procs::rename_detached_profile(&old2, &new2);
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| format!("改名失败: {e}"))??;
     let mut s = state.settings.lock().unwrap();
     if s.default_profile == old {
         s.default_profile = new.clone();
@@ -537,15 +567,23 @@ pub fn rename_profile(
 /// 删除 profile：移入 ~/.dsh-launcher/deleted-profiles/ 可找回；
 /// dsh 内置保留 profile 由后端拒绝。
 #[tauri::command]
-pub fn delete_profile(
+pub async fn delete_profile(
     state: State<'_, AppState>,
     procs: State<'_, crate::procs::ProcState>,
     name: String,
 ) -> Result<String, String> {
     let name = name.trim().to_string();
-    ensure_profile_idle(&procs, &name)?;
-    let trash = crate::profile_cfg::delete_profile(&name)?;
-    crate::procs::drop_detached_profile(&name);
+    let proc_state = procs.inner().clone();
+    let name2 = name.clone();
+    // 同上：实例枚举（可能起 PowerShell）必须在后台线程
+    let trash = tauri::async_runtime::spawn_blocking(move || {
+        ensure_profile_idle(&proc_state, &name2)?;
+        let trash = crate::profile_cfg::delete_profile(&name2)?;
+        crate::procs::drop_detached_profile(&name2);
+        Ok::<String, String>(trash)
+    })
+    .await
+    .map_err(|e| format!("删除失败: {e}"))??;
     let mut s = state.settings.lock().unwrap();
     if s.default_profile == name {
         s.default_profile = String::new();

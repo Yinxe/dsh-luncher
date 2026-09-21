@@ -118,6 +118,11 @@ pub fn run() {
             commands::write_credential_refs,
         ])
         .setup(|app| {
+            // 进程表快照的守护线程必须先起来：枚举（Windows 上要起 PowerShell，1s 级）
+            // 只在后台线程做，托盘与界面都只读快照。在 setup（主线程）里等枚举，
+            // 窗口就会「能出现但一直白屏 / 未响应」—— GitHub issue #1 的根因。
+            procs::start_process_watcher();
+            diag::mark("setup: 进程表守护线程已启动");
             tray::create(app.handle())?;
             diag::mark("setup: 托盘就绪");
             commands::emit_startup_checks(app.handle());

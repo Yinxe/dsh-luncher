@@ -378,7 +378,8 @@ pub fn stop(app: &AppHandle, state: &ProcState, id: u32) -> bool {
         let _ = c.kill();
         let _ = c.wait();
     }
-    // 进程已死：清掉枚举缓存，避免状态轮询在 TTL 内仍把它当活实例
+    // 进程已死：从快照里摘掉它，界面下一轮不必再看到「运行中」
+    forget_pid(id);
     invalidate_process_cache();
 
     let _ = app.emit(
@@ -534,46 +535,62 @@ fn is_dsh_cmdline(cmd: &str) -> bool {
     })
 }
 
+/// PID 判定结果：`Unknown` 只在本机进程表整轮拿不到时出现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PidCheck {
+    /// 确认是本机 dsh 进程
+    Dsh,
+    /// 确认不是：进程不存在，或存在但不是 dsh
+    NotDsh,
+    /// 进程表不可用，无法判定 —— 既不能当成「已死」，也不能当成「就是本 profile 的实例」
+    Unknown,
+}
+
 /// 目标 pid 是否仍是一个 dsh 进程（存活校验 + PID 复用防护），全平台。
 ///
+/// 判据与 cmdline 扫描完全同一套（`is_dsh_cmdline`）：早先 Windows 靠
+/// `tasklist /FI "PID eq <pid>"` 逐 PID 起子进程、只认映像名 `node.exe`，
+/// macOS 逐 PID 起 `ps`，既慢又会把恰好占着端口的无关 node 进程算成 dsh。
+/// 现在一律查**带缓存的进程表快照**，不再为单个 PID 起任何子进程。
+///
 /// 端口占用归属判断也复用它：端口可能被无关程序占用，**必须**先确认是 dsh 才敢杀。
-pub(crate) fn pid_is_dsh(pid: u32) -> bool {
+pub(crate) fn check_pid(pid: u32) -> PidCheck {
+    if let Some((ok, list)) = read_snapshot() {
+        // 这一轮枚举是失败的（如 PowerShell 起不来）：表不可信，不得据此判定生死
+        if !ok {
+            return PidCheck::Unknown;
+        }
+        return match list.iter().find(|(p, _)| *p == pid) {
+            Some((_, cmd)) => {
+                if is_dsh_cmdline(cmd) {
+                    PidCheck::Dsh
+                } else {
+                    PidCheck::NotDsh
+                }
+            }
+            // 表是全量的（含拿不到 cmdline 的进程）：查不到就是它已经不在了
+            None => PidCheck::NotDsh,
+        };
+    }
+    // 守护线程还没产出第一份快照：Linux 上 /proc 是即时的，直接读；其它平台不猜
     #[cfg(target_os = "linux")]
     {
         std::fs::read(format!("/proc/{pid}/cmdline"))
             .map(|b| is_dsh_cmdline(&String::from_utf8_lossy(&b).replace('\0', " ")))
-            .unwrap_or(false)
+            .map(|dsh| if dsh { PidCheck::Dsh } else { PidCheck::NotDsh })
+            .unwrap_or(PidCheck::NotDsh)
     }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "command="])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| is_dsh_cmdline(String::from_utf8_lossy(&o.stdout).trim()))
-            .unwrap_or(false)
-    }
-    #[cfg(windows)]
-    {
-        // tasklist 快且原生；只校验存活与 node 映像（PID 复用为其他 node 进程的概率可忽略）。
-        // 必须匹配映像名 node.exe —— 只写 .exe 会把「该 PID 存活的任意进程」误判为 dsh，
-        // 端口回退时就会 taskkill 掉无关程序。
-        std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-            .output()
-            .ok()
-            .map(|o| {
-                let out = String::from_utf8_lossy(&o.stdout).to_ascii_lowercase();
-                out.contains(&pid.to_string()) && out.contains("node.exe")
-            })
-            .unwrap_or(false)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = pid;
-        false
+        PidCheck::Unknown
     }
+}
+
+/// 是否**确认**是本机 dsh 进程（`Unknown` / `NotDsh` 都是 false）。
+/// 用于「不确定就不动手」的判定：宁可不动，也绝不误杀。
+pub(crate) fn pid_is_dsh(pid: u32) -> bool {
+    matches!(check_pid(pid), PidCheck::Dsh)
 }
 
 /// 校验独立进程注册表：剔除已死亡或不再是 dsh 的陈旧条目，返回仍存活的记录。
@@ -584,10 +601,11 @@ pub fn validate_detached_registry() -> Vec<DetachedRecord> {
     let mut valid = Vec::new();
     let mut changed = false;
     for r in records {
-        if pid_is_dsh(r.pid) {
-            valid.push(r);
-        } else {
-            changed = true;
+        match check_pid(r.pid) {
+            // 确认已死 / PID 已被复用成别的程序 → 清掉
+            PidCheck::NotDsh => changed = true,
+            // 确认是 dsh，或本机进程表整轮不可用（保守保留）
+            PidCheck::Dsh | PidCheck::Unknown => valid.push(r),
         }
     }
     if changed {
@@ -631,6 +649,11 @@ fn force_kill_pid(pid: u32) -> Result<(), String> {
 
 /// /proc/<pid>/environ 是否包含指定 KV（如 DSH_LAUNCHER_DETACHED=1）。
 /// environ 可能含非 UTF-8 字节，按字节读再容错转码。
+///
+/// 注意：这是 Linux 专属手段，Windows / macOS 上没有 /proc，恒返回 false。
+/// 那两端「启动器派生的独立进程」靠 `detached.json` 登记识别（注册表分支给
+/// `source: detached`）；只有登记被清掉后仍存活、又被 cmdline 扫到的实例，
+/// 才会被标成 external —— 两者都能看能停，只是标签不同。
 fn detached_marker(pid: u32) -> bool {
     std::fs::read(format!("/proc/{pid}/environ"))
         .map(|bytes| {
@@ -653,112 +676,277 @@ fn hide_window(cmd: &mut Command) {
 #[allow(dead_code)]
 fn hide_window(_cmd: &mut Command) {}
 
-/// 全平台进程枚举 (pid, cmdline 单行空格分隔)：
-/// Linux 读 /proc；macOS 用 `ps -axo pid=,command=`；Windows 用 PowerShell CIM
-/// （EncodedCommand 免引号转义）。Windows 枚举慢（1s 级），按平台 TTL 缓存。
-type ProcessCache = Mutex<Option<(Instant, std::sync::Arc<Vec<(u32, String)>>)>>;
+/// 全平台进程枚举 (pid, cmdline 单行空格分隔)：Linux 读 /proc；macOS 用
+/// `ps -axo pid=,command=`；Windows 用 PowerShell CIM（EncodedCommand 免引号转义）。
+///
+/// 这里有四条**不能退回**的约束（GitHub issue #1 的白屏就是踩了它们）：
+///
+/// 1. **绝不在 UI 线程上枚举**：Windows 上这要起 PowerShell（1s 级）、macOS 要起 `ps`，
+///    放在 `setup` / 托盘创建这类主线程路径上，窗口能出现但一直白屏「未响应」
+///    （WebView2 拿不到消息泵，渲染不出来）。
+/// 2. **绝不逐 PID 起子进程**：早先 Windows 用 `tasklist /FI "PID eq <pid>"` 做存活校验，
+///    按端口反向发现时**每个监听端口各起一个**，一轮 16～20 个，还会闪一屏黑色控制台。
+/// 3. **拿不到 cmdline 的进程也要留在表里**（cmdline 记空串）：Windows 的
+///    `Win32_Process.CommandLine` 对非本用户进程（svchost 等系统服务）是空的，
+///    早先这些条目被整条丢掉，于是「端口占用者不在表里」→ 每个端口都回退一次逐 PID
+///    探测，这正是 tasklist 风暴的直接来源；留在表里才能判定「占端口的是别的程序」。
+/// 4. **枚举失败 ≠ 进程不存在**：`ok=false` 时调用方不得据此清掉实例登记（见 `check_pid`）。
+struct ProcessSnapshot {
+    at: Instant,
+    /// 进程状态已变化（停止 / 杀掉实例后置位）——下次读取需要重算
+    stale: bool,
+    /// 本轮是否拿到了完整进程表
+    ok: bool,
+    list: Arc<Vec<(u32, String)>>,
+}
 
-fn process_cache() -> &'static ProcessCache {
+fn snapshot_cache() -> &'static Mutex<Option<ProcessSnapshot>> {
     use std::sync::OnceLock;
-    static CACHE: OnceLock<ProcessCache> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<Option<ProcessSnapshot>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
-/// 清空进程枚举缓存。停止/杀掉实例后必须调用：否则运行状态轮询会在 TTL 内
-/// （Windows 5s / 其他 2s）继续把已死的 PID 当活实例，重启流程会反复重试，
-/// 甚至在 PID 被复用后误杀无关进程。
-pub fn invalidate_process_cache() {
-    if let Ok(mut guard) = process_cache().lock() {
-        *guard = None;
-    }
+/// 唤醒枚举守护线程的信号：停止实例后要求立刻重算，不必干等 TTL
+fn watcher_poke() -> &'static Mutex<Option<std::sync::mpsc::Sender<()>>> {
+    use std::sync::OnceLock;
+    static POKE: OnceLock<Mutex<Option<std::sync::mpsc::Sender<()>>>> = OnceLock::new();
+    POKE.get_or_init(|| Mutex::new(None))
 }
 
-pub fn enumerate_processes() -> std::sync::Arc<Vec<(u32, String)>> {
-    let ttl = if cfg!(windows) {
-        Duration::from_secs(5)
-    } else {
-        Duration::from_secs(2)
-    };
+/// 枚举超时：子进程卡死时杀掉它，而不是把调用线程永久占住
+/// （守护线程一旦被占住，实例状态就再也不更新了）
+#[cfg(any(target_os = "macos", windows))]
+const ENUM_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// 快照 TTL。Windows 枚举要起 PowerShell，拉长一点减少后台开销；
+/// Linux 读 /proc、macOS 起一次 `ps` 都很快，短一点让状态更实时。
+fn snapshot_ttl() -> Duration {
+    Duration::from_secs(if cfg!(windows) { 8 } else { 2 })
+}
+
+/// 读快照（纯内存，永不阻塞、永不起子进程）。None = 还没有任何一次枚举结果。
+fn read_snapshot() -> Option<(bool, Arc<Vec<(u32, String)>>)> {
+    snapshot_cache()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| (s.ok, s.list.clone()))
+}
+
+fn snapshot_is_fresh(s: &ProcessSnapshot) -> bool {
+    !s.stale && s.at.elapsed() < snapshot_ttl()
+}
+
+/// 后台线程：维护进程表快照，并保证**任何时刻只有一个枚举在跑**。
+///
+/// 早先每轮枚举由调用方各自触发，前端 3 秒轮询与托盘 3 秒轮询会一轮叠一轮
+/// （issue #1 里 `tasklist.exe` 数量 16 → 18 → 20 持续增长就是这个），
+/// 现在统一由这一个线程串起来；调用方只读快照，永不被枚举拖住。
+/// 在 `setup` 里调用一次（Windows 下这里要起 PowerShell，所以必须是后台线程）。
+pub fn start_process_watcher() {
+    use std::sync::OnceLock;
+    static STARTED: OnceLock<()> = OnceLock::new();
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    if STARTED.set(()).is_err() {
+        return; // 已经起过（重复调用是安全的）
+    }
+    *watcher_poke().lock().unwrap() = Some(tx);
+    let _ = std::thread::Builder::new()
+        .name("proc-watcher".into())
+        .spawn(move || {
+            let mut first = true;
+            loop {
+                let started = Instant::now();
+                refresh_process_snapshot();
+                let (ok, ms) = (
+                    read_snapshot().map(|(ok, _)| ok).unwrap_or(false),
+                    started.elapsed().as_millis(),
+                );
+                // 首轮与偏慢的枚举才留痕：这类白屏问题的第一现场证据
+                if first || started.elapsed() > Duration::from_secs(3) {
+                    crate::diag::mark(&format!("进程枚举 {ms}ms ok={ok}"));
+                    first = false;
+                }
+                match rx.recv_timeout(snapshot_ttl()) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        });
+}
+
+/// 强制重新枚举并写入快照（单飞：同一时刻只允许一个线程枚举，杜绝多轮叠加）。
+pub fn refresh_process_snapshot() {
+    use std::sync::OnceLock;
+    static REFRESH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _g = REFRESH_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let (ok, list) = enumerate_processes_uncached();
+    *snapshot_cache().lock().unwrap() = Some(ProcessSnapshot {
+        at: Instant::now(),
+        stale: false,
+        ok,
+        list: Arc::new(list),
+    });
+}
+
+/// 读进程表：快照新鲜就直接用，过期（或还没有）才在**当前线程**枚举一次。
+///
+/// ⚠️ 只允许后台线程 / `spawn_blocking` 调用 —— 在主线程上调用就等于把界面冻住
+/// （Windows 一次枚举 1s 起）。托盘菜单、命令处理都已挪到后台线程，别在主线程加回来。
+pub fn enumerate_processes() -> Arc<Vec<(u32, String)>> {
     {
-        let guard = process_cache().lock().unwrap();
-        if let Some((at, list)) = guard.as_ref() {
-            if at.elapsed() < ttl {
-                return list.clone();
+        let guard = snapshot_cache().lock().unwrap();
+        if let Some(s) = guard.as_ref() {
+            if snapshot_is_fresh(s) {
+                return s.list.clone();
             }
         }
     }
-    let list = std::sync::Arc::new(enumerate_processes_uncached());
-    *process_cache().lock().unwrap() = Some((Instant::now(), list.clone()));
-    list
+    refresh_process_snapshot();
+    read_snapshot()
+        .map(|(_, l)| l)
+        .unwrap_or_else(|| Arc::new(Vec::new()))
 }
 
-fn enumerate_processes_uncached() -> Vec<(u32, String)> {
-    let mut out = Vec::new();
+/// 进程状态已变化（停止 / 杀掉实例后调用）：把快照标记为过期并立刻唤醒守护线程重算。
+///
+/// 非阻塞：调用方可能就在主线程上（`stop` 之后要 emit 事件）。
+/// **不再**清空快照：读到的旧表配上接下来的重算，比「没有表」更好——
+/// 没有表时 Windows/macOS 只能保守地「不判定」，实例会短暂显示成运行中。
+pub fn invalidate_process_cache() {
+    if let Some(s) = snapshot_cache().lock().unwrap().as_mut() {
+        s.stale = true;
+    }
+    if let Some(tx) = watcher_poke().lock().unwrap().as_ref() {
+        let _ = tx.send(());
+    }
+}
+
+/// 把一个已确认结束的 PID 从快照里摘掉：界面不必等下一轮枚举才不再显示「运行中」。
+fn forget_pid(pid: u32) {
+    if let Some(s) = snapshot_cache().lock().unwrap().as_mut() {
+        Arc::make_mut(&mut s.list).retain(|(p, _)| *p != pid);
+    }
+}
+
+/// 起一个**隐藏窗口**的子进程并收集 stdout，带超时（超时/kill 后返回 None）。
+///
+/// 两个必须：GUI 主程序起控制台子进程不隐藏会闪黑框（issue #1 里用户看到的一屏黑窗口）；
+/// 没有超时的 `.output()` 在子进程卡死时会永久占住调用线程。
+#[cfg(any(target_os = "macos", windows))]
+fn run_capture_hidden(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    let mut cmd = Command::new(program);
+    hide_window(&mut cmd);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.args(args).spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = std::io::BufReader::new(stdout).read_to_end(&mut buf);
+        buf
+    });
+    let start = Instant::now();
+    let mut finished = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                finished = true;
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let buf = reader.join().unwrap_or_default();
+    if !finished {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// 真正跑一次平台枚举。返回 `(是否拿到完整进程表, [(pid, cmdline)])`。
+/// cmdline 拿不到的进程以空串保留在表里（见上面约束 3）。
+fn enumerate_processes_uncached() -> (bool, Vec<(u32, String)>) {
     #[cfg(target_os = "linux")]
     {
-        if let Ok(rd) = std::fs::read_dir("/proc") {
-            for entry in rd.flatten() {
-                let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok())
-                else {
-                    continue;
-                };
-                let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
-                    continue;
-                };
-                let cmd = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-                if cmd.trim().is_empty() {
-                    continue;
-                }
-                out.push((pid, cmd));
-            }
+        let mut out = Vec::new();
+        let Ok(rd) = std::fs::read_dir("/proc") else {
+            return (false, out);
+        };
+        for entry in rd.flatten() {
+            let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            // 读不到 cmdline（内核线程、权限、刚好退出）也保留 PID：
+            // 它能回答「这个端口不是 dsh 占的」，从而免掉逐端口探测
+            let cmd = std::fs::read(format!("/proc/{pid}/cmdline"))
+                .map(|b| String::from_utf8_lossy(&b).replace('\0', " "))
+                .unwrap_or_default();
+            out.push((pid, cmd));
         }
+        (!out.is_empty(), out)
     }
     #[cfg(target_os = "macos")]
     {
-        if let Ok(o) = Command::new("ps").args(["-axo", "pid=,command="]).output() {
-            for line in String::from_utf8_lossy(&o.stdout).lines() {
-                let Some((pid, rest)) = line.trim_start().split_once(char::is_whitespace) else {
-                    continue;
-                };
-                let Ok(pid) = pid.trim().parse::<u32>() else {
-                    continue;
-                };
-                let cmd = rest.trim();
-                if !cmd.is_empty() {
-                    out.push((pid, cmd.to_string()));
-                }
-            }
+        let mut out = Vec::new();
+        let Some(text) = run_capture_hidden("ps", &["-axo", "pid=,command="], ENUM_TIMEOUT) else {
+            return (false, out);
+        };
+        for line in text.lines() {
+            let Some((pid, rest)) = line.trim_start().split_once(char::is_whitespace) else {
+                continue;
+            };
+            let Ok(pid) = pid.trim().parse::<u32>() else {
+                continue;
+            };
+            // 其它用户的进程 macOS 只给可执行文件路径、不给参数：同样保留 PID
+            out.push((pid, rest.trim().to_string()));
         }
+        (!out.is_empty(), out)
     }
     #[cfg(windows)]
     {
-        let script = "Get-CimInstance Win32_Process | ForEach-Object { \"{0}`t{1}\" -f $_.ProcessId, $_.CommandLine }";
-        let mut cmd = Command::new("powershell");
-        hide_window(&mut cmd);
-        if let Ok(o) = cmd
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-                &crate::util::ps_encoded_command(script),
-            ])
-            .output()
-        {
-            for line in String::from_utf8_lossy(&o.stdout).lines() {
-                let Some((pid, rest)) = line.split_once('\t') else {
-                    continue;
-                };
-                let Ok(pid) = pid.trim().parse::<u32>() else {
-                    continue;
-                };
-                let cmd = rest.trim();
-                if !cmd.is_empty() {
-                    out.push((pid, cmd.to_string()));
-                }
-            }
+        let mut out = Vec::new();
+        // 先把输出编码钉成 UTF-8：命令行里的中文（用户名 / 路径 / profile 名）不再
+        // 按系统代码页变成乱码。用 try 包住 —— 万一某个 Windows 环境里 stdout 被重定向
+        // 时不允许改 OutputEncoding，也只是退回旧行为，绝不能让整轮枚举失败。
+        // CommandLine 为空（非本用户进程）时仍会输出 "pid<TAB>"，必须保留 —— 见约束 3。
+        let script = "try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}; \
+             Get-CimInstance Win32_Process | ForEach-Object { \"{0}`t{1}\" -f $_.ProcessId, $_.CommandLine }".to_string();
+        let encoded = crate::util::ps_encoded_command(&script);
+        let args = [
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            encoded.as_str(),
+        ];
+        let Some(text) = run_capture_hidden("powershell", &args, ENUM_TIMEOUT) else {
+            return (false, out);
+        };
+        for line in text.lines() {
+            let Some((pid, cmd)) = line.split_once('\t') else {
+                continue;
+            };
+            let Ok(pid) = pid.trim().parse::<u32>() else {
+                continue;
+            };
+            out.push((pid, cmd.trim().to_string()));
         }
+        (!out.is_empty(), out)
     }
-    out
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        (false, Vec::new())
+    }
 }
 
 /// 从 dsh cmdline 解析 profile 名：`--profile <name>` 或 `bin.js <name>`（位置参数）
@@ -965,8 +1153,13 @@ pub fn profile_instances(state: &ProcState) -> Vec<ProfileInstance> {
 ///
 /// 这是「按端口反向发现」的入口：不预设端口、不看启动器注册表，只要是 dsh 且在
 /// 监听就列出来。dsh 启动器之外的终端/npx/独立进程因此同样能被发现与停止。
+///
+/// 归属**只**按进程表快照里的 cmdline 判定，不做逐 PID 探测：表是全量的（含拿不到
+/// cmdline 的进程），查不到只说明它已退出或本轮枚举失败。早期为每个监听端口各起一个
+/// `tasklist.exe` 的兜底，正是 issue #1 里 16～20 个 tasklist 叠加、弹黑框、
+/// 把界面拖到「未响应」的根源。
 pub fn dsh_listening_ports() -> Vec<(u16, u32)> {
-    let procs = enumerate_processes(); // 带 TTL 缓存，避免逐 PID 起进程探测
+    let procs = enumerate_processes(); // 带快照缓存，避免逐 PID 起进程探测
     let cmd_of = |pid: u32| -> Option<&str> {
         procs
             .iter()
@@ -975,11 +1168,7 @@ pub fn dsh_listening_ports() -> Vec<(u16, u32)> {
     };
     crate::netports::listening_tcp()
         .into_iter()
-        .filter(|(_, pid)| {
-            cmd_of(*pid)
-                .map(is_dsh_cmdline)
-                .unwrap_or_else(|| pid_is_dsh(*pid))
-        })
+        .filter(|(_, pid)| cmd_of(*pid).map(is_dsh_cmdline).unwrap_or(false))
         .collect()
 }
 
@@ -1017,8 +1206,7 @@ pub(crate) fn port_owner(host: &str, port: u16, profile: &str) -> Option<PortOwn
         return Some(PortOwner::Unknown);
     };
     // 「是不是 dsh」用与 cmdline 扫描同一套判据（`is_dsh_cmdline`），保证三端一致；
-    // 枚举不到 cmdline 时才退回平台存活校验。Windows 的存活校验只认 exe，
-    // 单靠它会把任何占用该端口的程序都当成 dsh。
+    // 快照里查不到这个 PID 时才退回 `pid_is_dsh`（它同样基于快照，不会再起子进程）。
     let cmd = pid_cmdline(pid);
     let is_dsh = match cmd.as_deref() {
         Some(cmd) => is_dsh_cmdline(cmd),
@@ -1027,10 +1215,9 @@ pub(crate) fn port_owner(host: &str, port: u16, profile: &str) -> Option<PortOwn
     if !is_dsh {
         return Some(PortOwner::OtherProcess(pid));
     }
-    // 拿不到 cmdline 时（Windows 上 pid_is_dsh 只认映像名 node.exe）既证明不了它是 dsh、
-    // 也判不出属于哪个 profile，绝不能保守归到「本 profile」——否则停本 profile 会
-    // taskkill 掉任何恰好占着该端口的无关 node 进程。这种情况一律 Unknown 交回「请手动处理」，
-    // 检测路径仍会把它算作运行中（只是不给可停的 PID）。
+    // 拿不到 cmdline 时既证明不了它是 dsh、也判不出属于哪个 profile，
+    // 绝不能保守归到「本 profile」——否则停本 profile 会杀掉任何恰好占着该端口的无关进程。
+    // 这种情况一律 Unknown 交回「请手动处理」，检测路径仍会把它算作运行中（只是不给可停的 PID）。
     let Some(cmd) = cmd.as_deref() else {
         return Some(PortOwner::Unknown);
     };
@@ -1126,6 +1313,7 @@ pub fn stop_external_pid(pid: u32) -> Result<bool, String> {
         return Ok(false);
     }
     force_kill_pid(pid)?;
+    forget_pid(pid);
     if in_registry {
         remove_detached_record(pid);
     }
@@ -1158,6 +1346,7 @@ pub fn stop_profile(app: &AppHandle, state: &ProcState, profile: &str) -> Result
         .map(|r| r.pid);
     if let Some(pid) = registry_hit {
         force_kill_pid(pid)?;
+        forget_pid(pid);
         remove_detached_record(pid);
         invalidate_process_cache();
         return Ok(true);
@@ -1166,6 +1355,7 @@ pub fn stop_profile(app: &AppHandle, state: &ProcState, profile: &str) -> Result
     for (pid, prof) in external_running_profile_pids(&[]) {
         if prof == profile {
             force_kill_pid(pid)?;
+            forget_pid(pid);
             invalidate_process_cache();
             return Ok(true);
         }
@@ -1178,6 +1368,7 @@ pub fn stop_profile(app: &AppHandle, state: &ProcState, profile: &str) -> Result
             None => Ok(false),
             Some(PortOwner::ThisProfile(pid)) => {
                 force_kill_pid(pid)?;
+                forget_pid(pid);
                 invalidate_process_cache();
                 Ok(true)
             }
@@ -1255,14 +1446,44 @@ mod tests {
         assert_eq!(read_detached_registry().len(), 2);
         assert_eq!(read_detached_registry()[0].profile, "web");
 
-        // 校验：不存在的 PID（u32::MAX / MAX-1 必然无进程）作为陈旧条目被清出并回写文件
+        // 校验：不存在的 PID（u32::MAX / MAX-1 必然无进程）作为陈旧条目被清出并回写文件。
+        // 存活判定依赖进程表快照，先按守护线程的方式刷一轮（进程表拿不到的环境只能保守保留）
+        refresh_process_snapshot();
         let valid = validate_detached_registry();
-        assert!(valid.is_empty());
-        assert!(read_detached_registry().is_empty());
+        match read_snapshot() {
+            Some((true, _)) => {
+                assert!(valid.is_empty());
+                assert!(read_detached_registry().is_empty());
+            }
+            // 平台枚举不可用（PowerShell 被禁用、超时）时必须保守保留，绝不能误删实例登记
+            _ => assert_eq!(valid.len(), 2),
+        }
 
-        // remove_detached_record：不存在时不动文件
+        // remove_detached_record：只摘掉指定 PID，不动其它条目
         remove_detached_record(u32::MAX);
-        assert!(read_detached_registry().is_empty());
+        assert!(!read_detached_registry().iter().any(|r| r.pid == u32::MAX));
+    }
+
+    /// issue #1 回归：存活 / 端口归属判定必须走内存快照，**绝不能逐 PID 起子进程**。
+    /// 早先 Windows 每个 PID 起一次 `tasklist`（≈200ms）、macOS 一次 `ps`，
+    /// 600 次判定要跑几分钟，而且正是它把界面拖成「未响应」。
+    #[test]
+    fn pid_checks_do_not_spawn_processes() {
+        refresh_process_snapshot();
+        if !read_snapshot().map(|(ok, _)| ok).unwrap_or(false) {
+            eprintln!("本环境进程枚举不可用，跳过");
+            return;
+        }
+        let start = Instant::now();
+        for pid in 0..300u32 {
+            let _ = check_pid(pid);
+            let _ = pid_is_dsh(pid);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "600 次存活判定耗时 {elapsed:?}：说明又退回逐 PID 起子进程了"
+        );
     }
 
     #[test]
@@ -1328,7 +1549,9 @@ time.sleep(120)
         }
         assert!(up, "伪造的 dsh 进程未能在超时内监听端口");
 
-        // 1) 认得出它是 dsh（cmdline 判据，与单实例守卫/端口归属同一套）
+        // 1) 认得出它是 dsh（cmdline 判据，与单实例守卫/端口归属同一套）。
+        //    存活判定走进程表快照，先刷一轮（守护线程平时负责这件事）
+        refresh_process_snapshot();
         assert!(pid_is_dsh(pid), "伪造进程应被认成 dsh");
         // 2) 端口 → PID
         assert_eq!(crate::netports::listener_pid(port), Some(pid));
