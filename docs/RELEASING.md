@@ -84,25 +84,38 @@ npm run notes:archive    # 从 CHANGELOG 重新生成 docs/releases/vX.Y.Z.md
 3. 打包（`tauri-action`）并把同一份正文作为 Release 正文 → `latest.json` 的 `notes`；
 4. `publish` 作业：发布前再按 CHANGELOG 刷一遍正文，然后把草稿转正式。
 
-### 为什么打包要 10 分钟
+### 为什么打包要 10 分钟（时间都花在哪）
 
-三平台**并行**跑，所以墙钟时间 = 最慢的那个平台（实测 Windows 约 11 分钟、macOS 10.5、Linux 9）。
-其中 90%+ 花在 `tauri-action` 这一步里**冷编译 500 多个 crate**（`Cargo.lock` 里 547 个包），
-其余步骤（checkout / 装 Node / 装 Rust / `npm ci`）加起来不到 40 秒：
+三平台**并行**跑，所以墙钟时间 = 最慢的那个平台。以 0.1.7 那次为例，从日志时间戳拆出来：
 
-| 步骤 | Windows | Linux |
-| --- | --- | --- |
-| `tauri-action`（编译 + 打包） | 620s | 492s |
-| `npm ci` | 17s | 7s |
-| 其余全部 | <20s | <30s |
+| 平台 | 装 Node/Rust/`npm ci` | 编译**全部依赖** | 编自身 crate + thin-LTO 链接 | 打包 + 上传 | 作业总计 |
+| --- | --- | --- | --- | --- | --- |
+| Linux | 约 45s（apt 占 25s） | 174s | 137s | 约 95s（AppImage 79s） | 451s |
+| Windows | 约 40s | 324s | **266s** | 约 25s | 707s |
+| macOS（universal） | 约 45s | 516s（两个架构各编一遍） | 175s | 约 75s | 774s |
 
-所以：**别在这种作业里做无关的事**。已经加了两处缓存 —— `Swatinem/rust-cache@v2`
-（`workspaces: src-tauri -> target`，缓存 registry + `target/`）和 `setup-node` 的 `cache: npm`。
-两点注意：
+也就是说「10 分钟」其实是两段：**冷编译全部依赖** + **最终 thin-LTO 链接**。
+本地之所以快，是因为 `src-tauri/target` 已经躺着编好的依赖（本机实测：target 全热
+0.43 秒；只改了版本号、重编自身 + 链接 1 分 38 秒；而 CI 每次都是空 target）。
 
-- 缓存 key 里带 OS/架构和 `Cargo.lock` 哈希，三端各存一份；`Cargo.toml` 一改就会换 key、
-  这次仍是冷编译。**依赖变动的那次发版，时间不会变短**。
-- GitHub 的缓存 7 天没被访问就清掉：发版间隔超过一周时，大概率还是冷启动。
+针对第一段，已经加了缓存：
+
+- `Swatinem/rust-cache@v2`，`workspaces: src-tauri -> target`（Cargo.toml 在子目录里，
+  用默认值会找不到 target、等于没开），缓存 registry + `target/`；
+- `setup-node` 的 `cache: npm`；
+- `.github/workflows/cache-warm.yml`：每周一跑一次，**只恢复、不保存**（`save-if: false`），
+  专门刷新 GitHub「7 天不访问即清」的 TTL。为什么不能让它保存：`shared-key` 与发版作业
+  同名，一旦让这个不编译的作业写缓存，就会把一份空 target 写进同一个 key —— 而缓存条目
+  不可覆盖，发版那次反而只能拿到空缓存（污染）。恢复命中同样算「访问」，够用了。
+
+三个前提要知道：
+
+- 缓存 key 里带 OS/架构与 `Cargo.lock` 哈希（`shared-key: tauri-release` 让两个作业命中
+  同一份），**`Cargo.toml` 一改就换 key**：依赖变动的那次发版仍然是冷编译；
+- GitHub 单仓库缓存上限 10GB（够：本机 `target/release` 4GB，压缩后每平台约 1～1.5GB），
+  超限会按 LRU 淘汰；
+- 针对第二段（最终链接，137～266s）：可选的下一步是把 `[profile.release] lto = "thin"`
+  关掉（`lto = false`），代价是二进制略大、运行性能略降 —— 这是**取舍**，要改先实测。
 
 另外有个坑：**发新版期间别再往 main 推提交**。版本门禁查的是「已经*正式发布*的版本」，
 而打包中的 Release 还停在草稿状态 —— 此时推 main 会通过门禁、再起一整轮三端构建

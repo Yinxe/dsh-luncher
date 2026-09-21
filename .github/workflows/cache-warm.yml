@@ -1,0 +1,56 @@
+name: 缓存保活
+
+# 为什么需要单独一个作业：
+#
+# 发版最贵的一步是「从零编译 500 多个 crate」（实测 Linux 174s / Windows 324s /
+# macOS 516s，见 docs/RELEASING.md「为什么打包要 10 分钟」）。`release.yml` 里已经用
+# `Swatinem/rust-cache` 缓存了 registry 与 `src-tauri/target`，但 GitHub 的 Actions
+# 缓存有两条清除规则：**7 天没被访问就删**，以及仓库总容量超限时按 LRU 淘汰。
+#
+# 而本仓库的版本门禁是「版本号没变就跳过整个打包作业」—— 也就是说，**只有真发版那次
+# 才会碰缓存**。发版间隔一旦超过一周，缓存必然已被清掉，发版又回到 10 分钟冷编译。
+#
+# 所以这里每周去「访问」一次缓存：
+#   - `shared-key` 与 release.yml 里的同名，两者命中**同一份**缓存；
+#   - `save-if: false`：只恢复、绝不保存。这样即使缓存已过期（恢复未命中），
+#     也不会把一份空 target 写进这个 key 里，把发版那次的缓存「污染」掉。
+on:
+  schedule:
+    # 每周一 03:00 UTC（周一上午的第一次发版之前）
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+# 只需要读权限：它只下载缓存，不写任何东西
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'ubuntu-22.04'
+          - platform: 'windows-latest'
+          - platform: 'macos-latest'
+    steps:
+      - uses: actions/checkout@v7
+
+      # 缓存 key 里含 rustc 版本，所以必须先装工具链（与 release.yml 保持一致）
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: 恢复（仅访问，不保存）Rust 构建缓存
+        id: cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+          shared-key: tauri-release
+          save-if: false
+
+      - name: 说明
+        run: |
+          echo "缓存命中: ${{ steps.cache.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "命中即刷新了 7 天 TTL；未命中说明缓存已过期，下次发版会是冷编译（正常现象）" >> "$GITHUB_STEP_SUMMARY"

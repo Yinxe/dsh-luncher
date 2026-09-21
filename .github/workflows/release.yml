@@ -101,7 +101,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: 'src-tauri -> target'
-          # 只缓存依赖与自身的编译产物；save-if 保持默认（成功才存，避免存下坏缓存）
+          # 与 .github/workflows/cache-warm.yml 同名：那个每周作业只恢复、不保存，
+          # 专门刷新 GitHub 缓存「7 天不访问即清」的 TTL（本仓库只有真发版才会走到
+          # 构建步骤，发版间隔超过一周时缓存必然过期、又回到冷编译）。
+          shared-key: tauri-release
+          # save-if 保持默认（成功才存），避免存下坏缓存
           cache-on-failure: false
 
       - name: install dependencies (ubuntu only)
