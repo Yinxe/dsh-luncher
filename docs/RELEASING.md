@@ -145,7 +145,8 @@ curl -sL https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.js
    | `R2_ACCESS_KEY_ID` | 上一步的 Access Key ID |
    | `R2_SECRET_ACCESS_KEY` | 上一步的 Secret Access Key |
 
-   没配也能正常发版：`publish-r2` 作业会自动跳过并打一条 notice。
+   没配也能正常发版：`publish-r2` 作业会自动跳过并打一条 **warning**（不是静默的 notice ——
+   客户端默认走 R2，这里跳过就意味着 R2 上的清单会停在旧版本，得照本节末尾手动补传）。
 
 ### 每次发布自动发生什么
 
@@ -154,25 +155,31 @@ curl -sL https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.js
 1. `gh release download` 拉本次发布的全部资产；
 2. `node scripts/r2-manifest.mjs` 把 `latest.json` 里的下载地址从 GitHub 资产 API
    （`api.github.com/repos/…/releases/assets/<id>`）改写成**固定键**
-   `<R2_PUBLIC_BASE>/latest/<平台>.扩展名`，**签名原样保留**（安装包字节没变，
+   `<R2_PUBLIC_BASE>/latest/<平台>.扩展名?v=<版本>`，**签名原样保留**（安装包字节没变，
    客户端照常验签），并校验清单引用的文件都在本地；
-3. `aws s3 cp` 按 `<本地文件> <TAB> <R2 键>` 逐行覆盖上传（`no-cache, max-age=0`），
-   再覆盖 `latest.json`；
-4. 自检：从公网取回清单，确认每个平台地址都落在 `<基址>/latest/` 下。
+3. `aws s3 cp` 按 `upload.tsv`（`<本地文件> <TAB> <R2 键> <TAB> Content-Disposition>`）
+   逐行覆盖上传：对象用 `immutable` 长缓存 + `?v=<版本>` 指纹，**同时带上
+   `Content-Disposition: attachment; filename="<原始资产名>"`**（见下节）；
+   最后用 `no-cache` 覆盖 `latest.json`；
+4. 自检：从公网取回清单，确认每个平台地址都落在 `<基址>/latest/` 下，再逐个 HEAD，
+   确认 200 且 `Content-Disposition` 里确实带着原始文件名（少一个就红）。
 
 ### 桶里的布局（固定键，只有一份 latest）
 
 ```
 dsh-luncher-release/
-├── latest.json                        # 更新清单：每次覆盖
-└── latest/
-    ├── windows-x64-setup.exe          # NSIS（windows-x86_64-nsis）
-    ├── windows-x64.msi                # MSI（windows-x86_64 / -msi）
+├── latest.json                        # 更新清单：每次覆盖（no-cache）
+└── latest/                            # 固定键（immutable + ?v=<版本> 指纹）
+    ├── windows-x64-setup.exe          # NSIS（windows-x86_64-nsis）→ 下载名 DSH.Launcher_<版本>_x64-setup.exe
+    ├── windows-x64.msi                # MSI（windows-x86_64 / -msi）→ 下载名 DSH.Launcher_<版本>_x64_en-US.msi
     ├── darwin-universal.app.tar.gz    # macOS 三架构共用 universal 包
     ├── linux-x86_64.AppImage
     ├── linux-x86_64.deb
     └── linux-x86_64.rpm
 ```
+
+「键名」和「下载名」是两回事：键为了地址稳定、永远不变；下载名由 `Content-Disposition`
+给出，永远带版本号和产品名（见上一节）。
 
 - 地址**不带版本号**：每次发布覆盖同名对象，桶里永远只有一份「当前最新」，
   旧版本自然消失、**不需要任何清理步骤**，占用稳定在约 118 MB；
@@ -180,14 +187,35 @@ dsh-luncher-release/
 - 只上传清单真正引用的包（AppImage / deb / rpm / app.tar.gz / msi / setup.exe）；
   `.dmg` 不在更新清单里（它供首次下载），要镜像的话另外传。
 
+### 固定键的代价：下载名 + Content-Disposition
+
+对象键被改写成「平台名」，浏览器/下载器就会拿键的最后一段当保存名 —— 人从直链下载
+会得到 `windows-x64-setup.exe`：没有版本号，也认不出是谁的包。所以每个对象上传时
+都要带 `Content-Disposition: attachment; filename="<原始资产名>"`，下载保存名才是
+`DSH.Launcher_0.1.6_x64-setup.exe`。
+
+- 这个头**更新器不看**：它按文件头魔数判 exe/msi/app.tar.gz，落盘用自己的临时名
+  （`DSH Launcher-<版本>-installer.exe`）。所以它对自动更新零影响，纯粹为人服务。
+- `scripts/r2-manifest.mjs --list-files` 的 TSV 第三列就是算好的这个头，CI 直接透传；
+  手写命令时别忘了它，否则文件名又会「丢」。
+- 更新一次**已发布版本**的对象元数据（字节不变）时，路径没变、CDN 边缘缓存里的那份
+  旧响应也就没变，必须换个查询串才会重新回源：
+
+  ```bash
+  node scripts/r2-manifest.mjs --in latest.json --assets-map assets.json \
+    --base "$R2_PUBLIC_BASE" --fingerprint "0.1.6-r2" --out latest.json
+  ```
+
+  `--fingerprint` 只在这种「原地改元数据」的场合用；正常发版**不要**传，默认就是版本号。
+
 ### 必须记住的两条
 
 - **`latest.json` 要随每次发布更新**：更新器按顺序取第一个能解析的清单，R2 上的清单
   陈旧会让客户端停在旧版本（届时用户可在设置里切到 GitHub 源自救）。
-- **`latest/` 下的对象不能长缓存**：它们的内容每次发布都变，如果给它们套上
-  `immutable` 长缓存，CDN 会把旧包喂给客户端，与清单里的签名对不上、更新直接失败。
-  CI 已固定写成 `no-cache, max-age=0`，改动时别改成 `immutable` ——
-  这是这套方案唯一容易踩的坑。
+- **对象可以长缓存，但只在带 `?v=<版本>` 指纹的前提下**：固定路径的内容每次发布都变，
+  指纹让 CDN 每个版本看到一个「新对象」，所以 `immutable` 是安全的、下载也快；
+  **`latest.json` 绝不能长缓存**（它必须每次回源），CI 固定写成 `no-cache, max-age=0`。
+  改动这两处缓存策略前先想清楚这一点 —— 这是这套方案唯一容易踩的坑。
 
 ### 手动补传（等价于 CI 那几步）
 
@@ -197,10 +225,12 @@ gh release view vX.Y.Z --json assets > r2-upload/assets.json
 node scripts/r2-manifest.mjs --in r2-upload/latest.json --assets-map r2-upload/assets.json \
   --check-dir r2-upload --base "$R2_PUBLIC_BASE" --list-files r2-upload/upload.tsv \
   --out r2-upload/latest.json
-# upload.tsv 每行是「本地文件 <TAB> R2 键」；用本机 OAuth 登录态即可，无需 S3 凭据：
-while IFS=$'\t' read -r local key; do
+# upload.tsv 每行是「本地文件 <TAB> R2 键 <TAB> Content-Disposition」；
+# 用本机 OAuth 登录态即可，无需 S3 凭据：
+while IFS=$'\t' read -r local key disposition; do
   npx wrangler r2 object put "dsh-luncher-release/latest/$key" --file "r2-upload/$local" \
-    --content-type application/octet-stream --cache-control "no-cache, max-age=0" --remote
+    --content-type application/octet-stream --content-disposition "$disposition" \
+    --cache-control "public, max-age=31536000, immutable" --remote
 done < r2-upload/upload.tsv
 npx wrangler r2 object put dsh-luncher-release/latest.json --file r2-upload/latest.json \
   --content-type application/json --cache-control "no-cache, max-age=0" --remote
@@ -210,7 +240,8 @@ npx wrangler r2 object put dsh-luncher-release/latest.json --file r2-upload/late
 
 - 想换自定义域名：改「一次性准备」表格里的两处基址即可。`r2.dev` 是 Cloudflare 的托管
   开发域名、有速率限制，流量大了建议绑自定义域名。
-- 早期按版本号命名的对象（`DSH.Launcher_0.1.5_*.exe`）已删除；固定键方案下不会再产生。
+- 早期按版本号命名的对象（`DSH.Launcher_0.1.5_*.exe`）已删除；固定键方案下不会再产生，
+  版本信息改由 `Content-Disposition` 和清单里的 `?v=` 承载。
 
 ## 8. 常见故障
 

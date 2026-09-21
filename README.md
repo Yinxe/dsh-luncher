@@ -66,7 +66,9 @@
 
 下载地址默认走**自建 CDN**：清单由自建源（Cloudflare R2）提供，地址是
 `…/latest/windows-x64-setup.exe` 这类**不带版本号的固定地址**（每次发布覆盖，桶里只留一份
-「当前最新」）；GitHub 源保留为兜底，也可以在设置里手动切过去。实测国内直连（不走代理）拉 81MB 的
+「当前最新」）；地址里的名字只是「稳定键」，**下载下来的文件仍保留原始名字**
+（如 `DSH.Launcher_0.1.6_x64-setup.exe`，由 `Content-Disposition` 响应头给出）—— 键求稳定、
+名求可读，两者互不干扰。GitHub 源保留为兜底，也可以在设置里手动切过去。实测国内直连（不走代理）拉 81MB 的
 AppImage：GitHub release 直接连不上，自建源约 3.3MB/s 正常下载。地址写死在程序里，发布细节见
 [docs/RELEASING.md](docs/RELEASING.md) 第 7 节。
 

@@ -184,8 +184,8 @@ jobs:
   # ★5 把发布产物同步到自建更新源（Cloudflare R2）
   #
   # 为什么：客户端默认从 R2 下载更新（代码里写死的基址，见 update_check::R2_BASE）。
-  # 实测同一条网络下 81MB 的 AppImage，R2 约 3.3MB/s、GitHub 约 1.7MB/s（快 1.9 倍），
-  # 没有代理的机器差距更大。
+  # 实测国内直连（不走代理）拉 81MB 的 AppImage：GitHub release 下载返回 000（连不上），
+  # 自建源 200、约 3.3MB/s —— 自建源的价值首先是「能用」，其次才是快。
   #
   # 未配置 R2 secrets 时整个作业自动跳过（打一条 notice），不影响发版。
   # 需要的 secrets（仓库 Settings → Secrets and variables → Actions）：
@@ -251,12 +251,19 @@ jobs:
           # 路径对人始终是「latest」，对 CDN 却是每个版本一个新对象 ——
           # 所以对象可以放心用 immutable 长缓存（下载快），也不会下到与签名不符的旧包。
           # 每次发布覆盖同名对象，桶里永远只有一份「当前最新」，不需要清理步骤。
-          while IFS=$'\t' read -r local key; do
+          #
+          # 固定键的副作用是「文件名丢了」：人类从直链下载时，浏览器会拿键的最后一段
+          # 当保存名，于是拿到的是 windows-x64-setup.exe（没版本、认不出是谁的包）。
+          # 所以每个对象都要带上 Content-Disposition —— 第三个字段就是脚本算好的
+          # 「attachment; filename="原始资产名"」。更新器不看这个头（它按文件头魔数
+          # 判类型、自己拼临时文件名），这个头纯粹是给人看的。
+          while IFS=$'\t' read -r local key disposition; do
             [ -z "$local" ] && continue
-            echo "→ latest/$key   (← $local)"
+            echo "→ latest/$key   (← $local, 下载名 $local)"
             aws s3 cp "r2-upload/$local" "s3://$R2_BUCKET/latest/$key" \
               --endpoint-url "$R2_ENDPOINT" \
               --content-type application/octet-stream \
+              --content-disposition "$disposition" \
               --cache-control "public, max-age=31536000, immutable" \
               --no-progress
           done < r2-upload/upload.tsv
@@ -270,15 +277,38 @@ jobs:
           aws s3 ls "s3://$R2_BUCKET/" --endpoint-url "$R2_ENDPOINT"
           aws s3 ls "s3://$R2_BUCKET/latest/" --endpoint-url "$R2_ENDPOINT"
 
-      - name: 自检（公网地址能取到清单，且地址确实指向 R2）
+      - name: 自检（公网地址能取到清单、指向 R2、且下载文件名没丢）
         if: steps.cfg.outputs.ready == 'true'
         run: |
           curl -fsS --max-time 30 "$R2_PUBLIC_BASE/latest.json" -o /tmp/r2-latest.json
           node -e '
-            const m = JSON.parse(require("fs").readFileSync("/tmp/r2-latest.json", "utf8"));
-            const base = process.env.R2_PUBLIC_BASE;
-            for (const [k, v] of Object.entries(m.platforms ?? {})) {
-              if (!v.url.startsWith(base + "/latest/")) { console.error(`✖ ${k} 的地址不是固定键: ${v.url}`); process.exit(1); }
-            }
-            console.log(`✔ 自建源清单 version=${m.version}，${Object.keys(m.platforms ?? {}).length} 个平台键全部指向 ${base}`);
+            (async () => {
+              const fs = require("fs");
+              const m = JSON.parse(fs.readFileSync("/tmp/r2-latest.json", "utf8"));
+              const base = process.env.R2_PUBLIC_BASE;
+              const platforms = Object.entries(m.platforms ?? {});
+              if (!platforms.length) throw new Error("清单里没有平台键");
+              // upload.tsv: 本地文件名 <TAB> R2 键 <TAB> Content-Disposition
+              const tsv = fs.readFileSync("r2-upload/upload.tsv", "utf8").trim().split("\n");
+              const wantName = new Map(tsv.map((line) => {
+                const [local, key] = line.split("\t");
+                return [key, local];
+              }));
+              const byUrl = new Map();
+              for (const [k, v] of platforms) {
+                if (!v.url.startsWith(base + "/latest/")) throw new Error(`${k} 的地址不是固定键: ${v.url}`);
+                byUrl.set(v.url, decodeURIComponent(v.url.split("?")[0].split("/").pop()));
+              }
+              for (const [url, key] of byUrl) {
+                const res = await fetch(url, { method: "HEAD" });
+                if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+                const cd = res.headers.get("content-disposition") ?? "";
+                const name = wantName.get(key) ?? key;
+                if (!cd.includes(`filename="${name}"`)) {
+                  throw new Error(`${key} 的 Content-Disposition 里没有原始文件名 ${name}（实际: ${cd || "缺失"})`);
+                }
+              }
+              console.log(`✔ 自建源清单 version=${m.version}，${platforms.length} 个平台键全部指向 ${base}`);
+              console.log(`✔ ${byUrl.size} 个对象都能取到，且下载文件名保留原始资产名`);
+            })().catch((e) => { console.error(`✖ 自检失败：${e.message}`); process.exit(1); });
           '

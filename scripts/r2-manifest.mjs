@@ -12,21 +12,32 @@
 //    路径对人始终是「latest」，对 CDN 却是「每个版本一个新对象」—— 对象因此可以安全地
 //    用 immutable 长缓存，下载才快。
 //
+// 4. 对象键被改成了固定键，**原始文件名并没有消失**：上传时要带
+//    `Content-Disposition: attachment; filename="<原始资产名>"`（见 contentDisposition）。
+//    不带的话，人从直链下载下来的文件就叫 `windows-x64-setup.exe` —— 没有版本号、
+//    认不出是谁的包；带了就还是 `DSH.Launcher_0.1.6_x64-setup.exe`。
+//    更新器不看这个头（它按文件头魔数判类型、自己拼临时文件名），纯为人服务。
+//
 // 签名（signature）字段原样保留：安装包字节没变，客户端照常验签。
 //
 // 用法：
 //   node scripts/r2-manifest.mjs --in latest.json --base https://pub-xxx.r2.dev \
 //        --assets-map assets.json [--out latest.r2.json] [--check-dir 目录] \
-//        [--list-files upload.tsv]
+//        [--list-files upload.tsv] [--fingerprint 0.1.6-r2]
 //
-//   --in          tauri-action 生成的 latest.json
-//   --base        自建源公开基址（末尾不要带 /）
-//   --assets-map  资产映射：`gh release view vX --json assets` 的输出，或 {apiUrl: 文件名}
-//                 清单里是资产 API 地址时**必须**给，否则解析不出文件名
-//                 （会直接报错，绝不猜：猜错等于把用户指向 404）
-//   --out         输出路径（默认打印到 stdout）
-//   --check-dir   可选：确认引用的安装包都在这个目录里
-//   --list-files  可选：写出「本地文件名 <TAB> R2 对象键」的 TSV，供 CI 逐行上传
+//   --in           tauri-action 生成的 latest.json
+//   --base         自建源公开基址（末尾不要带 /）
+//   --assets-map   资产映射：`gh release view vX --json assets` 的输出，或 {apiUrl: 文件名}
+//                  清单里是资产 API 地址时**必须**给，否则解析不出文件名
+//                  （会直接报错，绝不猜：猜错等于把用户指向 404）
+//   --out          输出路径（默认打印到 stdout）
+//   --check-dir    可选：确认引用的安装包都在这个目录里
+//   --list-files   可选：写出「本地文件名 <TAB> R2 对象键 <TAB> Content-Disposition」的
+//                  TSV，供 CI 逐行上传（键是固定键，所以第三个字段才保得住原始文件名）
+//   --fingerprint  可选：覆盖 URL 上的缓存指纹，默认就是版本号。
+//                  只在该给「已经发布过的版本」原地改对象元数据（字节不变）时用：
+//                  路径没变、CDN 边缘缓存里那份旧响应的头也就没变，必须换个查询串
+//                  才会重新回源。正常发版**不要**用。
 //
 // 退出码：0 成功；1 参数/结构有问题；2 校验不通过。
 
@@ -35,10 +46,19 @@ import { basename, join } from "node:path";
 
 const USAGE =
   "用法: node scripts/r2-manifest.mjs --in <latest.json> --base <https://自建源基址> " +
-  "[--assets-map <assets.json>] [--out <路径>] [--check-dir <目录>]";
+  "[--assets-map <assets.json>] [--out <路径>] [--check-dir <目录>] " +
+  "[--list-files <upload.tsv>] [--fingerprint <缓存指纹>]";
 
 function parseArgs(argv) {
-  const out = { in: "", base: "", out: "", checkDir: "", assetsMap: "", listFiles: "" };
+  const out = {
+    in: "",
+    base: "",
+    out: "",
+    checkDir: "",
+    assetsMap: "",
+    listFiles: "",
+    fingerprint: "",
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--in") out.in = argv[++i] ?? "";
@@ -47,6 +67,7 @@ function parseArgs(argv) {
     else if (a === "--check-dir") out.checkDir = argv[++i] ?? "";
     else if (a === "--assets-map") out.assetsMap = argv[++i] ?? "";
     else if (a === "--list-files") out.listFiles = argv[++i] ?? "";
+    else if (a === "--fingerprint") out.fingerprint = argv[++i] ?? "";
     else if (a === "--stable-keys") {
       /* 兼容旧调用（现在恒为稳定键模式） */
     }
@@ -130,6 +151,25 @@ function looksLikeFileName(name) {
   return Boolean(name) && /\.[A-Za-z0-9]{2,8}$/.test(name) && !/^\d+$/.test(name);
 }
 
+/**
+ * 上传对象时要带的 Content-Disposition —— 固定键的「补丁」。
+ *
+ * 对象键是固定键（`latest/windows-x64-setup.exe`），人类下载时浏览器/下载器默认拿
+ * 键的最后一段当文件名，于是版本号和产品名都没了。这里把**原始资产名**塞进响应头，
+ * 下载下来的文件名就恢复成 `DSH.Launcher_0.1.6_x64-setup.exe`。
+ *
+ * 纯 ASCII 名用 `filename="…"`；含空格以外的非 ASCII 字符时再补一个 RFC 5987 的
+ * `filename*=UTF-8''…`（老客户端认前者，新客户端优先认后者）。
+ * 更新器不读这个头，所以对自动更新零影响。
+ */
+function contentDisposition(name) {
+  const quoted = name.replace(/["\\]/g, "_");
+  const value = `attachment; filename="${quoted}"`;
+  return /^[\x20-\x7e]*$/.test(name) && quoted === name
+    ? value
+    : `${value}; filename*=UTF-8''${encodeURIComponent(name)}`;
+}
+
 const args = parseArgs(process.argv.slice(2));
 const base = args.base.replace(/\/+$/, "");
 if (!/^https:\/\//.test(base)) {
@@ -195,7 +235,9 @@ for (const e of entries) {
   }
   const key = stableKey(e.target, name);
   // ?v= 是缓存指纹：路径稳定、字节可 immutable，换版本就换 URL
-  const fingerprint = encodeURIComponent(String(manifest.version ?? "dev"));
+  const fingerprint = encodeURIComponent(
+    args.fingerprint || String(manifest.version ?? "dev")
+  );
   e.info.url = `${base}/latest/${encodeURIComponent(key)}?v=${fingerprint}`;
   if (!resolved.has(key)) resolved.set(key, { local: name, targets: [] });
   resolved.get(key).targets.push(e.target);
@@ -214,15 +256,21 @@ if (args.out) {
 
 if (args.listFiles) {
   const tsv = [...resolved.entries()]
-    .map(([key, v]) => `${v.local}\t${key}`)
+    .map(([key, v]) => `${v.local}\t${key}\t${contentDisposition(v.local)}`)
     .join("\n");
   writeFileSync(args.listFiles, tsv + "\n");
   console.log(`✔ 已写出待上传清单 ${args.listFiles}（${resolved.size} 个对象）`);
 }
 console.log(`   基址: ${base}（固定键，每次发布覆盖）`);
-console.log(`   上传映射（本地文件 → R2 键）：`);
+console.log(`   上传映射（本地文件 → R2 键 → 下载时的文件名）：`);
 for (const [key, v] of resolved) {
-  console.log(`     ${v.local}  →  latest/${key}   （${v.targets.length} 个平台键）`);
+  console.log(
+    `     ${v.local}  →  latest/${key}   （${v.targets.length} 个平台键，` +
+      `下载保存名 ${v.local}）`
+  );
+}
+if (args.fingerprint) {
+  console.log(`   缓存指纹: ${args.fingerprint}（--fingerprint 覆盖，正常发版不该出现）`);
 }
 if (problems.length) {
   console.error("\n✖ 校验不通过：");
