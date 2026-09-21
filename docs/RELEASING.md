@@ -150,7 +150,8 @@ curl -sL https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.js
 
 ### 每次发布自动发生什么
 
-`publish-r2` 作业（`needs: publish`，只在发布成功后跑）：
+`publish-r2` 作业（`needs: publish`，**只在这一轮真的发布了新版本时才跑**；版本号没变就推 main
+属于空跑，整个作业会跟着跳过，不会白下载白上传 118MB）：
 
 1. `gh release download` 拉本次发布的全部资产；
 2. `node scripts/r2-manifest.mjs` 把 `latest.json` 里的下载地址从 GitHub 资产 API
@@ -207,6 +208,8 @@ dsh-luncher-release/
   ```
 
   `--fingerprint` 只在这种「原地改元数据」的场合用；正常发版**不要**传，默认就是版本号。
+  下一轮真正的发版会自然把指纹换成新版本号，不需要再收尾。0.1.6 现在用的就是
+  `?v=0.1.6-r2`（补 `Content-Disposition` 那次留下的）。
 
 ### 必须记住的两条
 

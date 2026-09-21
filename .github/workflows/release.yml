@@ -147,6 +147,10 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+    # 供 publish-r2 判断「这一轮到底有没有真的发版」：版本号没变时这里什么都没发，
+    # 再跑一遍 R2 同步纯属白下载白上传 118MB（还会把手工换过的缓存指纹改回版本号）。
+    outputs:
+      released: ${{ steps.release.outputs.released }}
     steps:
       - uses: actions/checkout@v7
 
@@ -156,6 +160,7 @@ jobs:
       # 直接转正式会留下没有 git tag 的 release（v0.1.3 就这样踩过，无法按 tag 溯源），
       # 所以发布前先建真实 tag（打在草稿的 target commit 上），再把 release 指过去。
       - name: 刷正文、补 tag 并发布
+        id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -163,6 +168,7 @@ jobs:
             --jq '[.[] | select(.draft)][0].id // empty')
           if [ -z "$RID" ]; then
             echo "没有草稿（版本号未变时就是这样），结束"
+            echo "released=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           node scripts/release-notes.mjs --check > release-notes.md
@@ -180,6 +186,7 @@ jobs:
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RID" \
             -F draft=false -F prerelease=false \
             --jq '"已发布 \(.tag_name)  draft=\(.draft)  prerelease=\(.prerelease)"'
+          echo "released=true" >> "$GITHUB_OUTPUT"
 
   # ★5 把发布产物同步到自建更新源（Cloudflare R2）
   #
@@ -187,7 +194,9 @@ jobs:
   # 实测国内直连（不走代理）拉 81MB 的 AppImage：GitHub release 下载返回 000（连不上），
   # 自建源 200、约 3.3MB/s —— 自建源的价值首先是「能用」，其次才是快。
   #
-  # 未配置 R2 secrets 时整个作业自动跳过（打一条 notice），不影响发版。
+  # 只在这一轮真的发布了新版本时才跑（版本号没变推 main → publish 是空跑 → 这里也跳过，
+  # 不然每次推 main 都要白下载白上传 118MB）。
+  # 未配置 R2 secrets 时整个作业自动跳过（打一条 warning），不影响发版。
   # 需要的 secrets（仓库 Settings → Secrets and variables → Actions）：
   #   R2_ACCOUNT_ID        Cloudflare 账号 ID
   #   R2_ACCESS_KEY_ID     R2 API Token 的 Access Key ID
@@ -195,7 +204,7 @@ jobs:
   publish-r2:
     needs: publish
     runs-on: ubuntu-22.04
-    if: github.repository_owner == 'Yinxe'
+    if: github.repository_owner == 'Yinxe' && needs.publish.outputs.released == 'true'
     env:
       R2_BUCKET: dsh-luncher-release
       R2_PUBLIC_BASE: https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev
