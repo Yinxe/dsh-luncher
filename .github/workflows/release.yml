@@ -108,6 +108,32 @@ jobs:
           # save-if 保持默认（成功才存），避免存下坏缓存
           cache-on-failure: false
 
+      # AppImage 打包要用的 5 个工具（AppRun-x86_64、linuxdeploy-*.AppImage、
+      # linuxdeploy-plugin-gtk/gstreamer.sh、linuxdeploy-plugin-appimage.AppImage，共约 36MB）。
+      # tauri-bundler 是「文件不存在才下载」（linuxdeploy.rs 的 prepare_tools），所以日志里
+      # 那串 Downloading 只在缓存缺失时出现 —— 恢复这份目录就等于跳过它。
+      # 默认位置是 `dirs::cache_dir()/tauri`，即 ~/.cache/tauri。
+      #
+      # 为什么不改成 tauri.conf.json 的 `bundle.useLocalToolsDir: true`（工具落到 target/.tauri）：
+      # rust-cache 保存缓存前会执行 cleanTargetDir，把 target 下**非 profile 目录里的散落文件**
+      # 全部删掉（只保留 build / .fingerprint / deps 及其依赖产物）。工具正好是目录里的散落文件，
+      # 会在「存缓存」那一刻被清空 —— 配置看起来生效，实际每次照旧重下，且没有任何报错。
+      # 所以必须放在 target 之外，独立成一份缓存。
+      #
+      # 为什么不直接塞进上面 rust-cache 那份（它的 cache-directories 输入）：
+      # rust-cache 的条目**不可覆盖** —— 恢复命中原 key 时它会直接跳过保存（save.ts 的
+      # isCacheUpToDate），所以往已有条目里加新路径要等下一次依赖/rustc 变更才会带上，
+      # 更新 key 之前这条路径一直进不了缓存。独立 key 才能第一次构建就存下来。
+      #
+      # key 固定：这 5 个文件基本没有版本概念（linuxdeploy 是 continuous、AppRun 来自 apprun-old），
+      # 文件名写死在 bundler 里，缺哪个下哪个，所以陈旧缓存不会出错；要强制重下就把 -v1 改成 -v2。
+      - name: 缓存 Tauri 打包工具（AppImage，仅 Linux）
+        if: matrix.platform == 'ubuntu-22.04' && steps.gate.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tauri
+          key: tauri-tools-linux-v1
+
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-22.04' && steps.gate.outputs.skip != 'true'
         run: |

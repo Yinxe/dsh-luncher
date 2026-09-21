@@ -50,7 +50,20 @@ jobs:
           shared-key: tauri-release
           save-if: false
 
+      # 与 release.yml 的「缓存 Tauri 打包工具（AppImage，仅 Linux）」同名同 key。
+      # 单独一份缓存条目同样受「7 天不访问即清」约束，所以这里也要每周碰一次。
+      # 同样只恢复、不保存（restore 不会写缓存）：命中即刷新 TTL，未命中就什么都不做，
+      # 等下次发版由 release.yml 存进去。
+      - name: 保活 Tauri 打包工具缓存（仅 Linux）
+        id: tools
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/tauri
+          key: tauri-tools-linux-v1
+
       - name: 说明
         run: |
-          echo "缓存命中: ${{ steps.cache.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Rust 构建缓存命中: ${{ steps.cache.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tauri 打包工具缓存命中（仅 Linux）: ${{ steps.tools.outputs.cache-hit }}" >> "$GITHUB_STEP_SUMMARY"
           echo "命中即刷新了 7 天 TTL；未命中说明缓存已过期，下次发版会是冷编译（正常现象）" >> "$GITHUB_STEP_SUMMARY"

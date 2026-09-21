@@ -98,15 +98,26 @@ npm run notes:archive    # 从 CHANGELOG 重新生成 docs/releases/vX.Y.Z.md
 本地之所以快，是因为 `src-tauri/target` 已经躺着编好的依赖（本机实测：target 全热
 0.43 秒；只改了版本号、重编自身 + 链接 1 分 38 秒；而 CI 每次都是空 target）。
 
-针对第一段，已经加了缓存：
+针对**可以缓存的两段**（依赖编译、打包工具下载），已经加了缓存：
 
 - `Swatinem/rust-cache@v2`，`workspaces: src-tauri -> target`（Cargo.toml 在子目录里，
   用默认值会找不到 target、等于没开），缓存 registry + `target/`；
 - `setup-node` 的 `cache: npm`；
+- `actions/cache@v4` 单独缓存 **AppImage 打包工具**（`~/.cache/tauri`，约 36MB）：
+  tauri-bundler 是「文件不存在才下载」（`linuxdeploy.rs` 的 `prepare_tools`），所以恢复这份
+  目录就能省掉日志里那 5 次 `Downloading AppRun-x86_64 / linuxdeploy-*`。
+  **不要**图省事改成 `tauri.conf.json` 的 `bundle.useLocalToolsDir: true`（工具落到 `target/.tauri`）：
+  rust-cache 保存前会 `cleanTargetDir`，把 target 下非 profile 目录里的散落文件全删掉 ——
+  工具会在存缓存那一刻被清空，配置看起来生效、实际每次照旧重下，而且不报错。
+  也不能塞进 rust-cache 那份条目（`cache-directories`）：条目不可覆盖，恢复命中原 key 会直接
+  跳过保存，新路径要等下一次依赖/rustc 变更才带得上。key 固定为 `tauri-tools-linux-v1`
+  （这 5 个文件没有版本概念、文件名写死在 bundler 里，缺哪个下哪个），要强制重下就把
+  `tauri-tools-linux-v1` 改成 `-v2`（release.yml 与 cache-warm.yml 两处同步改）；
 - `.github/workflows/cache-warm.yml`：每周一跑一次，**只恢复、不保存**（`save-if: false`），
-  专门刷新 GitHub「7 天不访问即清」的 TTL。为什么不能让它保存：`shared-key` 与发版作业
-  同名，一旦让这个不编译的作业写缓存，就会把一份空 target 写进同一个 key —— 而缓存条目
-  不可覆盖，发版那次反而只能拿到空缓存（污染）。恢复命中同样算「访问」，够用了。
+  专门刷新 GitHub「7 天不访问即清」的 TTL —— Rust 构建缓存与上面的 AppImage 工具缓存
+  **各是一份条目，各碰一次**（工具那份用 `actions/cache/restore`，只读）。为什么不能让它保存：
+  `shared-key` 与发版作业同名，一旦让这个不编译的作业写缓存，就会把一份空 target 写进同一个
+  key —— 而缓存条目不可覆盖，发版那次反而只能拿到空缓存（污染）。恢复命中同样算「访问」，够用了。
 
 三点要知道（前两条是读 `Swatinem/rust-cache` 源码确认的）：
 
