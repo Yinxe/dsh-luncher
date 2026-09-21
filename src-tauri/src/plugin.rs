@@ -452,6 +452,114 @@ fn github_urls_in(steps: &[Step]) -> Vec<String> {
     out
 }
 
+/// 修掉 git 的「中断克隆」哨兵 HEAD。
+///
+/// `git clone` 中途被打断（断网、超时被杀）会在 `.git/HEAD` 留下
+/// `ref: refs/heads/.invalid`。这个名字**不合法**，于是 git 一边「查不到它」、
+/// 一边「拒绝覆盖它」—— 之后每一次 `git pull` 都必然失败：
+///
+/// ```text
+/// fatal: update_ref failed for ref 'HEAD': cannot lock ref 'HEAD': reference already exists
+/// ```
+///
+/// 用户在界面上只能看到这一句，点多少次「更新」都不会好（实际发生过）：
+/// 所以拉取前先把它修回真实分支 —— HEAD 指回 `refs/heads/<分支>`，本地分支还没出生时
+/// 按 `origin/<分支>` 就地补出来，后面的 `pull --ff-only` 就恢复成正常快进。
+///
+/// 只认这一个哨兵形态：HEAD 是分离状态、指向合法分支名、或根本不是仓库，一律不动。
+/// 返回 `Some(说明)` 表示确实修了。
+pub fn fix_broken_head(dir: &Path) -> Result<Option<String>, String> {
+    let head = match std::fs::read_to_string(dir.join(".git/HEAD")) {
+        Ok(s) => s,
+        Err(_) => return Ok(None), // 不是仓库（或没有 HEAD）：交给后面的步骤报错
+    };
+    let Some(name) = head.trim().strip_prefix("ref: refs/heads/") else {
+        return Ok(None); // 分离 HEAD / 别的符号引用
+    };
+    let name = name.trim().to_string();
+    if name.is_empty() || git_ref_ok(dir, &format!("refs/heads/{name}")) {
+        return Ok(None);
+    }
+
+    // 该修成哪个分支：origin/HEAD → 克隆时写进配置的 fetch refspec → main
+    let target = preferred_branch(dir).unwrap_or_else(|| "main".to_string());
+
+    // 1) HEAD 指回真实分支（名字由 git 自己校验，非法名在这里就会失败）
+    let head_ref = format!("refs/heads/{target}");
+    match git_run(dir, &["symbolic-ref", "HEAD", &head_ref]).ok_or("启动 git 失败（确认 git 在 PATH 中）")? {
+        (true, _) => {}
+        (false, err) => return Err(format!("git symbolic-ref 失败：{}", err.trim())),
+    }
+
+    // 2) 本地分支还没出生、但远端跟踪分支已经在 → 就地把分支补出来。
+    //    否则 pull 会在「未出生分支」上猜上游；网络一失败就停在半路。
+    let remote_ref = format!("refs/remotes/origin/{target}");
+    let mut created = false;
+    if !git_ref_ok(dir, &head_ref) && git_ref_ok(dir, &remote_ref) {
+        match git_run(dir, &["update-ref", &head_ref, &remote_ref])
+            .ok_or("启动 git 失败（确认 git 在 PATH 中）")?
+        {
+            (true, _) => created = true,
+            (false, err) => return Err(format!("git update-ref 失败：{}", err.trim())),
+        }
+    }
+
+    Ok(Some(format!(
+        "这个克隆的 HEAD 停在 git 的中断克隆哨兵 `refs/heads/{name}` 上（就是它让每次 pull 都报 cannot lock ref 'HEAD'），已修回 `{head_ref}`{}",
+        if created {
+            "，并按 origin 把本地分支补了出来"
+        } else {
+            ""
+        }
+    )))
+}
+
+/// 跑一条 `git -C <dir> …`；`None` 表示连 git 都没起来（超时 / 找不到 git）。
+fn git_run(dir: &Path, args: &[&str]) -> Option<(bool, String)> {
+    let mut argv: Vec<String> = vec!["-C".into(), dir.to_string_lossy().into_owned()];
+    argv.extend(args.iter().map(|s| s.to_string()));
+    util::run_captured_in(
+        Path::new("git"),
+        &argv,
+        None,
+        &[],
+        std::time::Duration::from_secs(10),
+    )
+}
+
+/// 该 ref 是否存在（`git rev-parse --verify` 的退出码；名字不合法也算不存在）。
+fn git_ref_ok(dir: &Path, name: &str) -> bool {
+    matches!(git_run(dir, &["rev-parse", "--verify", "--quiet", name]), Some((true, _)))
+}
+
+/// 这个克隆想跟的分支名：`origin/HEAD` 最权威，其次是 fetch refspec 的源分支。
+fn preferred_branch(dir: &Path) -> Option<String> {
+    if let Some((true, out)) = git_run(dir, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    {
+        let b = out.trim().trim_start_matches("origin/").trim();
+        if !b.is_empty() {
+            return Some(b.to_string());
+        }
+    }
+    let cfg = std::fs::read_to_string(dir.join(".git/config")).ok()?;
+    for line in cfg.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "fetch" {
+            continue;
+        }
+        let src = value.trim().trim_start_matches('+');
+        let src = src.split(':').next().unwrap_or("");
+        if let Some(b) = src.strip_prefix("refs/heads/") {
+            if !b.is_empty() {
+                return Some(b.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// 把本地克隆的 `origin` 从「代理前缀 + 原始地址」还原成原始地址。
 ///
 /// 返回 `Some((旧, 新))` 表示确实改了；已经是干净地址返回 `None`。
@@ -1496,6 +1604,9 @@ pub fn steps_for_clone_install(
         // 老克隆的 origin 可能是代理地址（手抄的 URL / 旧版本留下的）：先修回来，
         // 否则它既不走本次的加速注入，代理一挂就永久拉不动
         steps.push(Step::FixRemote { dir: root.clone() });
+        // 再修 HEAD：克隆中断过的话它停在 git 的 `.invalid` 哨兵上，
+        // 不修的话下面的 fetch/pull 只会一直报 `cannot lock ref 'HEAD'`
+        steps.push(Step::FixHead { dir: root.clone() });
         steps.push(Step::Cmd {
             program: "git".into(),
             args: vec!["-C".into(), dir.clone(), "fetch".into(), "--all".into(), "--prune".into()],
@@ -1564,6 +1675,10 @@ pub fn steps_for_pull_update_root(
         // 先修远端：origin 若被写成代理地址，代理一失效就永久 pull 不动，
         // 而且加速注入只认 https://github.com/、对脏地址无效
         Step::FixRemote { dir: root.clone() },
+        // 克隆中断过的话 HEAD 会停在 git 的 `.invalid` 哨兵上：那种状态下
+        // `git pull` 永远只报 `cannot lock ref 'HEAD': reference already exists`，
+        // 用户在界面上点几次「更新」都不会好 —— 所以拉取前先修回来
+        Step::FixHead { dir: root.clone() },
         Step::Cmd {
             program: "git".into(),
             args: vec!["-C".into(), root.to_string_lossy().into_owned(), "pull".into(), "--ff-only".into()],
@@ -2201,7 +2316,7 @@ mod tests {
             other => panic!("末步应为 dsh plugin add，实际 {other:?}"),
         }
 
-        // 已存在克隆：先修远端（origin 别留着代理前缀）→ fetch + pull，不再 clone
+        // 已存在克隆：先修远端（origin 别留着代理前缀）→ 修 HEAD（中断克隆的哨兵）→ fetch + pull
         std::fs::create_dir_all(root.join(".git")).unwrap();
         let (steps2, _) = steps_for_clone_install(&input).unwrap();
         assert!(matches!(&steps2[0], Step::Note { .. }), "steps2={steps2:?}");
@@ -2209,24 +2324,32 @@ mod tests {
             matches!(&steps2[1], Step::FixRemote { .. }),
             "已存在的克隆必须先修远端，steps2={steps2:?}"
         );
+        assert!(
+            matches!(&steps2[2], Step::FixHead { .. }),
+            "已存在的克隆还要修 HEAD（克隆中断会留下 .invalid 哨兵），steps2={steps2:?}"
+        );
         assert!(steps2.iter().any(|s| matches!(
             s,
             Step::Cmd { args, .. } if args.iter().any(|a| a == "fetch")
         )));
 
-        // pull 升级：先修远端 → git pull --ff-only → 构建 → 重新 link
+        // pull 升级：先修远端 → 修 HEAD → git pull --ff-only → 构建 → 重新 link
         let (steps3, _) = steps_for_pull_update_root(&root, Some("plugins/mcwiki-search"), true).unwrap();
         assert!(matches!(&steps3[0], Step::Note { .. }));
         assert!(
             matches!(&steps3[1], Step::FixRemote { .. }),
             "pull 之前必须先修远端，steps3={steps3:?}"
         );
-        match &steps3[2] {
+        assert!(
+            matches!(&steps3[2], Step::FixHead { .. }),
+            "pull 之前必须先把中断克隆的哨兵 HEAD 修回来，steps3={steps3:?}"
+        );
+        match &steps3[3] {
             Step::Cmd { args, .. } => {
                 assert!(args.iter().any(|a| a == "pull"));
                 assert!(args.iter().any(|a| a == "--ff-only"));
             }
-            other => panic!("pull 升级第 3 步应为 git pull，实际 {other:?}"),
+            other => panic!("pull 升级第 4 步应为 git pull，实际 {other:?}"),
         }
         // 非 git 目录必须被拒
         assert!(steps_for_pull_update_root(&tmp, None, false).is_err());
@@ -2270,6 +2393,86 @@ mod tests {
         assert_eq!(root, tmp.join(".dsh-launcher/git-plugins/Yinxe-deepseek-harness-plugins"));
 
         std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 复刻现场：`git clone` 被网络中断，HEAD 停在 `refs/heads/.invalid`，
+    /// 之后 `git pull` 永久报 `cannot lock ref 'HEAD': reference already exists`。
+    /// 修完必须能正常 pull（这里用本地 remote，不起网络）。
+    #[test]
+    fn repairs_interrupted_clone_head() {
+        let tmp = std::env::temp_dir().join(format!("dsh-fixhead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // 直接跑真 git（与本模块里 fix_proxied_remote_repairs_origin 同一套路）
+        let git = |dir: &std::path::PathBuf, args: &[&str]| {
+            util::hidden_command("git")
+                .args(args)
+                .current_dir(dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+
+        // 造「远端」：main 有提交
+        assert!(git(&tmp, &["init", "-q", "--bare", "remote.git"]));
+        let work = tmp.join("work");
+        assert!(git(&tmp, &["init", "-q", "work"]));
+        std::fs::write(work.join("a.txt"), "hi").unwrap();
+        assert!(git(&work, &["add", "-A"]));
+        assert!(git(
+            &work,
+            &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "one"]
+        ));
+        assert!(git(&work, &["branch", "-M", "main"]));
+        assert!(git(&work, &["remote", "add", "origin", "../remote.git"]));
+        assert!(git(&work, &["push", "-q", "origin", "main"]));
+
+        let clone = tmp.join("cloned");
+        let url = format!("file://{}", tmp.join("remote.git").display());
+        assert!(git(
+            &tmp,
+            &["clone", "-q", "--depth", "1", "--branch", "main", &url, "cloned"]
+        ));
+
+        // 正常仓库：不该动
+        assert_eq!(fix_broken_head(&clone).unwrap(), None);
+
+        // 复刻中断克隆的哨兵：HEAD → refs/heads/.invalid，且这个非法名字的文件真实存在
+        let rev = git_run(&clone, &["rev-parse", "refs/remotes/origin/main"]).expect("git 起不来");
+        assert!(rev.0, "取 origin/main 失败：{}", rev.1);
+        let sha = rev.1.trim().to_string();
+        std::fs::write(clone.join(".git/refs/heads/.invalid"), &sha).unwrap();
+        // 本地分支用 git 删（refs 可能被 pack 进 packed-refs，直接删文件会删不干净）
+        assert!(git(&clone, &["update-ref", "-d", "refs/heads/main"]));
+        std::fs::write(clone.join(".git/HEAD"), "ref: refs/heads/.invalid\n").unwrap();
+        // 这就是用户看到的那条报错
+        let before = git_run(&clone, &["pull", "--ff-only"]);
+        assert!(
+            matches!(&before, Some((false, out)) if out.contains("cannot lock ref")),
+            "应当先复现出 lock 报错，实际 {before:?}"
+        );
+
+        let msg = fix_broken_head(&clone).unwrap().expect("应修好哨兵 HEAD");
+        assert!(msg.contains("refs/heads/main"), "{msg}");
+        assert_eq!(
+            std::fs::read_to_string(clone.join(".git/HEAD")).unwrap().trim(),
+            "ref: refs/heads/main"
+        );
+        assert!(git_ref_ok(&clone, "refs/heads/main"), "本地分支应被补出来");
+        let head_rev = git_run(&clone, &["rev-parse", "refs/heads/main"]).unwrap();
+        assert_eq!(head_rev.1.trim(), sha, "补出来的分支应落在 origin/main 那个提交上");
+        // 修完就能正常 pull 了（本地 remote，第二次是「已经是最新的」）
+        let after = git_run(&clone, &["pull", "--ff-only"]);
+        assert!(
+            matches!(&after, Some((true, _))),
+            "修好后 pull 应当成功，实际 {after:?}"
+        );
+        // 幂等
+        assert_eq!(fix_broken_head(&clone).unwrap(), None);
+
         std::fs::remove_dir_all(&tmp).ok();
     }
 
