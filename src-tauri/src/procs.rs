@@ -110,8 +110,26 @@ pub fn spawn_embedded(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let child = cmd.spawn().map_err(|e| format!("启动 dsh 失败: {e}"))?;
+    let child = cmd.spawn().map_err(|e| {
+        crate::diag::error(
+            "instance",
+            &format!(
+                "内嵌启动失败：dsh {} profile={prof:?}\n  命令: {}\n  错误: {e}",
+                target.version,
+                util::cmd_line(&cmd)
+            ),
+        );
+        format!("启动 dsh 失败: {e}")
+    })?;
     let id = child.id();
+    crate::diag::info(
+        "instance",
+        &format!(
+            "内嵌启动：pid={id} dsh={} profile={prof:?}\n  命令: {}",
+            target.version,
+            util::cmd_line(&cmd)
+        ),
+    );
     let child_cell = Arc::new(Mutex::new(Some(child)));
     let handle = ProcHandle {
         version: target.version.clone(),
@@ -227,8 +245,27 @@ pub fn spawn_detached(
         .map_err(|e| format!("复制日志文件句柄失败: {e}"))?;
     cmd.stdout(log_out).stderr(log_err);
 
-    let mut child = cmd.spawn().map_err(|e| format!("启动 dsh 失败: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        crate::diag::error(
+            "instance",
+            &format!(
+                "独立进程启动失败：dsh {} profile={prof:?}\n  命令: {}\n  错误: {e}",
+                target.version,
+                util::cmd_line(&cmd)
+            ),
+        );
+        format!("启动 dsh 失败: {e}")
+    })?;
     let id = child.id();
+    crate::diag::info(
+        "instance",
+        &format!(
+            "独立进程启动：pid={id} dsh={} profile={prof:?} 日志={}\n  命令: {}",
+            target.version,
+            log_path.display(),
+            util::cmd_line(&cmd)
+        ),
+    );
 
     // 先登记注册表、再放手交给收尸线程：登记失败时（磁盘满 / 权限等）macOS/Windows 没有
     // /proc 兜底，会留下界面既看不见也停不掉的独立进程。宁可立刻终止刚拉起的 dsh 并如实
@@ -242,6 +279,10 @@ pub fn spawn_detached(
     }) {
         let _ = child.kill();
         let _ = child.wait();
+        crate::diag::error(
+            "instance",
+            &format!("登记独立进程失败，已终止刚启动的 dsh：pid={id} profile={prof:?} 错误={e}"),
+        );
         return Err(format!("记录独立进程失败，已终止刚启动的 dsh（PID {id}）：{e}"));
     }
 
@@ -380,6 +421,10 @@ pub fn stop(app: &AppHandle, state: &ProcState, id: u32) -> bool {
         let _ = c.kill();
         let _ = c.wait();
     }
+    crate::diag::info(
+        "instance",
+        &format!("停止内嵌实例：pid={id} dsh={version} profile={profile:?}"),
+    );
     // 进程已死：从快照里摘掉它，界面下一轮不必再看到「运行中」
     forget_pid(id);
     invalidate_process_cache();
@@ -605,7 +650,16 @@ pub fn validate_detached_registry() -> Vec<DetachedRecord> {
     for r in records {
         match check_pid(r.pid) {
             // 确认已死 / PID 已被复用成别的程序 → 清掉
-            PidCheck::NotDsh => changed = true,
+            PidCheck::NotDsh => {
+                crate::diag::info(
+                    "instance",
+                    &format!(
+                        "清理失效的独立进程登记：pid={} profile={:?}（进程已退出或该 PID 已不是 dsh）",
+                        r.pid, r.profile
+                    ),
+                );
+                changed = true;
+            }
             // 确认是 dsh，或本机进程表整轮不可用（保守保留）
             PidCheck::Dsh | PidCheck::Unknown => valid.push(r),
         }
@@ -750,10 +804,19 @@ pub fn start_process_watcher() {
                     read_snapshot().map(|(ok, _)| ok).unwrap_or(false),
                     started.elapsed().as_millis(),
                 );
-                // 首轮与偏慢的枚举才留痕：这类白屏问题的第一现场证据
-                if first || started.elapsed() > Duration::from_secs(3) {
-                    crate::diag::mark(&format!("进程枚举 {ms}ms ok={ok}"));
+                // 首轮与异常轮留痕：白屏/实例状态不更新这类问题的第一现场证据。
+                // 正常轮走 debug，否则每 8 秒一行会把日志刷掉。
+                let slow = started.elapsed() > Duration::from_secs(3);
+                if first {
+                    crate::diag::info("app", &format!("首轮进程枚举 {ms}ms ok={ok}"));
                     first = false;
+                } else if !ok || slow {
+                    crate::diag::warn(
+                        "app",
+                        &format!("进程枚举异常：{ms}ms ok={ok}（超时或 PowerShell/ps 不可用）"),
+                    );
+                } else {
+                    crate::diag::debug("app", || format!("进程枚举 {ms}ms ok={ok}"));
                 }
                 match rx.recv_timeout(snapshot_ttl()) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -1189,6 +1252,9 @@ pub(crate) fn port_owner(host: &str, port: u16, profile: &str) -> Option<PortOwn
     if !crate::netports::is_listening(host, port) {
         return None;
     }
+    crate::diag::debug("instance", || {
+        format!("端口 {host}:{port} 有人在监听，判定归属（profile={profile:?}）")
+    });
     let Some(pid) = crate::netports::listener_pid(port) else {
         return Some(PortOwner::Unknown);
     };
@@ -1297,8 +1363,16 @@ fn read_tail(path: &str, max_bytes: usize) -> Result<(String, bool), String> {
 pub fn stop_external_pid(pid: u32) -> Result<bool, String> {
     let in_registry = validate_detached_registry().iter().any(|r| r.pid == pid);
     if !in_registry && !pid_is_dsh(pid) {
+        crate::diag::warn(
+            "instance",
+            &format!("拒绝停止 pid={pid}：既不在独立进程登记表，也没被确认是 dsh 进程"),
+        );
         return Ok(false);
     }
+    crate::diag::info(
+        "instance",
+        &format!("停止外部实例：pid={pid}（登记表命中={in_registry}）"),
+    );
     force_kill_pid(pid)?;
     forget_pid(pid);
     if in_registry {
@@ -1332,6 +1406,10 @@ pub fn stop_profile(app: &AppHandle, state: &ProcState, profile: &str) -> Result
         .find(|r| r.profile == profile)
         .map(|r| r.pid);
     if let Some(pid) = registry_hit {
+        crate::diag::info(
+            "instance",
+            &format!("按 profile 停止：profile={profile:?} 命中独立进程登记 pid={pid}"),
+        );
         force_kill_pid(pid)?;
         forget_pid(pid);
         remove_detached_record(pid);
@@ -1341,6 +1419,10 @@ pub fn stop_profile(app: &AppHandle, state: &ProcState, profile: &str) -> Result
     // 3) 外部进程（跨平台强杀：unix SIGKILL / Windows taskkill）
     for (pid, prof) in external_running_profile_pids(&[]) {
         if prof == profile {
+            crate::diag::info(
+                "instance",
+                &format!("按 profile 停止：profile={profile:?} 命中外部 dsh 进程 pid={pid}"),
+            );
             force_kill_pid(pid)?;
             forget_pid(pid);
             invalidate_process_cache();

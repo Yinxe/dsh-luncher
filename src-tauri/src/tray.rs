@@ -152,9 +152,12 @@ pub fn refresh(app: &AppHandle) {
         if last.as_deref() == Some(sig.as_str()) {
             return;
         }
-        *last = Some(sig);
+        *last = Some(sig.clone());
     }
-    let _ = tray.set_menu(Some(menu));
+    crate::diag::debug("app", || format!("托盘菜单更新：{sig}"));
+    if let Err(e) = tray.set_menu(Some(menu)) {
+        crate::diag::warn("app", &format!("设置托盘菜单失败：{e}"));
+    }
 }
 
 /// 把菜单刷新挪到独立线程再执行。

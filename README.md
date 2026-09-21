@@ -64,6 +64,37 @@
 关键点只有三个：**私钥在 CI**（签名）、**公钥在安装包里的 `tauri.conf.json`**（验签）、**`latest.json` 必须能通过 HTTPS 匿名访问**。
 
 
+## 日志与排查
+
+所有日志按**子系统分类**落在 `~/.dsh-launcher/logs/`，一行一条，格式统一：
+
+```
+2026-09-21T01:23:45.678Z run=1789953825 pid=1234 +210ms ERROR install 启动 npm 失败：C:\Program Files\nodejs\npm
+```
+
+- `run=` 是本次启动的标识（秒级时间戳）：同一个文件里混着多次启动，先按它分组再看；
+- `+Nms` 是距进程启动的毫秒数：排查卡顿/白屏时看阶段间隔比看绝对时间有用；
+- 级别可 grep：`grep ERROR install.log`。默认记 INFO 及以上；需要逐次细节（实例状态轮询、
+  端口归属判定、每条外部命令）时设环境变量 `DSH_LAUNCHER_LOG=debug` 再启动。
+
+| 文件 | 内容 |
+| --- | --- |
+| `app.log` | 生命周期：启动横幅与各阶段耗时、托盘、设置读写、环境探测、自更新 |
+| `instance.log` | dsh 实例：内嵌/独立/外部实例的启动命令、PID、发现、归属判定、停止与清理 |
+| `install.log` | dsh 版本：安装（npm 完整命令、PATH、退出码、stderr）、卸载、切换版本 |
+| `runtime.log` | 内置 Node：下载字节数、每次解压尝试的命令与 stderr、runtime 目录快照 |
+| `plugin.log` | 插件：任务执行的命令、失败步骤的退出码与输出尾部 |
+| `profile.log` | profile：重命名、删除（进回收站）、恢复等变更 |
+| `network.log` | 网络：registry 拉取、渠道探测、GitHub 加速测速的结果与失败原因 |
+| `ui.log` | 前端报错：`window.onerror`、未处理的 Promise、报错 toast |
+| `panic.log` | 崩溃：位置、线程、回溯（release 版是 Windows GUI 程序，这是唯一线索） |
+
+单个文件超过 1MB 自动滚动一份 `.1`（只留一代，不会无限增长）。
+
+**报 bug 时**用设置里的「生成诊断包」：它把环境摘要、设置（**凭据已脱敏**）、全部日志
+尾部合并成一个 `diagnostics-<run>.txt`，发这一个文件即可，不必逐个回答「node 装哪了」
+「npm 是哪个」。日志目录里也保留了内置终端导出的插件任务日志。
+
 ## 数据目录
 
 ```
@@ -72,10 +103,7 @@
 ├── github-accel.json  # GitHub 加速：测速选出的代理前缀（缓存 6 小时）
 ├── runtime/           # 内置 Node 运行时（一键预装）
 │   └── node-v22.14.0/
-├── logs/              # 插件任务日志导出（内置终端「导出」按钮，设置里可一键打开）
-│                      # + startup.log（启动各阶段耗时）/ panic.log（崩溃位置与消息）
-│                      # + install.log / runtime.log / env.log（安装、解压、环境探测的
-│                      #   完整命令、退出码与报错原文，排查「安装失败」看这里）
+├── logs/              # 分类日志（设置 → 日志目录可一键打开，见下表）
 ├── git-plugins/       # clone+link 安装的本地仓库（git pull 更新）
 │   └── owner-repo/
 └── versions/

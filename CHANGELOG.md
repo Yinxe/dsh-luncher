@@ -16,11 +16,14 @@ DSH Launcher 每个版本的用户可见变化。格式参考 [Keep a Changelog]
 - **内嵌启动 dsh 时不再闪一下黑框**：同样原因，选择「在启动器内启动」时被拉起的 node 进程此前也会短暂弹出控制台窗口。
 - **Windows 上不再出现「npm 未装」/「安装 dsh 失败（os error 193）」**：官方 Node.js for Windows 会在同一个目录里同时放 `npm`（给 git-bash 用的 POSIX 脚本）和 `npm.cmd`，此前 PATH 查找先命中那个无扩展名的脚本，直接执行就报「不是有效的 Win32 应用程序」；现在优先用 `node …/node_modules/npm/bin/npm-cli.js` 执行 npm，PATH 查找也会跳过无法直接执行的无扩展名文件（`npx` / `dsh` 等同样受影响）。
 - **Windows 上安装内置 Node 更可靠**：解压改为先试系统自带 tar（能解 zip，对长路径更宽容），失败再退回 PowerShell 展开；下载后会校验字节数与文件头（镜像站异常时返回的「200 + HTML 错误页」不再被当成压缩包）；解压只解出半成品目录时不再被旧目录挡住。
-- **安装失败不再是看不懂的一句话**：安装 dsh、下载内置 Node 时会把**实际执行的命令、PATH、退出码、报错原文**写进 `~/.dsh-launcher/logs/`（`install.log` / `runtime.log` / `env.log`），报错里也会给出日志位置；os error 193 这类错误会直接提示可能的原因。
+- **安装失败不再是看不懂的一句话**：安装 dsh、下载内置 Node 时会把**实际执行的命令、PATH、退出码、报错原文**写进 `~/.dsh-launcher/logs/`（`install.log` / `runtime.log` / `app.log`），报错里也会给出日志位置；os error 193 这类错误会直接提示可能的原因。
 
 ### 新增
 
-- **设置里新增「打开日志目录」**：一键打开 `~/.dsh-launcher/logs/`，里面是启动各阶段耗时（`startup.log`）、崩溃（`panic.log`）、安装与解压的完整命令和报错；遇到问题把这个目录里的文件发出来即可定位。
+- **分类日志系统**：日志按子系统分文件落在 `~/.dsh-launcher/logs/` —— `app`（启动阶段/托盘/设置/环境探测/自更新）、`instance`（实例启停、发现、端口归属）、`install`（npm 命令与 PATH、退出码、stderr）、`runtime`（内置 Node 下载与解压）、`plugin`（插件任务命令与失败输出）、`profile`、`network`（registry / 渠道探测 / GitHub 加速测速）、`ui`（前端报错）、`panic`（崩溃含回溯）。每行统一为「UTC 时间 + `run=` 本次启动 + `+Nms` + 级别」，`grep ERROR install.log` 就能筛问题；默认记 INFO，需要逐次细节（实例轮询、端口归属、每条外部命令）时用环境变量 `DSH_LAUNCHER_LOG=debug` 启动。单文件超 1MB 自动滚动。
+- **设置里新增「生成诊断包」**：把环境摘要（node / npm / 内置 Node 的实际路径、已装版本、profile 列表）、设置（**凭据已脱敏**）和全部分类日志合并成一个 `diagnostics-<run>.txt`；报 bug 时发这一个文件即可，不用再逐个回答环境问题。
+- **设置里新增「打开日志目录」**：一键定位到 `~/.dsh-launcher/logs/`。
+- **前端报错回流**：`window.onerror`、未处理的 Promise、以及展示给用户的报错 toast 都会写进 `ui.log` —— 以前这类问题只停在屏幕上，事后完全无法复盘。
 
 ## [0.1.4] - 2026-09-21
 

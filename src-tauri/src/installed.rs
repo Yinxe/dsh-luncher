@@ -78,8 +78,27 @@ pub fn scan_global_sync(settings: &Settings) -> Option<InstalledVersion> {
     let npm = util::find_npm(settings)?;
     let mut cmd = util::spawn_command(&npm.program, &npm.args);
     cmd.arg("root").arg("-g");
-    let out = cmd.output().ok()?;
+    let out = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            crate::diag::warn(
+                "install",
+                &format!(
+                    "npm root -g 执行失败：{}（{e}）",
+                    util::cmd_line(&cmd)
+                ),
+            );
+            return None;
+        }
+    };
     if !out.status.success() {
+        crate::diag::debug("install", || {
+            format!(
+                "npm root -g 退出码 {:?}：{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+        });
         return None;
     }
     let root = String::from_utf8_lossy(&out.stdout).trim().to_string();

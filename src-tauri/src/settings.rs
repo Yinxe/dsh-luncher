@@ -53,6 +53,45 @@ fn default_true() -> bool {
     true
 }
 
+impl Settings {
+    /// 诊断用的设置摘要：**绝不包含凭据**。
+    /// registry / 更新清单里的 userinfo 会被抹掉，GitHub Token 只报「是否设置」。
+    /// 这份内容会进入诊断包（用户主动导出并发给别人），所以新增字段时要想想能不能公开。
+    pub fn redacted_summary(&self) -> Vec<(String, String)> {
+        let b = |v: bool| if v { "开" } else { "关" }.to_string();
+        vec![
+            ("registry".into(), crate::registry::scrub_url(&self.registry)),
+            (
+                "update_manifest_url".into(),
+                crate::registry::scrub_url(&self.update_manifest_url),
+            ),
+            ("active_version".into(), self.active_version.clone()),
+            ("default_profile".into(), self.default_profile.clone()),
+            ("default_args".into(), self.default_args.clone()),
+            ("node_source".into(), self.node_source.clone()),
+            ("node_path".into(), self.node_path.clone()),
+            ("node_mirror".into(), self.node_mirror.clone()),
+            ("launch_mode".into(), self.launch_mode.clone()),
+            ("terminal".into(), self.terminal.clone()),
+            ("close_to_tray".into(), b(self.close_to_tray)),
+            ("auto_check_update".into(), b(self.auto_check_update)),
+            ("auto_install_update".into(), b(self.auto_install_update)),
+            ("auto_check_versions".into(), b(self.auto_check_versions)),
+            ("github_accel".into(), b(self.github_accel)),
+            ("github_proxy".into(), self.github_proxy.clone()),
+            ("github_proxy_extra".into(), self.github_proxy_extra.clone()),
+            (
+                "github_token".into(),
+                if self.github_token.trim().is_empty() {
+                    "（未设置）".into()
+                } else {
+                    format!("（已设置，长度 {}）", self.github_token.trim().len())
+                },
+            ),
+        ]
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {

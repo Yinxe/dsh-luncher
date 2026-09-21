@@ -30,6 +30,20 @@ pub fn run() {
     diag::mark("启动器启动");
 
     let settings = settings::load_settings();
+    // 启动横幅：排查任何问题都先看这一行（版本、平台、日志位置、级别、数据目录）
+    diag::info(
+        "app",
+        &format!(
+            "DSH Launcher v{} 启动：os={} arch={} run={} 日志目录={} 级别={} 数据目录={}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            diag::run_id(),
+            diag::logs_dir().display(),
+            diag::level_label(),
+            settings::launcher_home().display()
+        ),
+    );
 
     let app = tauri::Builder::default()
         // 单实例守卫：必须是第一个注册的插件，才能在其它插件 setup / 窗口创建之前
@@ -38,6 +52,7 @@ pub fn run() {
         // 因此不会出现第二个主窗口 / 第二个托盘图标 / 两份后台轮询线程。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // 已运行实例收到回调：把主窗口唤回前台（可能因「关闭到托盘」而隐藏着）
+            diag::info("app", "检测到重复启动，把主窗口唤回前台（本次不会再起一个实例）");
             #[cfg(target_os = "macos")]
             let _ = app.show();
             crate::tray::show_main_window(app);
@@ -94,6 +109,8 @@ pub fn run() {
             commands::probe_local_plugins,
             commands::delete_cloned_plugin,
             commands::reveal_git_plugins_dir,
+            commands::export_diagnostics,
+            commands::log_ui,
             commands::read_profile_file,
             commands::write_profile_file,
             commands::get_web_quick_config,
@@ -123,9 +140,15 @@ pub fn run() {
             // 窗口就会「能出现但一直白屏 / 未响应」—— GitHub issue #1 的根因。
             procs::start_process_watcher();
             diag::mark("setup: 进程表守护线程已启动");
-            tray::create(app.handle())?;
+            tray::create(app.handle()).map_err(|e| {
+                // 托盘建不出来不该是个哑巴崩溃：日志里留下原因（Linux 上常见的是
+                // 没有 StatusNotifier 宿主、XDG_RUNTIME_DIR 不可写）
+                diag::error("app", &format!("创建托盘失败：{e}"));
+                e
+            })?;
             diag::mark("setup: 托盘就绪");
             commands::emit_startup_checks(app.handle());
+            diag::mark("setup: 启动阶段结束");
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -141,6 +164,7 @@ pub fn run() {
                     // 关闭按钮 → 隐藏到托盘，后台常驻
                     api.prevent_close();
                     let _ = window.hide();
+                    diag::debug("app", || "关闭按钮 → 隐藏到托盘，进程继续常驻".into());
                 }
             }
         })
@@ -150,6 +174,7 @@ pub fn run() {
     app.run(|app, event| {
         // 启动器退出 → 结束所有内嵌 dsh 子进程
         if let tauri::RunEvent::Exit = event {
+            diag::info("app", "启动器退出，结束所有内嵌实例");
             let state = app.state::<procs::ProcState>();
             procs::stop_all(&app, &state);
         }

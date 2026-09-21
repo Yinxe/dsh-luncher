@@ -42,6 +42,10 @@ import type {
 } from "./types";
 
 export const api = {
+  exportDiagnostics: () => invoke<string>("export_diagnostics"),
+  logUi: (level: "info" | "warn" | "error", message: string) =>
+    invoke<void>("log_ui", { level, message }),
+
   getEnvironment: () => invoke<EnvironmentInfo>("get_environment"),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) =>

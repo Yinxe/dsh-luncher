@@ -584,6 +584,15 @@ pub fn start_job<R: Runtime>(
                             }
                             exit_code = Some(code);
                             if code != 0 {
+                                // 失败步骤的完整命令 + 输出尾巴：插件任务是「装不上/构建失败」
+                                // 报得最多的地方，光有界面上的建议不够定位
+                                crate::diag::warn(
+                                    "plugin",
+                                    &format!(
+                                        "任务 {id} 步骤失败：`{program}` 退出码 {code}\n  参数: {args:?}\n  输出尾部:\n{}",
+                                        out.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+                                    ),
+                                );
                                 if let Some(hint) = failure_hint(program, &out, None) {
                                     remember_hint(&handle, &hint);
                                     for l in hint.lines() {
@@ -1063,9 +1072,17 @@ fn run_streamed<R: Runtime>(
         cmd.process_group(0);
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("启动 `{program}` 失败: {e}（请确认命令在 PATH 中）"))?;
+    let line = util::cmd_line(&cmd);
+    crate::diag::debug("plugin", || {
+        format!("任务 {id} 执行：{line}\n  工作目录: {cwd:?}")
+    });
+    let mut child = cmd.spawn().map_err(|e| {
+        crate::diag::error(
+            "plugin",
+            &format!("任务 {id} 无法启动 `{program}`：{e}\n  命令: {line}"),
+        );
+        format!("启动 `{program}` 失败: {e}（请确认命令在 PATH 中）")
+    })?;
     // 合并输出的尾部：失败时用来识别真实原因（供应链策略 / 构建脚本 / 鉴权 / 404…）
     let tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let mut readers = Vec::new();

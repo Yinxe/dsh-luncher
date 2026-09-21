@@ -15,6 +15,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { toast } from "sonner";
 import { api } from "../api";
 import type { ChannelProbe, EnvironmentInfo, GhAccel, GitHubRateLimit, Settings } from "../types";
 
@@ -438,8 +439,30 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
                 </Button>
               </div>
               <FieldDescription>
-                启动耗时（startup.log）、崩溃（panic.log）、安装与解压的完整命令与报错（install.log /
-                runtime.log）；遇到问题把这里的文件发来即可定位
+                按子系统分类：app / instance / install / runtime / plugin / profile / network / ui /
+                panic；遇到问题把这里的文件发来即可定位
+              </FieldDescription>
+              <div className="pt-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={async () => {
+                    try {
+                      const path = await api.exportDiagnostics();
+                      toast.success("诊断包已生成", {
+                        description: `${path.split(/[\\/]/).pop()} —— 已帮你打开日志目录`,
+                      });
+                      onReveal(env?.logsDir ?? path);
+                    } catch (e) {
+                      toast.error(`生成诊断包失败: ${e}`);
+                    }
+                  }}
+                >
+                  <Activity /> 生成诊断包
+                </Button>
+              </div>
+              <FieldDescription>
+                一键汇总环境、设置（**凭据已脱敏**）与全部日志，报 bug 时发这一个 txt 就够
               </FieldDescription>
             </Field>
           </Section>

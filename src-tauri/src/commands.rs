@@ -53,7 +53,7 @@ pub async fn get_environment(state: State<'_, AppState>) -> Result<EnvironmentIn
                 if v.is_none() {
                     // 界面上只会显示「npm 未装」，真实原因得看日志
                     crate::diag::op(
-                        "env",
+                        "app",
                         &format!(
                             "npm --version 执行失败：{} {}\n  PATH: {}",
                             inv.program.display(),
@@ -66,7 +66,7 @@ pub async fn get_environment(state: State<'_, AppState>) -> Result<EnvironmentIn
             }
             None => {
                 crate::diag::op(
-                    "env",
+                    "app",
                     &format!(
                         "未找到 npm；node={} PATH={}",
                         node.as_ref()
@@ -115,6 +115,15 @@ pub async fn save_settings(
     // 这个守卫要枚举系统进程（Windows 上要起 PowerShell，1s 级），必须离开主线程 ——
     // 同步命令跑在主线程上，会把界面冻住（与 GitHub issue #1 同一类问题）。
     let current = state.settings.lock().unwrap().clone();
+    if current.active_version != settings.active_version {
+        crate::diag::info(
+            "install",
+            &format!(
+                "切换当前版本：{:?} → {:?}",
+                current.active_version, settings.active_version
+            ),
+        );
+    }
     if !current.active_version.is_empty() && current.active_version != settings.active_version {
         let proc_state = procs.inner().clone();
         tauri::async_runtime::spawn_blocking(move || ensure_no_running_instance(&proc_state))
@@ -162,7 +171,28 @@ fn ensure_no_running_instance(procs: &crate::procs::ProcState) -> Result<(), Str
 #[tauri::command]
 pub async fn list_remote_versions(state: State<'_, AppState>) -> Result<RegistryInfo, String> {
     let registry_base = state.settings.lock().unwrap().registry.clone();
-    registry::fetch_registry(&registry_base).await
+    let started = std::time::Instant::now();
+    let out = registry::fetch_registry(&registry_base).await;
+    match &out {
+        Ok(info) => crate::diag::info(
+            "network",
+            &format!(
+                "拉取版本列表成功：{} 个版本，耗时 {}ms，registry={}",
+                info.versions.len(),
+                started.elapsed().as_millis(),
+                crate::registry::scrub_url(&registry_base)
+            ),
+        ),
+        Err(e) => crate::diag::error(
+            "network",
+            &format!(
+                "拉取版本列表失败：registry={} 耗时 {}ms\n  错误: {e}",
+                crate::registry::scrub_url(&registry_base),
+                started.elapsed().as_millis()
+            ),
+        ),
+    }
+    out
 }
 
 #[tauri::command]
@@ -264,7 +294,12 @@ pub async fn uninstall_version(
                 "{version} 是当前使用版本，请先在侧栏切换到其他版本后再卸载"
             ));
         }
-        crate::installer::uninstall_managed(&version)
+        let out = crate::installer::uninstall_managed(&version);
+        match &out {
+            Ok(()) => crate::diag::info("install", &format!("卸载 dsh {version} 完成")),
+            Err(e) => crate::diag::error("install", &format!("卸载 dsh {version} 失败：{e}")),
+        }
+        out
     })
     .await
     .map_err(|e| format!("卸载失败: {e}"))?
@@ -584,6 +619,7 @@ pub async fn rename_profile(
     })
     .await
     .map_err(|e| format!("改名失败: {e}"))??;
+    crate::diag::info("profile", &format!("重命名 profile：{old:?} → {new:?}"));
     let mut s = state.settings.lock().unwrap();
     if s.default_profile == old {
         s.default_profile = new.clone();
@@ -612,6 +648,10 @@ pub async fn delete_profile(
     })
     .await
     .map_err(|e| format!("删除失败: {e}"))??;
+    crate::diag::info(
+        "profile",
+        &format!("删除 profile：{name:?} → 回收站 {trash}（可还原）"),
+    );
     let mut s = state.settings.lock().unwrap();
     if s.default_profile == name {
         s.default_profile = String::new();
@@ -1232,6 +1272,37 @@ pub fn reveal_git_plugins_dir() -> Result<String, String> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
+/// 生成诊断包：环境摘要 + 设置（脱敏）+ 各分类日志尾部，写成一个 txt 并返回路径。
+/// 用户报问题时发这一个文件即可，不用逐个追问环境细节。
+#[tauri::command]
+pub async fn export_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let body = crate::diag::diagnostics(env!("CARGO_PKG_VERSION"), &settings);
+        let dir = crate::diag::logs_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建日志目录失败: {e}"))?;
+        let name = format!("diagnostics-{}.txt", crate::diag::run_id());
+        let path = dir.join(name);
+        std::fs::write(&path, body).map_err(|e| format!("写诊断包失败: {e}"))?;
+        crate::diag::info("app", &format!("已生成诊断包：{}", path.display()));
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("生成诊断包失败: {e}"))?
+}
+
+/// 前端报错回流到 logs/ui.log：UI 上的异常（渲染报错、未处理的 Promise、
+/// 报错 toast）此前只停在用户屏幕上，事后完全无法复盘。
+#[tauri::command]
+pub fn log_ui(level: String, message: String) {
+    let lv = match level.as_str() {
+        "warn" => crate::diag::Level::Warn,
+        "error" => crate::diag::Level::Error,
+        _ => crate::diag::Level::Info,
+    };
+    crate::diag::log("ui", lv, &message);
+}
+
 #[tauri::command]
 pub fn read_profile_file(profile: String, file: String) -> Result<String, String> {
     crate::profile_cfg::read_profile_file(&profile, &file)
@@ -1289,7 +1360,30 @@ pub async fn search_registry_packages(
 pub async fn check_channels(state: State<'_, AppState>) -> Result<Vec<crate::registry::ChannelProbe>, String> {
     let token = state.settings.lock().unwrap().github_token.clone();
     let token = crate::registry::github_token(Some(&token));
-    Ok(crate::registry::check_channels(token.as_deref()).await)
+    let probes = crate::registry::check_channels(token.as_deref()).await;
+    crate::diag::info(
+        "network",
+        &format!(
+            "渠道探测：{}",
+            probes
+                .iter()
+                .map(|p| {
+                    let mut d = format!("{}={}", p.name, if p.ok { "可用" } else { "不可用" });
+                    if p.ms > 0 {
+                        d.push_str(&format!("({}ms)", p.ms));
+                    }
+                    if let Some(detail) = &p.detail {
+                        if !p.ok {
+                            d.push_str(&format!("：{detail}"));
+                        }
+                    }
+                    d
+                })
+                .collect::<Vec<_>>()
+                .join("、")
+        ),
+    );
+    Ok(probes)
 }
 
 /// 当前 GitHub API 额度（探测/更新检测已走免额度通道，这里只用于展示元数据额度）
@@ -1360,7 +1454,28 @@ pub async fn check_launcher_update(
     state: State<'_, AppState>,
 ) -> Result<LauncherUpdateStatus, String> {
     let settings = state.settings.lock().unwrap().clone();
-    Ok(update_check::check(&app, &settings).await)
+    let status = update_check::check(&app, &settings).await;
+    if status.mode == "error" {
+        crate::diag::warn(
+            "app",
+            &format!(
+                "启动器更新检查失败：{}",
+                status.message.clone().unwrap_or_default()
+            ),
+        );
+    } else {
+        crate::diag::info(
+            "app",
+            &format!(
+                "启动器更新检查：当前 {} 最新 {} 可用={} mode={}",
+                status.current,
+                status.latest.clone().unwrap_or_else(|| "（未知）".into()),
+                status.available,
+                status.mode
+            ),
+        );
+    }
+    Ok(status)
 }
 
 /// 下载并安装启动器新版本（内置 updater 模式）。
@@ -1406,12 +1521,23 @@ pub fn emit_startup_checks(app: &AppHandle) {
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
         let status = update_check::check(&app2, &settings).await;
+        crate::diag::info(
+            "app",
+            &format!(
+                "启动时自动检查更新：当前 {} 最新 {} 可用={} mode={}",
+                status.current,
+                status.latest.clone().unwrap_or_else(|| "（未知）".into()),
+                status.available,
+                status.mode
+            ),
+        );
         if !status.available {
             return;
         }
         if settings.auto_install_update && status.mode == "builtin" && !status.needs_elevation {
             let _ = app2.emit("launcher-update", status);
             if let Err(e) = update_check::install_builtin(&app2, &settings).await {
+                crate::diag::error("app", &format!("自动更新安装失败：{e}"));
                 let _ = app2.emit("toast", format!("自动更新失败：{e}"));
             }
             return;

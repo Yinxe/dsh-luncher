@@ -123,7 +123,7 @@ fn resolve_windows_program(program: &Path) -> PathBuf {
         let cand = program.with_extension(ext);
         if cand.is_file() {
             crate::diag::op(
-                "spawn",
+                "app",
                 &format!(
                     "{} 不是可执行文件（多半是 git-bash 用的脚本），改用它旁边的 {}",
                     program.display(),

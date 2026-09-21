@@ -140,8 +140,12 @@ export default function App() {
 
   const addToast = useCallback((kind: "ok" | "err" | "info", text: string) => {
     if (kind === "ok") toast.success(text);
-    else if (kind === "err") toast.error(text, { duration: 7000 });
-    else toast.info(text);
+    else if (kind === "err") {
+      toast.error(text, { duration: 7000 });
+      // 展示给用户的报错同时落到 logs/ui.log：用户截图往往只有一句话，
+      // 日志里有完整上下文，排查时不用反过来追问
+      api.logUi("error", text).catch(() => undefined);
+    } else toast.info(text);
   }, []);
 
   const refreshInstalled = useCallback(async () => {

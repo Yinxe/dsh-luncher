@@ -345,6 +345,11 @@ pub async fn refresh(extra: &str, force: bool) -> Result<GhAccel, String> {
     if list.is_empty() {
         return Err("没有可用的候选代理前缀".into());
     }
+    let candidates_count = list.len();
+    crate::diag::info(
+        "network",
+        &format!("GitHub 加速测速开始：{candidates_count} 个候选前缀（各测下载 + git）"),
+    );
     let client = client()?;
     let mut tasks = Vec::new();
     for (i, p) in list.into_iter().enumerate() {
@@ -367,10 +372,31 @@ pub async fn refresh(extra: &str, force: bool) -> Result<GhAccel, String> {
         }
     }
     if nodes.is_empty() {
+        crate::diag::warn(
+            "network",
+            &format!("GitHub 加速测速：{} 个候选前缀全部失败（网络不通或前缀已失效）", candidates_count),
+        );
         return Err("所有候选代理都取不到内容（网络不通或前缀已失效）".into());
     }
     // 文件下载快的排前面（自动模式即取第一）；git 另用 best_for 挑第一个支持 git 的
     nodes.sort_by(|a, b| a.ms.cmp(&b.ms).then(a.prefix.cmp(&b.prefix)));
+    crate::diag::info(
+        "network",
+        &format!(
+            "GitHub 加速测速结果：{}",
+            nodes
+                .iter()
+                .take(6)
+                .map(|n| format!(
+                    "{}（下载 {}ms{}）",
+                    n.prefix,
+                    n.ms,
+                    n.git_ms.map(|g| format!("，git {g}ms")).unwrap_or_else(|| "，git 不可用".into())
+                ))
+                .collect::<Vec<_>>()
+                .join("、")
+        ),
+    );
     let accel = GhAccel {
         updated_at: now_unix(),
         nodes,
