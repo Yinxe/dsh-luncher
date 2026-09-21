@@ -180,3 +180,128 @@ jobs:
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RID" \
             -F draft=false -F prerelease=false \
             --jq '"已发布 \(.tag_name)  draft=\(.draft)  prerelease=\(.prerelease)"'
+
+  # ★5 把发布产物同步到自建更新源（Cloudflare R2）
+  #
+  # 为什么：客户端默认从 R2 下载更新（代码里写死的基址，见 update_check::R2_BASE）。
+  # 实测同一条网络下 81MB 的 AppImage，R2 约 3.3MB/s、GitHub 约 1.7MB/s（快 1.9 倍），
+  # 没有代理的机器差距更大。
+  #
+  # 未配置 R2 secrets 时整个作业自动跳过（打一条 notice），不影响发版。
+  # 需要的 secrets（仓库 Settings → Secrets and variables → Actions）：
+  #   R2_ACCOUNT_ID        Cloudflare 账号 ID
+  #   R2_ACCESS_KEY_ID     R2 API Token 的 Access Key ID
+  #   R2_SECRET_ACCESS_KEY R2 API Token 的 Secret Access Key
+  publish-r2:
+    needs: publish
+    runs-on: ubuntu-22.04
+    if: github.repository_owner == 'Yinxe'
+    env:
+      R2_BUCKET: dsh-luncher-release
+      R2_PUBLIC_BASE: https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 是否配置了 R2
+        id: cfg
+        env:
+          R2_KEY: ${{ secrets.R2_ACCESS_KEY_ID }}
+        run: |
+          if [ -n "$R2_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::没有配置 R2_ACCESS_KEY_ID，跳过自建源同步（客户端会走 GitHub 源）"
+          fi
+
+      - name: 下载本次发布的产物
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          mkdir -p r2-upload
+          gh release download "$TAG" --dir r2-upload --clobber
+          ls -la r2-upload | head -20
+
+      - name: 生成自建源清单（并把下载地址改写到 R2）
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$TAG" --json assets > r2-upload/assets.json
+          node scripts/r2-manifest.mjs \
+            --in r2-upload/latest.json \
+            --assets-map r2-upload/assets.json \
+            --check-dir r2-upload \
+            --base "$R2_PUBLIC_BASE" \
+            --list-files r2-upload/files.txt \
+            --out r2-upload/latest.json
+
+      - name: 上传到 R2（安装包长缓存、清单不缓存）
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          while read -r f; do
+            [ -z "$f" ] && continue
+            echo "→ $f"
+            aws s3 cp "r2-upload/$f" "s3://$R2_BUCKET/$f" \
+              --endpoint-url "$R2_ENDPOINT" \
+              --content-type application/octet-stream \
+              --cache-control "public, max-age=31536000, immutable" \
+              --no-progress
+          done < r2-upload/files.txt
+          # latest.json 必须不缓存：否则客户端会长期看到旧清单（更新提示不出现）
+          aws s3 cp r2-upload/latest.json "s3://$R2_BUCKET/latest.json" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type application/json \
+            --cache-control "no-cache, max-age=0" \
+            --no-progress
+
+      - name: 清理旧版本产物（保留当前版本 + 宽限期）
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          # 宽限期：刚发布这几天旧版本先留着，避免「客户端已拿到旧清单、文件却被删」→ 404
+          KEEP_DAYS: '7'
+        run: |
+          # 当前清单引用的文件 + latest.json 永远不删
+          tr -d '\r' < r2-upload/files.txt | sed '/^$/d' | sort -u > /tmp/keep.txt
+          echo latest.json >> /tmp/keep.txt
+          now=$(date +%s)
+          aws s3 ls "s3://$R2_BUCKET/" --endpoint-url "$R2_ENDPOINT" | while read -r d t size key; do
+            [ -z "$key" ] && continue
+            if grep -qxF "$key" /tmp/keep.txt; then
+              continue
+            fi
+            ts=$(date -d "$d $t" +%s)
+            age_days=$(( (now - ts) / 86400 ))
+            if [ "$age_days" -ge "$KEEP_DAYS" ]; then
+              echo "🧹 清理旧产物 $key（${age_days} 天前，$(numfmt --to=iec "$size" 2>/dev/null || echo "$size B")）"
+              aws s3 rm "s3://$R2_BUCKET/$key" --endpoint-url "$R2_ENDPOINT" --no-progress
+            else
+              echo "⏳ 保留 $key（${age_days} 天，未超 ${KEEP_DAYS} 天宽限期）"
+            fi
+          done
+          echo "--- 清理后的桶内容 ---"
+          aws s3 ls "s3://$R2_BUCKET/" --endpoint-url "$R2_ENDPOINT"
+
+      - name: 自检（公网地址能取到清单，且地址确实指向 R2）
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          curl -fsS --max-time 30 "$R2_PUBLIC_BASE/latest.json" -o /tmp/r2-latest.json
+          node -e '
+            const m = JSON.parse(require("fs").readFileSync("/tmp/r2-latest.json", "utf8"));
+            const base = process.env.R2_PUBLIC_BASE;
+            for (const [k, v] of Object.entries(m.platforms ?? {})) {
+              if (!v.url.startsWith(base + "/")) { console.error(`✖ ${k} 的地址没指向自建源: ${v.url}`); process.exit(1); }
+            }
+            console.log(`✔ 自建源清单 version=${m.version}，${Object.keys(m.platforms ?? {}).length} 个平台键全部指向 ${base}`);
+          '

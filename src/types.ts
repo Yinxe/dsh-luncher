@@ -61,6 +61,8 @@ export interface EnvironmentInfo {
 export interface Settings {
   registry: string;
   updateManifestUrl: string;
+  /** 更新下载源：r2 = 自建 Cloudflare R2（默认，快）| github = 官方源 */
+  updateSource: "r2" | "github" | string;
   defaultArgs: string;
   /** 默认启动的 profile（空 = 不带 --profile，走 dsh 默认） */
   defaultProfile: string;

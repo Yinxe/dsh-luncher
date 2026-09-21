@@ -388,6 +388,26 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
                 返回 {`{version, notes, url}`} 的 JSON；留空则改用内置 Tauri updater 检查（后者支持应用内「下载并安装」）
               </FieldDescription>
             </Field>
+            <Field>
+              <FieldLabel>更新下载源</FieldLabel>
+              <Select
+                value={draft.updateSource === "github" ? "github" : "r2"}
+                onValueChange={(v) => set("updateSource", v)}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="r2">Cloudflare R2（推荐 · 国内更快）</SelectItem>
+                  <SelectItem value="github">GitHub 官方源</SelectItem>
+                </SelectContent>
+              </Select>
+              <FieldDescription>
+                默认走自建 R2 源（CDN 加速、无需翻墙）；R2 暂时不可用会自动回落到 GitHub。
+                地址写死在程序里、不提供手填 —— 填错的后果是「更新不了」且无从排查。
+                若 R2 上的清单没跟上最新版本，可临时切到 GitHub 源。
+              </FieldDescription>
+            </Field>
             <SwitchRow
               id="set-auto-versions"
               checked={draft.autoCheckVersions}

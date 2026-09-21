@@ -9,8 +9,14 @@ use std::sync::Mutex;
 pub struct Settings {
     /// npm registry 地址，可换成镜像（如 https://registry.npmmirror.com）
     pub registry: String,
-    /// 启动器自身更新清单地址（返回 {version, notes, url} 的 JSON）
+    /// 启动器自身更新清单地址（返回 {version, notes, url} 的 JSON，只能跳转下载）
     pub update_manifest_url: String,
+    /// 更新下载源，二选一：
+    /// - `r2`（默认）：自建 Cloudflare R2 源，地址写死在代码里（见 update_check::R2_BASE），
+    ///   国内下载快；不可用时自动回落 GitHub；
+    /// - `github`：官方 GitHub 源。
+    /// 刻意不做「自由填写地址」——填错的后果是更新不了，而用户没有任何排查手段。
+    pub update_source: String,
     /// 启动 dsh 时附加的默认参数
     pub default_args: String,
     /// 默认启动的 profile（空 = 不带 --profile，走 dsh 默认）
@@ -53,6 +59,20 @@ fn default_true() -> bool {
     true
 }
 
+/// 默认走自建 R2 源（快）；R2 不可用时更新器会自动落到 GitHub
+fn default_update_source() -> String {
+    "r2".into()
+}
+
+/// 把设置里的更新源收敛到 r2 / github（未知值按 r2 处理）
+pub fn normalize_update_source(v: &str) -> &'static str {
+    if v.trim().eq_ignore_ascii_case("github") {
+        "github"
+    } else {
+        "r2"
+    }
+}
+
 impl Settings {
     /// 诊断用的设置摘要：**绝不包含凭据**。
     /// registry / 更新清单里的 userinfo 会被抹掉，GitHub Token 只报「是否设置」。
@@ -64,6 +84,14 @@ impl Settings {
             (
                 "update_manifest_url".into(),
                 crate::registry::scrub_url(&self.update_manifest_url),
+            ),
+            (
+                "update_source".into(),
+                if normalize_update_source(&self.update_source) == "github" {
+                    "github（官方源）".into()
+                } else {
+                    "r2（自建源）".into()
+                },
             ),
             ("active_version".into(), self.active_version.clone()),
             ("default_profile".into(), self.default_profile.clone()),
@@ -97,6 +125,7 @@ impl Default for Settings {
         Self {
             registry: "https://registry.npmjs.org".into(),
             update_manifest_url: String::new(),
+            update_source: default_update_source(),
             default_args: String::new(),
             default_profile: String::new(),
             active_version: String::new(),

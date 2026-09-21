@@ -64,6 +64,25 @@ pub fn installable() -> bool {
     bundle_kind().is_some()
 }
 
+/// 自建更新源（Cloudflare R2）的**公开基址**。
+///
+/// 刻意写死在代码里（不给用户填）：用户只需在设置里二选一（R2 / GitHub），
+/// 填错地址的后果是「更新不了」，而用户没有任何排查手段。
+///
+/// 目录布局（由发布流程维护，见 docs/RELEASING.md）：
+/// - `<base>/latest.json` —— Tauri 更新器格式清单，里面的安装包地址指向同一个前缀；
+/// - `<base>/<安装包文件名>` —— 各平台安装包原样上传（`.sig` 内容不变，客户端照常验签）。
+///
+/// ⚠️ 维护提醒：R2 上的清单必须随每次发布更新。更新器按顺序取**第一个能解析的清单**，
+/// 清单陈旧会让客户端停在旧版本（此时用户可在设置里切回 GitHub 源）。
+const R2_BASE: &str = "https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev";
+
+/// R2 上 `latest.json` 的完整地址（基址为空 = 还没配置，退化为只用 GitHub）
+fn r2_manifest_url() -> Option<String> {
+    let base = R2_BASE.trim().trim_end_matches('/');
+    (!base.is_empty()).then(|| format!("{base}/latest.json"))
+}
+
 /// 从编译进二进制的 tauri.conf.json 读 updater endpoints。
 /// 插件把 config 放在私有 state 里没暴露读取接口，所以这里直接解析同一份文件
 /// （include_str! 会在文件变化时触发重编译，不会和配置脱节）。
@@ -123,16 +142,44 @@ fn accel_url(url: &str, prefix: &str) -> String {
     ghaccel::rewrite(u, prefix)
 }
 
-/// 按设置构造 updater：清单地址可选地套上加速前缀
+/// 本次实际要用的更新源列表，顺序即优先级：
+/// - `r2`（默认）：R2 清单在最前，GitHub 兜底（R2 挂了照样能更新）；
+/// - `github`：只用 GitHub 源 —— R2 清单陈旧或不可用时的逃生门。
+fn endpoint_candidates(settings: &Settings) -> Vec<String> {
+    let github = configured_endpoints();
+    if crate::settings::normalize_update_source(&settings.update_source) == "github" {
+        return github;
+    }
+    let mut out = Vec::new();
+    if let Some(r2) = r2_manifest_url() {
+        out.push(r2);
+    }
+    for e in github {
+        if !out.contains(&e) {
+            out.push(e);
+        }
+    }
+    out
+}
+
+/// 按设置构造 updater：选 R2 时自建源排最前，GitHub 加速前缀只作用于 github 域名
 fn build_updater(
     app: &AppHandle,
     settings: &Settings,
 ) -> Result<tauri_plugin_updater::Updater, String> {
     let mut builder = app.updater_builder();
-    if let Some(prefix) = accel_prefix(settings) {
-        let urls: Vec<tauri::Url> = configured_endpoints()
+    let prefix = accel_prefix(settings);
+    let candidates = endpoint_candidates(settings);
+    // 选了 GitHub 源又没测到加速前缀时，保持插件自己读到的配置（不做无谓改写）
+    let github_only =
+        crate::settings::normalize_update_source(&settings.update_source) == "github";
+    if !github_only || prefix.is_some() {
+        let urls: Vec<tauri::Url> = candidates
             .iter()
-            .map(|u| accel_url(u, &prefix))
+            .map(|u| match &prefix {
+                Some(p) => accel_url(u, p),
+                None => u.clone(),
+            })
             .filter_map(|u| tauri::Url::parse(&u).ok())
             .collect();
         if !urls.is_empty() {
@@ -140,6 +187,51 @@ fn build_updater(
         }
     }
     builder.build().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 更新源二选一：默认 r2，且 R2 必须排在 GitHub 前面（更新器取第一个可用清单）
+    #[test]
+    fn update_source_priority_and_escape_hatch() {
+        let mut settings = Settings::default();
+        settings.github_accel = false; // 只测顺序，不依赖测速缓存
+        assert_eq!(
+            crate::settings::normalize_update_source(&settings.update_source),
+            "r2",
+            "默认应优先自建 R2 源"
+        );
+        let list = endpoint_candidates(&settings);
+        assert!(
+            list.iter().any(|u| u.contains("github.com")),
+            "GitHub 源必须保留作兜底：{list:?}"
+        );
+        if r2_manifest_url().is_some() {
+            assert_eq!(list[0], r2_manifest_url().unwrap(), "R2 应排第一");
+        }
+        // 切到 github：列表里不能残留自建源
+        settings.update_source = "github".into();
+        let list = endpoint_candidates(&settings);
+        assert!(list.iter().all(|u| u.contains("github.com")), "{list:?}");
+        // 乱填的值按 r2 处理（不给出错的机会）
+        settings.update_source = "ftp://whatever".into();
+        assert_eq!(
+            crate::settings::normalize_update_source(&settings.update_source),
+            "r2"
+        );
+    }
+
+    /// 自建源（R2）绝不能被套上 GitHub 加速前缀：前缀只认 github 域名，
+    /// 套错会拼成 `https://gh-proxy.com/https://dl.example.com/...`
+    #[test]
+    fn accel_never_rewrites_self_hosted_source() {
+        let r2 = "https://dl.example.com/dsh-launcher/latest.json";
+        assert_eq!(accel_url(r2, "https://gh-proxy.com/"), r2);
+        let gh = "https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.json";
+        assert_ne!(accel_url(gh, "https://gh-proxy.com/"), gh);
+    }
 }
 
 /// 用内置 Tauri updater 检查（endpoints / pubkey 取自 tauri.conf.json 的 plugins.updater）。

@@ -106,7 +106,96 @@ curl -sL https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.js
 
 `notes` 建议直接复制 `npm run notes` 的输出（不要手写第二份，会和 CHANGELOG 漂移）。
 
-## 7. 常见故障
+## 7. 自建更新源（Cloudflare R2）
+
+客户端**默认**从自建 R2 源下载更新（基址写死在 `src-tauri/src/update_check.rs` 的
+`R2_BASE`），GitHub 源保留为兜底；用户可在设置里二选一。实测同一条网络下 81MB 的
+AppImage：R2 约 3.3MB/s、GitHub 约 1.7MB/s（快 1.9 倍，下载时间 ~47s → ~24s）。
+
+### 一次性准备（已完成的部分标 ✅）
+
+1. ✅ **建桶并开公共访问**：
+
+   ```bash
+   npx wrangler r2 bucket create dsh-luncher-release --location apac
+   npx wrangler r2 bucket dev-url enable dsh-luncher-release
+   ```
+
+   公共基址形如 `https://pub-<hash>.r2.dev`，**必须同时写进两处且保持一致**：
+
+   | 位置 | 用途 |
+   | --- | --- |
+   | `src-tauri/src/update_check.rs` 的 `R2_BASE` | 客户端用它拼清单地址 |
+   | `.github/workflows/release.yml` 的 `R2_PUBLIC_BASE` | CI 用它改写清单里的下载地址 |
+
+2. ⬜ **建 R2 API Token**（只能网页建 —— 用 OAuth 登录的 wrangler 没有建 token 的权限）：
+   Cloudflare Dashboard → R2 → API → Manage API Tokens → Create API Token →
+   权限 `Object Read & Write`，Scope 选 `dsh-luncher-release`。
+   记下 **Access Key ID** 与 **Secret Access Key**。
+
+3. ⬜ **填三个 secrets**（仓库 Settings → Secrets and variables → Actions）：
+
+   | Secret | 值 |
+   | --- | --- |
+   | `R2_ACCOUNT_ID` | Cloudflare 账号 ID（`wrangler whoami` 可见） |
+   | `R2_ACCESS_KEY_ID` | 上一步的 Access Key ID |
+   | `R2_SECRET_ACCESS_KEY` | 上一步的 Secret Access Key |
+
+   没配也能正常发版：`publish-r2` 作业会自动跳过并打一条 notice。
+
+### 每次发布自动发生什么
+
+`publish-r2` 作业（`needs: publish`，只在发布成功后跑）：
+
+1. `gh release download` 拉本次发布的全部资产；
+2. `node scripts/r2-manifest.mjs` 把 `latest.json` 里的下载地址从 GitHub 资产 API
+   （`api.github.com/repos/…/releases/assets/<id>`）改写成 `<R2_PUBLIC_BASE>/<文件名>`，
+   **签名原样保留**（安装包字节没变，客户端照常验签），并校验清单引用的文件都在本地；
+3. `aws s3 cp` 上传清单引用的 6 个安装包（`max-age=31536000, immutable`）与
+   `latest.json`（`no-cache, max-age=0`）；
+4. 清理旧版本产物，再自检：从公网取回清单，确认每个平台地址都指向自建源。
+
+### 旧版本会被清掉吗
+
+会，但不是立刻：
+
+- `latest.json` 每次都被**覆盖**（同一个 key）；
+- 安装包按文件名新增，所以旧版本会先留着；
+- 清理步骤随后删除「不在本次清单里、且超过 `KEEP_DAYS`（默认 7 天）」的对象 ——
+  当前清单引用的文件与 `latest.json` **永远不删**。
+
+留 7 天宽限期是为了避开这个竞态：客户端刚拿到旧清单、还没下完，旧文件就被删 → 404。
+桶里因此稳定在「当前版本 + 最近一次发布」约 120–240 MB；想留更多版本就把
+`KEEP_DAYS` 调大（或删掉这一步，代价是每次发布多堆约 118 MB）。
+GitHub Release 始终是完整归档，R2 只服务「更新」这一条链路。
+
+手动补传（例如补历史版本）等价于：
+
+```bash
+gh release download vX.Y.Z --dir r2-upload --clobber
+gh release view vX.Y.Z --json assets > r2-upload/assets.json
+node scripts/r2-manifest.mjs --in r2-upload/latest.json --assets-map r2-upload/assets.json \
+  --check-dir r2-upload --base "$R2_PUBLIC_BASE" --list-files r2-upload/files.txt --out r2-upload/latest.json
+# 再用 wrangler 逐个上传（无需 S3 凭据，用本机 OAuth 登录态即可）：
+npx wrangler r2 object put dsh-luncher-release/<文件名> --file r2-upload/<文件名> --remote
+```
+
+### 必须记住的两条
+
+- **`latest.json` 要随每次发布更新**：更新器按顺序取第一个能解析的清单，R2 上的清单
+  陈旧会让客户端停在旧版本（届时用户可在设置里切到 GitHub 源自救）。
+- **`latest.json` 的缓存必须保持 `no-cache`**，否则新版本提示会被 CDN 缓存挡住。
+
+### 其它
+
+- 只上传清单真正引用的包（AppImage / deb / rpm / app.tar.gz / msi / setup.exe）；
+  `.dmg` 不在更新清单里（它供首次下载），要镜像的话另外传。
+- 每个版本约 118 MB（AppImage 81MB 占大头）。不清理的话一年几个 GB、R2 存储
+  约 $0.015/GB/月，钱不多但没必要堆着。
+- 想换自定义域名：改上面表格里的两处基址即可。`r2.dev` 是 Cloudflare 的托管开发域名，
+  有速率限制，流量大了建议绑自定义域名。
+
+## 8. 常见故障
 
 | 现象 | 原因 / 处理 |
 | --- | --- |

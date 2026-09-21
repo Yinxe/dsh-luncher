@@ -16,7 +16,8 @@
     "release": "npm run build:release",
     "notes": "node scripts/release-notes.mjs",
     "notes:check": "node scripts/release-notes.mjs --check",
-    "notes:archive": "node scripts/release-notes.mjs --all --write"
+    "notes:archive": "node scripts/release-notes.mjs --all --write",
+    "r2:manifest": "node scripts/r2-manifest.mjs"
   },
   "dependencies": {
     "@codemirror/lang-yaml": "^6.1.3",
