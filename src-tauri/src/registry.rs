@@ -589,13 +589,36 @@ pub async fn probe_channel_refs(owner: &str, repo: &str) -> ChannelProbe {
     }
 }
 
+/// URL path 段的最小百分号编码：只保留 unreserved 字符与 `/` 分隔符，
+/// 其余字节（空格、非 ASCII、`?` `#` `%` 等）一律转 `%XX`。
+///
+/// 探测用的 `file` 直接取自远端返回的文件树（外部输入）——jsDelivr 上真实存在的
+/// 文件名可以带空格/中文，裸拼进 URL 会让 reqwest 解析失败或截断路径，
+/// 把「通道通」误报成「通道不通」。
+fn encode_url_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// 探测 jsDelivr（data API 取树 + CDN 取文件）
 pub async fn probe_channel_jsdelivr(owner: &str, repo: &str, rev: &str, file: &str) -> ChannelProbe {
     let t = Instant::now();
     let client = probe_client();
     let mut detail: Vec<String> = Vec::new();
     let mut ok = false;
-    let data = format!("https://data.jsdelivr.com/v1/packages/gh/{owner}/{repo}@{rev}?structure=flat");
+    let data = format!(
+        "https://data.jsdelivr.com/v1/packages/gh/{}@{}?structure=flat",
+        encode_url_path(&format!("{owner}/{repo}")),
+        encode_url_path(rev)
+    );
     match client.get(&data).send().await {
         Ok(r) if r.status().is_success() => {
             let n = r
@@ -610,7 +633,12 @@ pub async fn probe_channel_jsdelivr(owner: &str, repo: &str, rev: &str, file: &s
         Ok(r) => detail.push(format!("树 HTTP {}", r.status().as_u16())),
         Err(e) => detail.push(format!("树 {}", short_err(&e.to_string()))),
     }
-    let cdn = format!("https://cdn.jsdelivr.net/gh/{owner}/{repo}@{rev}/{file}");
+    let cdn = format!(
+        "https://cdn.jsdelivr.net/gh/{}@{}/{}",
+        encode_url_path(&format!("{owner}/{repo}")),
+        encode_url_path(rev),
+        encode_url_path(file)
+    );
     match client.get(&cdn).send().await {
         Ok(r) if r.status().is_success() => {
             ok = true;
@@ -632,7 +660,13 @@ pub async fn probe_channel_jsdelivr(owner: &str, repo: &str, rev: &str, file: &s
 pub async fn probe_channel_raw(owner: &str, repo: &str, rev: &str, file: &str) -> ChannelProbe {
     let t = Instant::now();
     let client = probe_client();
-    let url = format!("https://raw.githubusercontent.com/{owner}/{repo}/{rev}/{file}");
+    let url = format!(
+        "https://raw.githubusercontent.com/{}/{}/{}/{}",
+        encode_url_path(owner),
+        encode_url_path(repo),
+        encode_url_path(rev),
+        encode_url_path(file)
+    );
     match client.get(&url).send().await {
         Ok(r) => {
             let ok = r.status().is_success();
@@ -2101,6 +2135,16 @@ mod tests {
         ] {
             assert!(!is_plain_http_tarball_spec(s), "不该判为 http 直链: {s}");
         }
+    }
+
+    /// 远端文件树里的名字是外部输入：带空格/中文/`#` 的 blob 名必须编码后再拼 URL，
+    /// 否则 reqwest 解析失败会把「通道通」误报成「通道不通」。
+    #[test]
+    fn encode_url_path_keeps_safe_and_escapes_rest() {
+        assert_eq!(encode_url_path("a-b_c.d~e/01.txt"), "a-b_c.d~e/01.txt");
+        assert_eq!(encode_url_path("a b/c#.txt"), "a%20b/c%23.txt");
+        assert_eq!(encode_url_path("测试/包.tgz"), "%E6%B5%8B%E8%AF%95/%E5%8C%85.tgz");
+        assert_eq!(encode_url_path(""), "");
     }
 
     /// 危险的 git_ref（路径穿越 / 查询串 / 凭据字符）应让整条规格判为不可解析
