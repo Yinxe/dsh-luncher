@@ -255,7 +255,8 @@ pub fn rewrite(url: &str, prefix: &str) -> String {
 ///
 /// 所以：clone 前先把输入地址还原，已有的克隆在 fetch/pull 前把 `origin` 修回来。
 /// 判定**不查内置前缀清单**（用户可能用清单外的代理，例如 `github.dpik.top`）：
-/// 只要 `https://github.com/` 出现在非开头位置，它前面那截就当作代理前缀切掉。
+/// 只要 `https://github.com/` 出现在非开头位置、且它前面那截是**合法的重写前缀形态**
+/// （以 `/` 结尾、不含 query/fragment），就把那截当作代理前缀切掉。
 ///
 /// 不处理的形态：path 风格代理（`https://hub.xxx/o/r`，信息不足以还原）、
 /// `git@github.com:` 这类 SSH 地址（那是用户自己的认证方式，不该被悄悄改成 https）。
@@ -271,6 +272,13 @@ pub fn strip_proxy_prefix(url: &str) -> Option<String> {
         return None;
     }
     let i = lower.find(GH)?;
+    // rewrite() 拼出来的地址里前缀一定以 `/` 结尾、且不含 query/fragment（前缀本身
+    // 就是个纯路径 URL）。不限定的话 `https://x.dev/?u=https://github.com/o/r`
+    // 这种「github 地址嵌在 query 里」的链接会被拦腰截断成裸 github 地址。
+    let prefix = &lower[..i];
+    if !prefix.ends_with('/') || prefix.contains(['?', '#']) {
+        return None;
+    }
     // 统一成规范的小写 scheme + host，路径部分保持原样（大小写敏感）
     let clean = format!("{GH}{}", &u[i + GH.len()..]);
     (clean.len() > GH.len()).then_some(clean)
@@ -563,6 +571,12 @@ mod tests {
         // path 风格代理信息不足，不做猜测
         assert_eq!(strip_proxy_prefix("https://hub.fastgit.org/o/r"), None);
         assert_eq!(strip_proxy_prefix(""), None);
+        // github 地址嵌在 query / fragment 里：不是「前缀+原始地址」的形态，
+        // 截断会把别的站点拦腰砍成裸 github 地址（rewrite() 从不生成这种串）
+        assert_eq!(strip_proxy_prefix("https://x.dev/?u=https://github.com/o/r"), None);
+        assert_eq!(strip_proxy_prefix("https://x.dev/p#https://github.com/o/r"), None);
+        // 合法代理前缀一律以 `/` 结尾；GH 前面不是 `/` 的不动
+        assert_eq!(strip_proxy_prefix("https://x.dev/get|https://github.com/o/r"), None);
     }
 
     #[test]
