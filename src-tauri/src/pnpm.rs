@@ -55,6 +55,8 @@ pub enum PnpmFailure {
     Fetch404 { pkg: Option<String> },
     /// `file:` 依赖指向的本地路径已不存在
     MissingLocalDep { path: Option<String> },
+    /// Windows：node_modules 里的文件被占用，重命名/删除失败（EPERM / EBUSY）
+    FileLocked,
     /// PATH 上有 pnpm 但起不来（9009 / EACCES / ENOENT）
     PnpmUnusable,
     /// PATH 上没有 pnpm
@@ -77,6 +79,7 @@ impl PnpmFailure {
             PnpmFailure::HoistDiff => "hoist-pattern-diff",
             PnpmFailure::Fetch404 { .. } => "fetch-404",
             PnpmFailure::MissingLocalDep { .. } => "missing-local-dependency",
+            PnpmFailure::FileLocked => "file-locked",
             PnpmFailure::PnpmUnusable => "pnpm-unusable",
             PnpmFailure::PnpmMissing => "pnpm-missing",
         }
@@ -207,6 +210,12 @@ impl PnpmFailure {
                      请在 profile 的 package.json 里删掉值为该路径的那一行依赖，然后重试。"
                 )
             }
+            PnpmFailure::FileLocked => format!(
+                "文件被别的进程占着，pnpm 没法替换/删除它（Windows 上常是 EPERM/EBUSY）。\
+                 多半是这个 profile 的 dsh 还在运行、编辑器/终端正开着这个目录，或杀毒软件在扫描。\n\
+                 请先退出这个实例（托盘里停掉对应 dsh），关掉可能占用目录的程序，再重试安装；\n\
+                 仍然失败就重启系统后再装。目录：{dir}"
+            ),
             PnpmFailure::PnpmUnusable => "系统里有一个 pnpm 但起不来，插件没有任何改动。\n\
                  在系统终端里执行一次 `pnpm --version`：那里也失败说明要修的是这台机器上的 pnpm（权限/安装）；\
                  那里正常说明是启动方式带来的环境差异，试试直接用终端启动 dsh。"
@@ -371,12 +380,16 @@ pub fn classify(output: &str, exit_code: Option<i32>) -> Option<PnpmFailure> {
         let path = quoted_after(output, "ENOENT: no such file or directory, open");
         return Some(PnpmFailure::MissingLocalDep { path });
     }
-    // Windows 上替换被占用文件失败（同一类：pnpm 无法完成 staging）
+    // Windows 上替换/删除被占用的文件失败（杀毒实时防护、编辑器、残留的 dsh 进程
+    // 攥着 node_modules）。过去并进 FetchTimeout：自动重试白给一个 600 秒超时参数，
+    // 消息还在讲「整仓 tar.gz 下载」，用户照着换 clone 装了照样失败 —— 单独归类。
     if low.contains("err_pnpm_eperm")
+        || low.contains("err_pnpm_ebusy")
         || low.contains("operation not permitted, rename")
+        || low.contains("resource busy or locked")
         || low.contains("failed to remove existing directory")
     {
-        return Some(PnpmFailure::FetchTimeout); // 归类为需重试的瞬态，消息由上层补充
+        return Some(PnpmFailure::FileLocked);
     }
     if is_transient(output) {
         return Some(PnpmFailure::TransientNetwork);
@@ -544,6 +557,16 @@ mod tests {
 
         let t = "GET https://codeload.github.com/o/r/tar.gz/abc error (23)";
         assert_eq!(classify(t, Some(1)).unwrap().code(), "fetch-timeout");
+
+        // 文件被占用的 EPERM/EBUSY 不是下载超时：给的是「关掉占用程序」的话术，
+        // 也不会白挂一个 600 秒超时参数当重试
+        let eperm = "ERR_PNPM_EPERM  operation not permitted, rename '.../node_modules/.pnpm/x' -> '...'";
+        let f = classify(eperm, Some(1)).unwrap();
+        assert_eq!(f.code(), "file-locked");
+        assert_eq!(f.retry_override(), None);
+        assert!(f.message(Path::new("/p"), "web").contains("占用"));
+        let busy = "ERR_PNPM_EBUSY  resource busy or locked, rmdir '.../node_modules/x'";
+        assert_eq!(classify(busy, Some(1)).unwrap().code(), "file-locked");
     }
 
     #[test]
