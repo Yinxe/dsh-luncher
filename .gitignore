@@ -7,3 +7,6 @@ src-tauri/gen/
 .sysroot/
 # wrangler 本地模拟状态（手动补传 R2 时会生成，别入库）
 .wrangler/
+
+# CLI 本地权限覆盖（机器相关，不入库）
+.qoder/settings.local.json
