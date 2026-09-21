@@ -1,6 +1,6 @@
 [package]
 name = "dsh-starter"
-version = "0.2.1"
+version = "0.2.2"
 description = "Cross-platform launcher for @deepseek-ai/dsh"
 authors = ["you"]
 edition = "2021"

@@ -10,6 +10,12 @@ DSH Starter 每个版本的用户可见变化。格式参考 [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-21
+
+### 修复
+
+- **「一键安装 Node」不再把合法安装包判成坏文件（`.tar.xz` 校验写错了）**：下载完内置 Node 的归档后，程序会先看文件头确认它真是个压缩包 —— 而这段校验先把开头几个字节**当成 UTF-8 文本**再比对，xz 的魔数第一个字节是 `0xFD`、不是合法 UTF-8，于是它每次都被替换成「�」，比较永远不可能命中：**哪怕镜像站给的是完完整整的官方包，也会当场报「下载到的不是 tar.xz 压缩包」，Node 一次都装不上**（Windows 的 zip 因为魔数是 ASCII 的 `PK` 才没中招）。现在改成直接比对**原始字节**，并补了两条回归用例（xz / gzip / zip / 镜像站 HTML 错误页 / 空文件）。顺带把那条报错里整屏的二进制乱码换成十六进制 + 可打印字符预览，该说的话照旧：换成别的镜像站重试、归档留在哪个路径。
+
 ## [0.2.1] - 2026-09-21
 
 ### 变更
@@ -216,7 +222,8 @@ DSH Starter 每个版本的用户可见变化。格式参考 [Keep a Changelog](
 - profile 目录改为 `$DSH_HOME/profiles`（复数）并跳过 `node_modules`。
 - 插件 ID 误报、插件页 profile 下拉被字母序抢占（应为 `web`）、正式版筛选把 RC 当成预发布。
 
-[Unreleased]: https://github.com/Yinxe/dsh-starter/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Yinxe/dsh-starter/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Yinxe/dsh-starter/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Yinxe/dsh-starter/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Yinxe/dsh-starter/releases/tag/v0.2.0
 [0.1.2]: https://github.com/Yinxe/dsh-starter/releases/tag/v0.1.2
