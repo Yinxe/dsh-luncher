@@ -212,7 +212,7 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::没有配置 R2_ACCESS_KEY_ID，跳过自建源同步（客户端会走 GitHub 源）"
+            echo "::warning::没有配置 R2_ACCESS_KEY_ID，跳过自建源同步 —— 注意：客户端默认走 R2，R2 清单会停在旧版本，需要手动补传（见 docs/RELEASING.md 第 7 节）"
           fi
 
       - name: 下载本次发布的产物
