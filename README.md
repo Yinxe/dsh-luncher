@@ -73,6 +73,7 @@
 ├── runtime/           # 内置 Node 运行时（一键预装）
 │   └── node-v22.14.0/
 ├── logs/              # 插件任务日志导出（内置终端「导出」按钮）
+│                      # + startup.log（启动各阶段耗时）/ panic.log（崩溃位置与消息）
 ├── git-plugins/       # clone+link 安装的本地仓库（git pull 更新）
 │   └── owner-repo/
 └── versions/

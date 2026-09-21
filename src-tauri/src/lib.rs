@@ -1,5 +1,6 @@
 mod commands;
 mod credentials;
+mod diag;
 mod ghaccel;
 mod installed;
 mod installer;
@@ -24,6 +25,10 @@ use tauri::{Manager, WindowEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 先把崩溃留痕挂上：release 构建是 windows_subsystem = "windows"，panic 默认无处可看
+    diag::install_panic_hook();
+    diag::mark("启动器启动");
+
     let settings = settings::load_settings();
 
     let app = tauri::Builder::default()
@@ -114,6 +119,7 @@ pub fn run() {
         ])
         .setup(|app| {
             tray::create(app.handle())?;
+            diag::mark("setup: 托盘就绪");
             commands::emit_startup_checks(app.handle());
             Ok(())
         })
