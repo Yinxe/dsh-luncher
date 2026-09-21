@@ -40,20 +40,31 @@ const buttonVariants = cva(
   }
 )
 
-function Button({
-  className,
-  variant = "default",
-  size = "default",
-  asChild = false,
-  ...props
-}: React.ComponentProps<"button"> &
-  VariantProps<typeof buttonVariants> & {
-    asChild?: boolean
-  }) {
-  const Comp = asChild ? Slot.Root : "button"
+/**
+ * 项目定制：Button 改为 forwardRef。
+ *
+ * shadcn 上游按 React 19 的写法不再转发 ref，而本项目是 **React 18** —— 不转发的后果
+ * 不是「少个 ref」，而是**交互直接失效**：Radix 的 `<DropdownMenuTrigger asChild>` /
+ * `<DialogClose asChild>` / `<PopoverAnchor asChild>` 都靠 Slot 给子元素挂 ref 才能拿到
+ * 真实 DOM，子元素是普通函数组件时 ref 被丢掉，控制台报
+ * "Function components cannot be given refs"，点触发器毫无反应
+ * （版本行的「更多操作」菜单点了不弹就是这个原因）。
+ */
+const Button = React.forwardRef<
+  HTMLButtonElement,
+  React.ComponentProps<"button"> &
+    VariantProps<typeof buttonVariants> & {
+      asChild?: boolean
+    }
+>(function Button(
+  { className, variant = "default", size = "default", asChild = false, ...props },
+  ref
+) {
+  const Comp = (asChild ? Slot.Root : "button") as React.ElementType
 
   return (
     <Comp
+      ref={ref}
       data-slot="button"
       data-variant={variant}
       data-size={size}
@@ -61,6 +72,7 @@ function Button({
       {...props}
     />
   )
-}
+})
+Button.displayName = "Button"
 
 export { Button, buttonVariants }

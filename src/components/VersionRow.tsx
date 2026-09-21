@@ -51,12 +51,15 @@ const CHANNEL_V: Record<string, "default" | "success" | "warning" | "info" | "se
 };
 
 /**
- * 次要操作铺开所需的最小容器宽度（表格外层的 `@container` 尺寸）。
- * 实测：四个次要操作 +「设为当前」加起来约 560px，加上版本 / 日期 / 大小 / 状态
+ * 宽屏阈值（表格外层 `@container` 的宽度）选 52rem 的理由：
+ * 实测四个次要操作 +「设为当前」加起来约 560px，再加上版本 / 日期 / 大小 / 状态
  * 四列就得 830px 以上才排得下 —— 低于这个宽度与其让按钮换行把行撑高，
  * 不如收进「更多」菜单（主操作始终留在外面）。
+ *
+ * 注意：`@[52rem]:flex` / `@[52rem]:hidden` 必须**字面量**写在 className 里。
+ * Tailwind 只扫描源码里的完整类名，用常量拼接（`${WIDE}:hidden`）不会生成对应 CSS ——
+ * 那样两个操作组会同时显示（曾经真踩过），所以这里不再抽常量。
  */
-const WIDE = "@[52rem]";
 
 export default function VersionTableRow({
   row, isLatestTag, busy, isActive, switchLocked, upgradeTo, onUpgrade, onSetActive, onInstall, onUninstall, onReveal,
@@ -146,7 +149,7 @@ export default function VersionTableRow({
             </Button>
           )}
 
-          <div className={`hidden items-center gap-0.5 ${WIDE}:flex`}>
+          <div className="hidden items-center gap-0.5 @[52rem]:flex">
             <Button
               size="sm"
               variant="ghost"
@@ -185,7 +188,7 @@ export default function VersionTableRow({
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="ghost" className={`${WIDE}:hidden`} title="更多操作">
+              <Button size="sm" variant="ghost" className="@[52rem]:hidden" title="更多操作">
                 <MoreHorizontal />
               </Button>
             </DropdownMenuTrigger>
