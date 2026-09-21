@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+// PathBuf 只在 Linux 的「终端启动」分支里用到；不按 cfg 收进来会让 Windows / macOS
+// 构建各报一条 unused import 警告（CI 日志里的噪声）
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::path::PathBuf;
 use std::process::Stdio;
 
 use crate::installed::InstalledVersion;
