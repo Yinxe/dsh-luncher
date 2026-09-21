@@ -180,9 +180,10 @@ curl -sL https://github.com/Yinxe/dsh-starter/releases/latest/download/latest.js
 2. ⬜ **建 R2 API Token**（只能网页建 —— 用 OAuth 登录的 wrangler 没有建 token 的权限）：
    Cloudflare Dashboard → R2 → API → Manage API Tokens → Create API Token →
    权限 `Object Read & Write`，Scope 选桶。
-   ⚠️ **0.2.0 换桶后必须把 `dsh-starter-release` 加进这个 token 的 Scope**
-   （或新建一个包含它的 token 并更新下面第 3 步的 secret），否则下次发版的 `publish-r2`
-   上传会 403 —— 失败是响的，但 R2 上的清单会停在旧版本。
+   ⚠️ **Scope 是按桶列的**：只覆盖旧桶的 token 写不了新桶。0.2.1 换到 `dsh-starter-release`
+   之后实测 CI 用的这份 token 仍能写入（即它的 Scope 已覆盖新桶 / 是账号级），所以**不必换
+   secret**；但将来若重建 token，记得把在用的桶都列进 Scope，否则 `publish-r2` 会 403 ——
+   失败是响的，只是 R2 上的清单会停在旧版本。
    记下 **Access Key ID** 与 **Secret Access Key**。
 
 3. ⬜ **填三个 secrets**（仓库 Settings → Secrets and variables → Actions）：
@@ -196,7 +197,7 @@ curl -sL https://github.com/Yinxe/dsh-starter/releases/latest/download/latest.js
    没配也能正常发版：`publish-r2` 作业会自动跳过并打一条 **warning**（不是静默的 notice ——
    客户端默认走 R2，这里跳过就意味着 R2 上的清单会停在旧版本，得照本节末尾手动补传）。
 
-### 换桶记录（0.2.0 已完成）
+### 换桶记录（0.2.1 起客户端走新桶）
 
 产品 0.2.0 改名成 DSH Starter，桶也跟着换 —— **R2 不支持改桶名**，所以是新建 + 迁移：
 
@@ -207,11 +208,11 @@ curl -sL https://github.com/Yinxe/dsh-starter/releases/latest/download/latest.js
 | 公开基址 | `https://pub-576ca711d9cf4cfe96b58195dfe6ce81.r2.dev` |
 
 迁移时是照第 7 节的手动补传流程，把 0.2.0 的六个安装包与改写过的清单先铺进新桶，再换的基址 ——
-所以下载页切到新桶那一刻，自建源直链不会是死链。
+所以下载页切到新桶那一刻，自建源直链不会是死链。四处基址的同改随 **0.2.1** 发布
+（0.2.0 的二进制里仍是旧基址，所以它读不到新桶，需要手动装一次或把更新源切到 GitHub）。
 
-⬜ **唯一遗留（Cloudflare 侧）**：把 `dsh-starter-release` 加进 CI 用的 R2 API Token 的 Scope
-（或新建含它的 token 并更新第 3 步的两个 secret）。没做的话，下次发版的 `publish-r2` 会以 403
-明确失败，R2 上的清单会停在旧版本 —— 失败是响的，不会静默。
+✅ **凭据已验证可用**：0.2.1 的 `publish-r2` 成功把清单与安装包写进了 `dsh-starter-release`
+（新桶 `latest.json` 已是 0.2.1），所以 **GitHub 上的 R2 secret 不需要更换**。
 
 ⚠️ **为什么单独写一段**：更新器按顺序取「第一个能解析的清单」，R2 排在 GitHub 兜底之前。
 换桶时只改一半（例如上传改到新桶、客户端仍读旧桶）会让旧桶那份**陈旧却依然有效**的清单
