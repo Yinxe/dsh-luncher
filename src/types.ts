@@ -116,7 +116,7 @@ export interface GhAccel {
 /** clone 探测结果：真实克隆到本地后扫描出的插件包 */
 export interface CloneProbe {
   url: string;
-  /** 克隆落点（~/.dsh-launcher/git-plugins/<owner>-<repo>） */
+  /** 克隆落点（~/.dsh-starter/git-plugins/<owner>-<repo>） */
   root: string;
   dirName: string;
   gitRef: string | null;
@@ -157,7 +157,7 @@ export interface InstallFinishedEvent {
   message: string;
 }
 
-export interface LauncherUpdateStatus {
+export interface StarterUpdateStatus {
   available: boolean;
   current: string;
   latest: string | null;
@@ -170,7 +170,7 @@ export interface LauncherUpdateStatus {
   message: string | null;
 }
 
-export interface LauncherUpdateProgress {
+export interface StarterUpdateProgress {
   received: number;
   total: number;
 }
@@ -379,7 +379,7 @@ export interface PluginUpdateInfo {
   localPath: string | null;
   /** git 工作树根绝对路径（git-clone 源） */
   cloneDir: string | null;
-  /** 该工作树是否由启动器克隆（~/.dsh-launcher/git-plugins 下） */
+  /** 该工作树是否由启动器克隆（~/.dsh-starter/git-plugins 下） */
   managedClone: boolean | null;
   /** 插件目录相对 git 根的路径（重新 link 用） */
   subPath: string | null;

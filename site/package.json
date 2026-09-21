@@ -1,9 +1,9 @@
 {
-  "name": "dsh-launcher-site",
+  "name": "dsh-starter-site",
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "DSH Launcher 产品介绍与下载页（GitHub Pages）",
+  "description": "DSH Starter 产品介绍与下载页（GitHub Pages）",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

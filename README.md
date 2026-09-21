@@ -1,12 +1,12 @@
-# DSH Launcher
+# DSH Starter
 
 跨平台的 [@deepseek-ai/dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（DeepSeek Harness CLI）启动器。
 
 技术栈：**Tauri 2**（Rust 系统层 + 托盘/窗口）+ **React 18 + TypeScript**（界面）+ **Node.js / npm**（构建工具链，dsh 本身也是 Node 程序）。
 
-![DSH Launcher「版本与安装」界面（深色主题）](images/preview.png)
+![DSH Starter「版本与安装」界面（深色主题）](images/preview.png)
 
-> **只想下载？** 产品页与各平台直链：**<https://yinxe.github.io/dsh-luncher/>**
+> **只想下载？** 产品页与各平台直链：**<https://yinxe.github.io/dsh-starter/>**
 > （GitHub Pages，自建源 / GitHub 源可切换，版本号与体积由页面现拉）。
 > 页面源码在 [`site/`](site/)，push 到 `main` 自动部署（见 [.github/workflows/pages.yml](.github/workflows/pages.yml)）。
 
@@ -14,22 +14,22 @@
 
 - **官方版本列表**：直接从 npm registry 拉取 `@deepseek-ai/dsh` 已发布的全部版本（含 `latest` / `next` / `alpha` dist-tags、发布日期、体积），支持切换 registry 镜像。列表按卡片实际宽度响应：窄窗口下把次要操作收进行尾「更多」菜单、按宽度收起「发布日期 / 大小」两列，行长与列宽都不会换行或横向溢出。
 - **识别已安装版本**：三个来源自动合并识别——
-  - 本启动器管理的 `~/.dsh-launcher/versions/`；
+  - 本启动器管理的 `~/.dsh-starter/versions/`；
   - npm 全局安装（`npm root -g`）；
   - PATH 中的 `dsh` 可执行文件（顺着符号链接解析版本）。
 - **逐版本看 dsh 更新日志**：版本表每行（以及工具栏）都有「更新日志」，点开是版本浏览器——左栏列全部版本（有官方 Release 的带绿点，早期没建 Release 的标「无发布说明」），右栏渲染该版本的 GitHub Release 正文（小标题 + 条目原样排版），官方的中英双段可切「中文 / English」，底部可跳「完整提交对比」。数据一次拉全量并缓存（进程内 10 分钟 + ETag 条件请求，304 不计额度），翻版本零等待；仓库是 monorepo，Release tag 形如 `dsh-v0.1.6-alpha.2`，只取 `dsh-` 前缀的那些。npm 的 packument 里没有 changelog，所以更新日志只能来自 Release；匿名额度不够时在设置里填 GitHub Token 即可。
 - **安装 / 卸载 / 重装**：未安装的版本由启动器用 npm 装进自己的数据目录（互不污染全局环境），`--loglevel info` 把每个包的真实 fetch/resolve/extract 过程实时显示在安装卡里，可取消；卸载即删除对应目录。
 - **首次使用引导**：dsh 的数据目录（`$DSH_HOME`，缺省 `~/.dsh`）是**第一次运行 dsh 时**才生成的，在那之前 profile 列表是空的，实例、快捷配置、插件管理全都无从下手。启动器会在装完版本后提示「还差一步」，并在 Profile 实例页给出一张引导卡（含 Node / dsh / npm 就绪状态），一键以 `dsh web`（等价 `--profile web`）完成初始化；dsh 写出 `profiles/web`、配置与凭据文件后，profile 列表与默认 profile 会自动就位。
 - **内嵌启动（默认）**：「启动」把 dsh 作为启动器的**子进程**运行——日志实时显示在底部进程面板（多实例 tab、运行时长、停止按钮），**退出启动器即结束所有 dsh 进程**；也可点「终端」在独立系统终端中启动（交互式 TUI 场景，不受启动器生命周期管理）。**每个 profile 同时只能运行一个实例**（内嵌与终端启动都受约束），Profile 选择器默认选中 `web`（不存在则取第一个），不提供“默认 profile”空选项。
-- **Node 运行时预装**：宿主机没有 Node/npm 时，一键下载 Node LTS 安装到 `~/.dsh-launcher/runtime/`（用户级、无需 root、不污染系统），下载默认走 npmmirror 镜像站（设置中可换 aliyun 等），npm registry 在设置中配置。
+- **Node 运行时预装**：宿主机没有 Node/npm 时，一键下载 Node LTS 安装到 `~/.dsh-starter/runtime/`（用户级、无需 root、不污染系统），下载默认走 npmmirror 镜像站（设置中可换 aliyun 等），npm registry 在设置中配置。
 - **选择启动**：任意已安装版本一键在**新的系统终端窗口**中启动对应版本的 `dsh`（用绝对 node + bin.js 启动，不依赖 PATH）；支持 **profile**：顶栏下拉框列出 `$DSH_HOME/profiles`（缺省 `~/.dsh/profiles`，兼容单数 `profile/`）下的所有 profile（自动跳过 `node_modules`），选中即以 `dsh --profile <名字>` 启动并可保存为默认，留空则不带 `--profile` 走 dsh 默认。可设置默认附加参数（如 `--preset qqbot`）。
 - **插件管理**：按 profile 管理 dsh bundle 插件——列出已装插件与启用状态并可一键启停（启停按包内真实插件 ID 写入 cordis.patch 层），也可直接编辑 profile 侧的配置文件并写回。
   - **全部走官方 `dsh plugin` 命令**：安装 = `dsh plugin --profile <p> add <spec>`，卸载 = `remove`，升级同样回到 `add`（git 克隆源则先 `git pull` 再重新 `link:` 安装），启动器从不直接改写 `package.json` / `dsh.profile.bundles`。
-  - **内置终端**：插件页顶部常驻可折叠终端，安装 / 卸载 / 升级 / 克隆的 stdout+stderr **逐行实时**输出（每行按流着色、自动滚底、可复制 / 导出到 `~/.dsh-launcher/logs/`）；每个任务一个标签页，运行中可一键取消（取消会杀掉整棵进程组，pnpm/node 派生的孙进程不会残留），窗口重挂载后历史仍在。同一 profile 同时只允许一个插件任务，避免并发写坏 `node_modules`。
-  - **三种安装方式**：① npm 包（registry 搜索 / 精确规格，按版本号检测更新）② 链接直装（本地 `link:` 路径、仓库插件链接、`.tgz` 直链——原样交给 `dsh plugin add`，**不做任何远端探测**，也就没有版本渠道，只能手动重装同一来源）③ clone 仓库 + 本地 link（克隆到 `~/.dsh-launcher/git-plugins/<owner>-<repo>`，可选自动 `pnpm install` + `pnpm run build`，更新方式 = 该目录 `git pull`；「本地克隆仓库」卡片里每个子包的 `link` 安装都会先弹确认框，写明目标 profile、来源仓库（分支/提交/本地改动）、子包路径与 `link:…` 安装规格，缺 `lib/` 构建产物会警告「装后校验会卸掉」并指路先 `git pull` 构建，未声明 `dsh.bundle` 的候选则直接置灰不可点）。
+  - **内置终端**：插件页顶部常驻可折叠终端，安装 / 卸载 / 升级 / 克隆的 stdout+stderr **逐行实时**输出（每行按流着色、自动滚底、可复制 / 导出到 `~/.dsh-starter/logs/`）；每个任务一个标签页，运行中可一键取消（取消会杀掉整棵进程组，pnpm/node 派生的孙进程不会残留），窗口重挂载后历史仍在。同一 profile 同时只允许一个插件任务，避免并发写坏 `node_modules`。
+  - **三种安装方式**：① npm 包（registry 搜索 / 精确规格，按版本号检测更新）② 链接直装（本地 `link:` 路径、仓库插件链接、`.tgz` 直链——原样交给 `dsh plugin add`，**不做任何远端探测**，也就没有版本渠道，只能手动重装同一来源）③ clone 仓库 + 本地 link（克隆到 `~/.dsh-starter/git-plugins/<owner>-<repo>`，可选自动 `pnpm install` + `pnpm run build`，更新方式 = 该目录 `git pull`；「本地克隆仓库」卡片里每个子包的 `link` 安装都会先弹确认框，写明目标 profile、来源仓库（分支/提交/本地改动）、子包路径与 `link:…` 安装规格，缺 `lib/` 构建产物会警告「装后校验会卸掉」并指路先 `git pull` 构建，未声明 `dsh.bundle` 的候选则直接置灰不可点）。
   - **探测只在 clone 路径上，且基于真实工作树**：点「探测」= 先把仓库克隆（或同步）到本地，再扫描这棵工作树（`pnpm-workspace.yaml` / `package.json workspaces` 识别 monorepo 子包，逐个给出名称 / 版本 / 描述 / 是否声明 `dsh.bundle` / `lib/` 是否就绪）。这样候选列表与 `lib/` 判定就是安装要用的那份目录本身。之前基于 jsDelivr 文件索引的探测已下线：那份索引是边缘缓存快照（实测某仓库只回 119 个文件 / 4 个子包，真实分支是 353 个文件 / 9 个插件），会出现「候选少几个」和「明明有 `lib/` 却判缺失」的偏差，还会据此误拦能装的包。GitHub 直装现在只做「远端可匿名访问」的轻量预检（`git ls-remote` 级别），能不能加载交给装后校验。
   - **GitHub 加速（前缀代理）**：把 github 链接原样拼到代理前缀后面即可，例如 `git clone https://gh-proxy.com/https://github.com/owner/repo.git`。内置一组常用前缀（gh-proxy.com / gh.xxooo.cf / gh.dpik.top / gh.927223.xyz / ghfast.top / ghproxy.net），设置里可固定用哪一个、也可补自建前缀。**首次使用自动测速并缓存 6 小时**：下载能力用小文件 GET 计时，git 能力用一次真实的 `git clone --depth 1 --filter=blob:none` 计时——两者分开测是必要的，代理是否放行 git（clone 403）会随网络和时段变化，不能只看下载测速。注入方式：git 走 `url.<前缀>https://github.com/.insteadOf`（因此**已有克隆的 `git pull` 也生效**；命令行文本仍是原始地址，所以安装页会单独写出「实际请求」那一行，任务日志里也会逐条列出实际请求地址；`git@github.com:` 这类 SSH 地址不在改写范围内，要走加速请填 https 地址），releases / raw 等直链在安装前直接改写为代理链接。只对 github 域名生效。**前缀只存在于进程内，永不写进仓库配置**：clone 用的是原始地址，粘进来带前缀的地址会被自动还原，已有的克隆在 fetch/pull 前也会把 `origin` 修回 `https://github.com/...` —— 所以代理失效或换域名只会退回直连，不会像手改 remote 那样把克隆永久卡死。
-  - **安装 / 卸载的前后置校验**（细节对齐同生态的 dshmarket）：装完立刻核对新增的包——缺 `dsh` 清单、或没有可加载入口（源码检出、构建被 `allowBuilds` 拦住）会在**下次启动**把整个 profile 拖挂，因此当场卸掉并说明原因；新增包与被装插件的 loader **entry id 冲突**（cordis 不允许同 id 两个 insert，装错会让 dsh 起不来）也会被检出并卸掉。卸载前先查用户自己的 `cordis.patch.yml` 是否仍引用该包（引用则拒绝并指出要删哪几行，启动器不改写你的补丁文件）、是否带原生模块（`.node` 在进程退出前不会释放，需重启才能重装）；卸载后以**磁盘事实**对账：包没了却还在 `package.json` 里留着依赖/bundle 行的，删掉残留行（原件备份为 `package.json.launcher-bak`），包还在的就保留行并提示重试。升级后还会比对实际安装版本——pnpm 的 `minimumReleaseAge` 会**静默保留旧版本并退出 0**，版本没变会明确告警而不是报成功。pnpm 失败按 dshmarket 的清单一次性恢复：新版本等待期放行（`--config.minimum-release-age=0`，短横线拼写，camelCase 在 pnpm ≥12.3 会被静默忽略）、网络抖动重跑、下载超时加长、宿主 peer 关闭自动安装、node_modules 布局/store 不匹配先重建——全部仍经由 `dsh plugin`。
+  - **安装 / 卸载的前后置校验**（细节对齐同生态的 dshmarket）：装完立刻核对新增的包——缺 `dsh` 清单、或没有可加载入口（源码检出、构建被 `allowBuilds` 拦住）会在**下次启动**把整个 profile 拖挂，因此当场卸掉并说明原因；新增包与被装插件的 loader **entry id 冲突**（cordis 不允许同 id 两个 insert，装错会让 dsh 起不来）也会被检出并卸掉。卸载前先查用户自己的 `cordis.patch.yml` 是否仍引用该包（引用则拒绝并指出要删哪几行，启动器不改写你的补丁文件）、是否带原生模块（`.node` 在进程退出前不会释放，需重启才能重装）；卸载后以**磁盘事实**对账：包没了却还在 `package.json` 里留着依赖/bundle 行的，删掉残留行（原件备份为 `package.json.starter-bak`），包还在的就保留行并提示重试。升级后还会比对实际安装版本——pnpm 的 `minimumReleaseAge` 会**静默保留旧版本并退出 0**，版本没变会明确告警而不是报成功。pnpm 失败按 dshmarket 的清单一次性恢复：新版本等待期放行（`--config.minimum-release-age=0`，短横线拼写，camelCase 在 pnpm ≥12.3 会被静默忽略）、网络抖动重跑、下载超时加长、宿主 peer 关闭自动安装、node_modules 布局/store 不匹配先重建——全部仍经由 `dsh plugin`。
   - **更新检测（同样零 API 额度）**：npm 包比对 registry `latest`；`github:` 规格与 clone+link 源都走 `git ls-remote` 比对提交（同一仓库的多个插件共用一次查询，结果缓存 60s；实测真实 profile 的 16 个依赖 ≈13s、GitHub API 调用 **0 次**），clone+link 源支持一键 `git pull` 升级；远端不可匿名访问（私有仓库）时明确标注 `私有仓库 · 不支持` 并提示在本地仓库手动 `git pull`；纯本地 link 与 `.tgz` 直链标注「无更新渠道」，只能手动重装。
 - **配置文件 / 内嵌 YAML 编辑器**：全局配置（`$DSH_HOME/settings.yaml`）与 profile 侧的 `cordis.patch.yml`、`package.json` 都用同一个 CodeMirror 6 编辑器——语法高亮、行号、括号匹配、折叠、行内 YAML 报错（保存前也会再校验一次），编辑保留注释，写前自动备份。**高度自适应**：内容多高就多高（只改几行时不再顶着一大片空白），封顶在「它上方在滚动容器里还剩多少高度」——长配置能填满窗口并在编辑器内滚动，不会把整页顶长、拖出双滚动条；窗口缩放、上方说明换行都会即时重算。
 - **模型配置**：参考 dsh 官方 provider 配置布局，结构化编辑全局配置的模型两节——`llm-pi-ai.providers`（API 密钥 / 显示名称 / API 地址 / API 协议 / 模型列表）与 `agent-default-model`（默认模型三级联动：Provider → 模型 → 思考等级，不选则保持默认）。API 密钥可下拉选择已有凭据或手动输入（手动输入的密钥保存时自动回存到「凭据管理」）；支持「获取可用模型」——从服务方 `GET {baseURL}/models` 拉取列表勾选添加（openai / anthropic 协议，密钥按 手动值 > 凭据 refs > 环境变量 解析）；模型的思考等级（reasoningEfforts）可补充映射，不填则不写入。保存只重写这两节，`settings.yaml` 其余内容与节外注释逐字节保留，写前自动备份，未识别字段原样透传。
@@ -54,7 +54,7 @@
   - 开发构建（`npm run app` / 未打包的二进制）没有格式标记，**不会**放开应用内安装——否则 updater 会把安装包字节写到开发二进制上；这种形态只提示有新版。
   - **可以走 GitHub 加速**：检查更新（拉 latest.json）和下载安装包都套用设置里的加速前缀，与 clone / 插件下载共用同一份测速结果（`githubAccel` 开关 + `githubProxy` 指定前缀）。代理不支持某个地址（如 ghfast.top 对 `api.github.com` 会 403）或中途断流时，会自动回退直连重试。安装包有签名校验，所以**经第三方代理也无法投毒**——代理改一个字节就验签失败。
   - latest.json 里的下载地址由 tauri-action 生成，形如 `api.github.com/.../releases/assets/<id>`；客户端在开加速时会把它也套上前缀（gh-proxy 认这种地址；ghfast 之类只认 `github.com/...` 的会 403，此时客户端会自动回退直连重试）。
-- **侧栏底部：环境状态 + 项目仓库两张卡片**：底部数据不再分散在主栏底栏与侧栏两处 —— 主栏那条状态栏已去掉，「官方源 / 数据目录 / 托盘提示」全部并进侧栏底部。「运行状态」一行一灯（Node / 当前 dsh 版本 / 运行中实例数），「目录与源」把 registry、启动器数据目录、版本目录、dsh 数据目录各排一行、左侧标签固定宽度对齐；路径自动缩成 `~/.dsh-launcher/versions` 这类形式，完整值在悬停提示里，行尾悬停可一键复制。最下面新增「项目仓库」卡片（源码 / 问题反馈 / 更新日志），一键打开 [Yinxe/dsh-luncher](https://github.com/Yinxe/dsh-luncher) 或其更新日志；侧栏收起时退化成一排状态灯 + 仓库图标按钮。
+- **侧栏底部：环境状态 + 项目仓库两张卡片**：底部数据不再分散在主栏底栏与侧栏两处 —— 主栏那条状态栏已去掉，「官方源 / 数据目录 / 托盘提示」全部并进侧栏底部。「运行状态」一行一灯（Node / 当前 dsh 版本 / 运行中实例数），「目录与源」把 registry、启动器数据目录、版本目录、dsh 数据目录各排一行、左侧标签固定宽度对齐；路径自动缩成 `~/.dsh-starter/versions` 这类形式，完整值在悬停提示里，行尾悬停可一键复制。最下面新增「项目仓库」卡片（源码 / 问题反馈 / 更新日志），一键打开 [Yinxe/dsh-starter](https://github.com/Yinxe/dsh-starter) 或其更新日志；侧栏收起时退化成一排状态灯 + 仓库图标按钮。
 
 ## 自动更新是怎么工作的
 
@@ -75,7 +75,7 @@
 下载地址默认走**自建 CDN**：清单由自建源（Cloudflare R2）提供，地址是
 `…/latest/windows-x64-setup.exe` 这类**不带版本号的固定地址**（每次发布覆盖，桶里只留一份
 「当前最新」）；地址里的名字只是「稳定键」，**下载下来的文件仍保留原始名字**
-（如 `DSH.Launcher_0.1.6_x64-setup.exe`，由 `Content-Disposition` 响应头给出）—— 键求稳定、
+（如 `DSH.Starter_0.2.0_x64-setup.exe`，由 `Content-Disposition` 响应头给出）—— 键求稳定、
 名求可读，两者互不干扰。GitHub 源保留为兜底，也可以在设置里手动切过去。实测国内直连（不走代理）拉 81MB 的
 AppImage：GitHub release 直接连不上，自建源约 3.3MB/s 正常下载。地址写死在程序里，发布细节见
 [docs/RELEASING.md](docs/RELEASING.md) 第 7 节。
@@ -83,7 +83,7 @@ AppImage：GitHub release 直接连不上，自建源约 3.3MB/s 正常下载。
 
 ## 日志与排查
 
-所有日志按**子系统分类**落在 `~/.dsh-launcher/logs/`，一行一条，格式统一：
+所有日志按**子系统分类**落在 `~/.dsh-starter/logs/`，一行一条，格式统一：
 
 ```
 2026-09-21T01:23:45.678Z run=1789953825 pid=1234 +210ms ERROR install 启动 npm 失败：C:\Program Files\nodejs\npm
@@ -92,7 +92,7 @@ AppImage：GitHub release 直接连不上，自建源约 3.3MB/s 正常下载。
 - `run=` 是本次启动的标识（秒级时间戳）：同一个文件里混着多次启动，先按它分组再看；
 - `+Nms` 是距进程启动的毫秒数：排查卡顿/白屏时看阶段间隔比看绝对时间有用；
 - 级别可 grep：`grep ERROR install.log`。默认记 INFO 及以上；需要逐次细节（实例状态轮询、
-  端口归属判定、每条外部命令）时设环境变量 `DSH_LAUNCHER_LOG=debug` 再启动。
+  端口归属判定、每条外部命令）时设环境变量 `DSH_STARTER_LOG=debug` 再启动。
 
 | 文件 | 内容 |
 | --- | --- |
@@ -115,7 +115,7 @@ AppImage：GitHub release 直接连不上，自建源约 3.3MB/s 正常下载。
 ## 数据目录
 
 ```
-~/.dsh-launcher/       # 启动器自身数据
+~/.dsh-starter/       # 启动器自身数据
 ├── settings.json      # 启动器设置
 ├── github-accel.json  # GitHub 加速：测速选出的代理前缀（缓存 6 小时）
 ├── runtime/           # 内置 Node 运行时（一键预装）
@@ -215,10 +215,14 @@ npm run build    # tsc 类型检查 + 构建到 site/dist
 1. **生成签名密钥对**（只做一次，之后所有版本复用同一对）：
 
    ```bash
-   npm run tauri signer generate -w ~/.tauri/dsh-launcher.key
-   # 会打印一串 base64 公钥，并把私钥写进 ~/.tauri/dsh-launcher.key
+   npm run tauri signer generate -w ~/.tauri/dsh-starter.key
+   # 会打印一串 base64 公钥，并把私钥写进 ~/.tauri/dsh-starter.key
    # 提示输入密码时可以直接回车（留空）
    ```
+
+   > 0.2.0 改名**不需要重新生成密钥**：沿用原来那份私钥即可（旧文件名叫
+   > `~/.tauri/dsh-launcher.key`，改个文件名就行）。换密钥 = 公钥变了 =
+   > 已装版本的更新全部验签失败。
 
    > 私钥 = 更新权限。**不要提交进仓库**，丢了就只能让老用户手动重装（新私钥签的包老版本验不过）。
    > 公钥是烧进安装包里的，所以改公钥 / 改 endpoints **必须重新发版**；只有已经装着「带新公钥」那版的人才能自动升级——再往后的版本就都能滚动了。
@@ -241,7 +245,7 @@ npm run build    # tsc 类型检查 + 构建到 site/dist
 
    | Secret | 值 |
    | --- | --- |
-   | `TAURI_SIGNING_PRIVATE_KEY` | `~/.tauri/dsh-launcher.key` 文件的**完整内容**（含 `untrusted comment:` 那一行） |
+   | `TAURI_SIGNING_PRIVATE_KEY` | `~/.tauri/dsh-starter.key` 文件的**完整内容**（含 `untrusted comment:` 那一行） |
    | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 生成时设的密码；留空则填一个空字符串 |
 
    > `bundle.createUpdaterArtifacts` 已经是 `true`：**这两个 secret 没配好，CI 打包会直接失败**（找不到签名密钥）。暂时不想启用应用内更新，就把它改回 `false`。
@@ -299,9 +303,9 @@ curl -sL https://github.com/<你的账号>/<仓库名>/releases/latest/download/
   "notes": "把 `npm run notes` 的输出贴进来（与 CHANGELOG.md 同源，别手写第二份）",
   "pub_date": "2026-01-01T00:00:00Z",
   "platforms": {
-    "windows-x86_64": { "signature": "<.sig 文件内容>", "url": "https://.../DSH-Launcher_0.2.0_x64-setup.exe" },
-    "darwin-aarch64": { "signature": "...", "url": "https://.../DSH.Launcher_0.2.0_aarch64.dmg" },
-    "linux-x86_64":   { "signature": "...", "url": "https://.../DSH-Launcher_0.2.0_amd64.AppImage" }
+    "windows-x86_64": { "signature": "<.sig 文件内容>", "url": "https://.../DSH-Starter_0.2.0_x64-setup.exe" },
+    "darwin-aarch64": { "signature": "...", "url": "https://.../DSH.Starter_0.2.0_aarch64.dmg" },
+    "linux-x86_64":   { "signature": "...", "url": "https://.../DSH-Starter_0.2.0_amd64.AppImage" }
   }
 }
 ```

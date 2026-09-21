@@ -44,8 +44,8 @@ export function DownloadMatrix({ controller }: { controller: ReleaseController }
   async function copyAll() {
     const header =
       source === "r2"
-        ? `# DSH Launcher ${state.version ? `v${state.version}` : ""} 直链（自建源 · Cloudflare R2，地址永久不变）`
-        : `# DSH Launcher ${state.version ? `v${state.version}` : ""} 直链（GitHub Release，与版本绑定）`;
+        ? `# DSH Starter ${state.version ? `v${state.version}` : ""} 直链（自建源 · Cloudflare R2，地址永久不变）`
+        : `# DSH Starter ${state.version ? `v${state.version}` : ""} 直链（GitHub Release，与版本绑定）`;
     const body = installable.map((r) => `- ${r.label}（${r.arch}）：${r.url}`).join("\n");
     const ok = await copyText(`${header}\n${body}\n`);
     toast[ok ? "success" : "error"](ok ? `已复制 ${installable.length} 条直链` : "复制失败，请手动选中");

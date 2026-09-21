@@ -103,7 +103,7 @@ pub fn spawn_embedded(
     }
     // 非 shell 启动：node 目录放进 PATH 供 dsh 的子进程使用
     util::with_node_on_path(&mut cmd, Some(&node));
-    cmd.env("DSH_LAUNCHER_MANAGED", "1");
+    cmd.env("DSH_STARTER_MANAGED", "1");
     // 启动器死亡（含被强杀）时由内核立即结束 dsh
     util::bind_to_parent_lifetime(&mut cmd);
     cmd.stdin(Stdio::null())
@@ -184,7 +184,7 @@ pub fn spawn_embedded(
 }
 
 /// 以独立进程方式运行 dsh：自成进程组、不绑 PDEATHSIG，日志重定向到文件，
-/// 启动器退出后继续运行；重启后由 /proc 扫描重新识别（environ 标记 DSH_LAUNCHER_DETACHED）。
+/// 启动器退出后继续运行；重启后由 /proc 扫描重新识别（environ 标记 DSH_STARTER_DETACHED）。
 /// 不登记 ProcState（不随启动器退出被杀），实例感知与停止走外部进程扫描通道。
 pub fn spawn_detached(
     settings: &Settings,
@@ -212,9 +212,9 @@ pub fn spawn_detached(
         cmd.arg(a);
     }
     util::with_node_on_path(&mut cmd, Some(&node));
-    cmd.env("DSH_LAUNCHER_MANAGED", "1");
+    cmd.env("DSH_STARTER_MANAGED", "1");
     // 独立进程标记：/proc/<pid>/environ 扫描据此区分「启动器派生」与「终端启动」
-    cmd.env("DSH_LAUNCHER_DETACHED", "1");
+    cmd.env("DSH_STARTER_DETACHED", "1");
     // 脱离启动器进程组，终端信号与启动器退出都不波及
     #[cfg(unix)]
     {
@@ -232,7 +232,7 @@ pub fn spawn_detached(
     }
     cmd.stdin(Stdio::null());
     // 日志写入文件而非管道：管道会绑住启动器生命周期（写已关闭的管道会被 SIGPIPE 杀死）
-    let logs_dir = crate::settings::launcher_home().join("instance-logs");
+    let logs_dir = crate::settings::starter_home().join("instance-logs");
     std::fs::create_dir_all(&logs_dir).map_err(|e| format!("创建日志目录失败: {e}"))?;
     let log_path = logs_dir.join(format!(
         "{}-{}.log",
@@ -480,7 +480,7 @@ pub fn list(state: &ProcState) -> Vec<ProcInfo> {
 
 // ── 独立进程注册表（跨平台） ─────────────────
 // Linux 有 /proc 可直接扫描；macOS/Windows 没有，因此独立进程启动时把
-// pid/profile/version 记入 ~/.dsh-launcher/detached.json，扫描时校验存活
+// pid/profile/version 记入 ~/.dsh-starter/detached.json，扫描时校验存活
 // 并清除陈旧条目（PID 复用防护：要求进程 cmdline 仍为 dsh）。
 
 #[derive(Clone, Serialize, serde::Deserialize, Debug)]
@@ -494,7 +494,7 @@ pub struct DetachedRecord {
 }
 
 fn detached_registry_path() -> std::path::PathBuf {
-    crate::settings::launcher_home().join("detached.json")
+    crate::settings::starter_home().join("detached.json")
 }
 
 fn registry_lock() -> &'static Mutex<()> {
@@ -718,7 +718,7 @@ fn force_kill_pid(pid: u32) -> Result<(), String> {
     }
 }
 
-/// /proc/<pid>/environ 是否包含指定 KV（如 DSH_LAUNCHER_DETACHED=1）。
+/// /proc/<pid>/environ 是否包含指定 KV（如 DSH_STARTER_DETACHED=1）。
 /// environ 可能含非 UTF-8 字节，按字节读再容错转码。
 ///
 /// 注意：这是 Linux 专属手段，Windows / macOS 上没有 /proc，恒返回 false。
@@ -730,7 +730,7 @@ fn detached_marker(pid: u32) -> bool {
         .map(|bytes| {
             String::from_utf8_lossy(&bytes)
                 .split('\0')
-                .any(|kv| kv == "DSH_LAUNCHER_DETACHED=1")
+                .any(|kv| kv == "DSH_STARTER_DETACHED=1")
         })
         .unwrap_or(false)
 }
@@ -1226,7 +1226,7 @@ pub fn profile_instances(state: &ProcState) -> Vec<ProfileInstance> {
     // cmdline 外部扫描兜底：没有配 web 端口、也没监听端口的实例（desktop/headless）
     // 只能靠 cmdline 里的 --profile 认出来；已由端口归属或注册表认领的 PID 会跳过。
     for (pid, profile) in external_running_profile_pids(&claimed) {
-        // 带 DSH_LAUNCHER_DETACHED 标记的是启动器派生的独立进程，其余为终端/外部启动
+        // 带 DSH_STARTER_DETACHED 标记的是启动器派生的独立进程，其余为终端/外部启动
         let source = if detached_marker(pid) { "detached" } else { "external" };
         out.push(ProfileInstance {
             profile,
@@ -1528,11 +1528,11 @@ mod tests {
     #[test]
     fn is_dsh_cmdline_matches_both_separators() {
         assert!(is_dsh_cmdline(
-            "node /home/u/.dsh-launcher/versions/0.1.5/node_modules/@deepseek-ai/dsh/bin.js --profile web"
+            "node /home/u/.dsh-starter/versions/0.1.5/node_modules/@deepseek-ai/dsh/bin.js --profile web"
         ));
         // Windows 路径分隔符
         assert!(is_dsh_cmdline(
-            "node C:\\Users\\u\\.dsh-launcher\\versions\\0.1.5\\node_modules\\@deepseek-ai\\dsh\\bin.js --profile web"
+            "node C:\\Users\\u\\.dsh-starter\\versions\\0.1.5\\node_modules\\@deepseek-ai\\dsh\\bin.js --profile web"
         ));
         assert!(!is_dsh_cmdline("node /some/other/bin.js --profile web"));
         assert!(!is_dsh_cmdline("node /home/u/@deepseek-ai/dsh/other.js"));
@@ -1542,9 +1542,9 @@ mod tests {
     fn detached_registry_roundtrip_and_stale_purge() {
         let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("dsh-detreg-{}", std::process::id()));
-        // launcher_home() 只认存在的目录（否则回落到 $HOME），受限环境里必须先建出来
+        // starter_home() 只认存在的目录（否则回落到 $HOME），受限环境里必须先建出来
         std::fs::create_dir_all(&tmp).unwrap();
-        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
 
         let mk = |pid: u32, profile: &str| DetachedRecord {
             pid,
@@ -1589,7 +1589,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("dsh-fresh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
 
         // 表先拍一轮（守护线程的常态），进程"随后"才起来
         refresh_process_snapshot();
@@ -1641,7 +1641,7 @@ mod tests {
         assert!(read_instance_log_tail(u32::MAX, 4096).unwrap().is_none());
 
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::env::remove_var("DSH_STARTER_HOME");
     }
 
     /// issue #1 回归：存活 / 端口归属判定必须走内存快照，**绝不能逐 PID 起子进程**。
@@ -1687,7 +1687,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("dsh-port-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
 
         // 端口先用 bind(0) 占一个号再放掉，交给伪进程去 bind
         let port = {
@@ -1786,7 +1786,7 @@ time.sleep(120)
         assert!(read_instance_log_tail(pid, 4096).unwrap().is_none());
 
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::env::remove_var("DSH_STARTER_HOME");
     }
 
     #[test]
@@ -1812,7 +1812,7 @@ time.sleep(120)
         let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("dsh-regsync-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
 
         // 注意 pid 必须不同：append 会按 pid 去重覆盖
         let rec = |pid: u32, profile: &str| DetachedRecord {
@@ -1840,7 +1840,7 @@ time.sleep(120)
         assert!(after.iter().any(|r| r.profile == "keep"));
 
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::env::remove_var("DSH_STARTER_HOME");
     }
 
     #[test]

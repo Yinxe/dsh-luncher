@@ -1,12 +1,12 @@
 [package]
-name = "dsh-launcher"
+name = "dsh-starter"
 version = "0.1.8"
 description = "Cross-platform launcher for @deepseek-ai/dsh"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "dsh_launcher_lib"
+name = "dsh_starter_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]

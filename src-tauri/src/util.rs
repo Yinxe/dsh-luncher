@@ -21,6 +21,29 @@ pub(crate) static DSH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(())
 #[cfg(test)]
 pub(crate) static NET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 备份文件名在 0.2.0 随产品改名从 `.launcher-bak` 变成 `.starter-bak`：把老用户**既有的
+/// 那份备份**就地把名字接过来，再交给调用方。
+///
+/// 为什么非搬不可：`backup_once` 这类「已有备份就不覆盖」的逻辑，一旦看不到旧备份，就会把
+/// **已经被改坏的现状**当成原件重新备份一遍 —— 用户真正的原始文件从此永久没了。
+/// 搬不动（权限、被占用）就返回旧路径，让调用方继续用旧名：备份宁可名字旧，也不能没有。
+pub fn adopt_legacy_backup(bak: &Path) -> PathBuf {
+    let Some(name) = bak.file_name().and_then(|n| n.to_str()) else {
+        return bak.to_path_buf();
+    };
+    let Some(stem) = name.strip_suffix(".starter-bak") else {
+        return bak.to_path_buf();
+    };
+    let legacy = bak.with_file_name(format!("{stem}.launcher-bak"));
+    if bak.exists() || !legacy.is_file() {
+        return bak.to_path_buf();
+    }
+    match std::fs::rename(&legacy, bak) {
+        Ok(()) => bak.to_path_buf(),
+        Err(_) => legacy,
+    }
+}
+
 pub fn home_dir() -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var("USERPROFILE").ok().map(PathBuf::from)
@@ -115,7 +138,7 @@ pub fn is_directly_executable(p: &Path) -> bool {
 /// 「一进页面一堆黑窗口」。
 ///
 /// 唯一的例外是**用户明确要一个终端窗口**的场景（「在新终端里启动 dsh」，
-/// 见 `launcher::spawn_terminal`）—— 那里必须保持可见，别顺手加进来。
+/// 见 `starter::spawn_terminal`）—— 那里必须保持可见，别顺手加进来。
 pub fn hide_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
@@ -578,7 +601,33 @@ pub fn split_args(input: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tilde, home_dir, is_safe_version, shell_quote, split_args, strip_tilde_prefix};
+    use super::{
+        adopt_legacy_backup, expand_tilde, home_dir, is_safe_version, shell_quote, split_args,
+        strip_tilde_prefix,
+    };
+
+    /// 旧备份文件要被接手：`.launcher-bak` → `.starter-bak`；新备份已存在时旧文件原地不动
+    #[test]
+    fn legacy_backup_file_is_adopted() {
+        let tmp = std::env::temp_dir().join(format!("dsh-bak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("cordis.patch.starter-bak");
+        let legacy = tmp.join("cordis.patch.launcher-bak");
+        std::fs::write(&legacy, "原始内容").unwrap();
+
+        assert_eq!(adopt_legacy_backup(&file), file);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "原始内容");
+        assert!(!legacy.exists(), "旧名备份应已改名接手");
+
+        // 新备份已在 → 旧文件留着不动，两份都不覆盖
+        std::fs::write(&legacy, "更早的").unwrap();
+        assert_eq!(adopt_legacy_backup(&file), file);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "原始内容");
+        assert!(legacy.exists());
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 
     /// 反例防护：除白名单外，生产代码里不得直接 `Command::new`。
     ///
@@ -588,16 +637,16 @@ mod tests {
     /// `util::hidden_command` / `util::spawn_command`。
     #[test]
     fn production_spawns_go_through_hidden_command() {
-        // 白名单只有两个：util 是统一出口本身；launcher 那个是用户**明确要的**可见终端窗口
+        // 白名单只有两个：util 是统一出口本身；starter.rs 那个是用户**明确要的**可见终端窗口
         fn violation(file: &str, line: &str) -> bool {
-            if file == "util.rs" || file == "launcher.rs" {
+            if file == "util.rs" || file == "starter.rs" {
                 return false;
             }
             line.contains("Command::new(")
         }
         // 匹配器自检：抓不到反例的话这个测试就是假绿
         assert!(violation("plugin.rs", r#"let c = Command::new("git");"#));
-        assert!(!violation("launcher.rs", r#"Command::new("cmd")"#));
+        assert!(!violation("starter.rs", r#"Command::new("cmd")"#));
 
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders = Vec::new();

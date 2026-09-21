@@ -10,7 +10,7 @@
 //! 所以这一层只做三件事：
 //! 1. **探测**：对候选前缀各发一次小请求（拿 GitHub520 的 hosts 当靶子，几十 KB），
 //!    记录往返毫秒；只保留真正能取到内容的，按快慢排序。
-//! 2. **缓存**：结果落盘 `~/.dsh-launcher/github-accel.json`，默认 6 小时内直接用。
+//! 2. **缓存**：结果落盘 `~/.dsh-starter/github-accel.json`，默认 6 小时内直接用。
 //! 3. **改写**：把 github 链接（git clone/fetch/pull、releases 资产、raw、gist）
 //!    拼上选中的前缀——git 走 `url.<prefix>https://github.com/.insteadOf`，
 //!    因此已有的克隆执行 `git pull` 也能吃到加速，命令本身仍显示原始地址。
@@ -123,7 +123,7 @@ pub fn now_unix() -> u64 {
 }
 
 pub fn cache_path() -> PathBuf {
-    crate::settings::launcher_home().join("github-accel.json")
+    crate::settings::starter_home().join("github-accel.json")
 }
 
 pub fn load_cache() -> Option<GhAccel> {
@@ -310,7 +310,7 @@ pub fn pick_prefix(accel: &GhAccel, preferred: Option<&str>, need_git: bool) -> 
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
-        .user_agent("dsh-launcher")
+        .user_agent("dsh-starter")
         .build()
         .map_err(|e| format!("构造 HTTP 客户端失败: {e}"))
 }

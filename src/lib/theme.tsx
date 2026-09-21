@@ -8,7 +8,15 @@ import {
 } from "react";
 
 export type Theme = "light" | "dark" | "system";
-const STORAGE_KEY = "dsh-launcher-theme";
+const STORAGE_KEY = "dsh-starter-theme";
+/** 0.2.0 改名前的键：读取时兜底认它一次，别让老用户升级后主题被重置 */
+const LEGACY_STORAGE_KEY = "dsh-launcher-theme";
+
+/** 已存的主题：新键优先，没有就回落到旧键（旧值一旦被写过就以新键为准） */
+function readStoredTheme(): Theme {
+  const saved = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
+  return saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
+}
 
 interface ThemeCtx {
   theme: Theme;
@@ -43,17 +51,14 @@ function withColorTransition(flush: () => void): void {
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    return saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
-  });
+  const [theme, setThemeState] = useState<Theme>(readStoredTheme);
   const [resolved, setResolved] = useState<"light" | "dark">(() => apply(theme));
 
   // 跟随系统实时切换
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => {
-      if ((localStorage.getItem(STORAGE_KEY) ?? "system") === "system") {
+      if (readStoredTheme() === "system") {
         withColorTransition(() => setResolved(apply("system")));
       }
     };

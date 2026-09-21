@@ -99,7 +99,7 @@ pub fn start_install(
 fn remove_version_dir(dir: &Path) -> Result<(), String> {
     if dir.is_symlink() {
         return Err(format!(
-            "{} 是符号链接，拒绝删除；请手动检查 ~/.dsh-launcher/versions",
+            "{} 是符号链接，拒绝删除；请手动检查 ~/.dsh-starter/versions",
             dir.display()
         ));
     }

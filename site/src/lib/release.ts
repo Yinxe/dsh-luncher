@@ -15,7 +15,7 @@
  * 页面会说清「现在能确定什么」，而不是装作一切正常。
  */
 
-export const REPO = "Yinxe/dsh-luncher";
+export const REPO = "Yinxe/dsh-starter";
 export const REPO_URL = `https://github.com/${REPO}`;
 
 /** 与 src-tauri/src/update_check.rs 的 R2_BASE 保持一致（改一处就得改两处） */
@@ -54,7 +54,7 @@ export const ASSETS: AssetDef[] = [
     ext: "exe",
     label: "Windows 安装向导（NSIS）",
     arch: "x64",
-    ghName: (v) => `DSH.Launcher_${v}_x64-setup.exe`,
+    ghName: (v) => `DSH.Starter_${v}_x64-setup.exe`,
     r2Key: "windows-x64-setup.exe",
     recommended: true,
     blurb: "双击安装，自动建快捷方式；应用内更新也走这个包。",
@@ -65,7 +65,7 @@ export const ASSETS: AssetDef[] = [
     ext: "msi",
     label: "Windows MSI 安装包",
     arch: "x64",
-    ghName: (v) => `DSH.Launcher_${v}_x64_en-US.msi`,
+    ghName: (v) => `DSH.Starter_${v}_x64_en-US.msi`,
     r2Key: "windows-x64.msi",
     blurb: "企业环境用 msiexec、组策略批量部署。",
   },
@@ -75,7 +75,7 @@ export const ASSETS: AssetDef[] = [
     ext: "AppImage",
     label: "Linux AppImage（免安装）",
     arch: "amd64",
-    ghName: (v) => `DSH.Launcher_${v}_amd64.AppImage`,
+    ghName: (v) => `DSH.Starter_${v}_amd64.AppImage`,
     r2Key: "linux-x86_64.AppImage",
     recommended: true,
     blurb: "一个文件就是整份程序：chmod +x 直接跑，自更新原位替换，不需要 root。",
@@ -86,7 +86,7 @@ export const ASSETS: AssetDef[] = [
     ext: "deb",
     label: "Debian / Ubuntu 软件包",
     arch: "amd64",
-    ghName: (v) => `DSH.Launcher_${v}_amd64.deb`,
+    ghName: (v) => `DSH.Starter_${v}_amd64.deb`,
     r2Key: "linux-x86_64.deb",
     blurb: "包管理器负责依赖与卸载；系统级安装，更新时需要授权。",
   },
@@ -96,7 +96,7 @@ export const ASSETS: AssetDef[] = [
     ext: "rpm",
     label: "Fedora / openSUSE 软件包",
     arch: "x86_64",
-    ghName: (v) => `DSH.Launcher-${v}-1.x86_64.rpm`,
+    ghName: (v) => `DSH.Starter-${v}-1.x86_64.rpm`,
     r2Key: "linux-x86_64.rpm",
     blurb: "rpm -U 安装，行为同 .deb。",
   },
@@ -106,7 +106,7 @@ export const ASSETS: AssetDef[] = [
     ext: "dmg",
     label: "macOS 磁盘映像（通用二进制）",
     arch: "universal — Apple Silicon + Intel",
-    ghName: (v) => `DSH.Launcher_${v}_universal.dmg`,
+    ghName: (v) => `DSH.Starter_${v}_universal.dmg`,
     r2Key: null,
     recommended: true,
     blurb: "Apple Silicon 与 Intel 通用，拖进「应用程序」即可。",
@@ -117,7 +117,7 @@ export const ASSETS: AssetDef[] = [
     ext: "app.tar.gz",
     label: "macOS 自动更新包",
     arch: "universal",
-    ghName: (v) => `DSH.Launcher_${v}_universal.app.tar.gz`,
+    ghName: (v) => `DSH.Starter_${v}_universal.app.tar.gz`,
     r2Key: "darwin-universal.app.tar.gz",
     updaterOnly: true,
     blurb: "Tauri 更新器专用产物，由客户端在应用内替换 .app，不用手装。",

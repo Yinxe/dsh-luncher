@@ -1,4 +1,4 @@
-# DSH Launcher — 开发规范（Agent 规则）
+# DSH Starter — 开发规范（Agent 规则）
 
 面向在本仓库工作的 AI Agent 与协作者。**这里的规则是硬性的**：违反其中任何一条，构建/CI 会失败或用户会直接看到问题。
 
@@ -37,6 +37,11 @@
   - 子进程语义保持「启动器退出 → 子进程被内核回收」；动 `procs.rs` 之前先看 PDEATHSIG 与独立进程注册表两套机制。
   - 新增命令：写在 `commands.rs` → 在 `lib.rs` 的 `generate_handler!` 注册 → 在 `src/api.ts` 加封装 → 在 `src/types.ts` 补类型。
   - 委托给 `dsh` 的能力一律走官方 CLI（`dsh plugin`、`dsh --profile` 等），不要自己改写 profile 的 `package.json` / `dsh.profile.bundles`。
+  - **改名遗留的兼容常量不许删**：`settings::LEGACY_HOME_DIR`（`~/.dsh-launcher`）、
+    `profile_cfg::LEGACY_MANAGE_MARKER` / `LEGACY_WEB_QUICK_MARKER`（`# dsh-launcher: …`）、
+    `util::adopt_legacy_backup` 里的 `.launcher-bak`、`theme.tsx` 的 `LEGACY_STORAGE_KEY`，
+    都是 0.2.0 改名后用来认**老用户既有数据**的。删掉它们 = 已装版本/profile 凭空消失、
+    旧插件开关再也关不掉、原始备份被改坏的现状覆盖。往外写一律用新名，读的时候两个名字都认。
 - **TypeScript / React**
   - 所有 `invoke` 走 `api.ts`，类型放 `types.ts`（字段与 Rust 的 `serde(rename_all = "camelCase")` 对齐）。
   - 轮询 / 事件订阅用 `events.*`，不要在各组件里散落 `invoke`。

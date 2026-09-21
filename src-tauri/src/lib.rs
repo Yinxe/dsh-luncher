@@ -4,7 +4,6 @@ mod diag;
 mod ghaccel;
 mod installed;
 mod installer;
-mod launcher;
 mod modelcfg;
 mod netports;
 mod plugin;
@@ -16,6 +15,7 @@ mod registry;
 mod runtime;
 mod semver;
 mod settings;
+mod starter;
 mod tray;
 mod update_check;
 mod verify;
@@ -34,14 +34,14 @@ pub fn run() {
     diag::info(
         "app",
         &format!(
-            "DSH Launcher v{} 启动：os={} arch={} run={} 日志目录={} 级别={} 数据目录={}",
+            "DSH Starter v{} 启动：os={} arch={} run={} 日志目录={} 级别={} 数据目录={}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH,
             diag::run_id(),
             diag::logs_dir().display(),
             diag::level_label(),
-            settings::launcher_home().display()
+            settings::starter_home().display()
         ),
     );
 
@@ -86,8 +86,8 @@ pub fn run() {
             commands::export_proc_log,
             commands::read_instance_log,
             commands::list_profiles,
-            commands::check_launcher_update,
-            commands::install_launcher_update,
+            commands::check_starter_update,
+            commands::install_starter_update,
             commands::reveal_folder,
             commands::open_external,
             commands::install_runtime,
@@ -171,7 +171,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building dsh launcher");
+        .expect("error while building dsh starter");
 
     app.run(|app, event| {
         // 启动器退出 → 结束所有内嵌 dsh 子进程

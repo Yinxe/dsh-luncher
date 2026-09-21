@@ -17,7 +17,7 @@ import { R2_MANIFEST_URL, REPO_URL, type ReleaseState } from "@/lib/release";
 export function SourceCompare({ state }: { state: ReleaseState }) {
   const v = state.version ?? "0.1.7";
   const r2Sample = `…/latest/windows-x64-setup.exe?v=${v}`;
-  const ghSample = `…/releases/download/v${v}/DSH.Launcher_${v}_x64-setup.exe`;
+  const ghSample = `…/releases/download/v${v}/DSH.Starter_${v}_x64-setup.exe`;
 
   const rows: { dim: string; r2: React.ReactNode; gh: React.ReactNode }[] = [
     {

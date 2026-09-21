@@ -45,7 +45,7 @@ import UpdateBanner from "./components/UpdateBanner";
 import AppSidebar from "./components/AppSidebar";
 import DshChangelogDialog from "./components/DshChangelogDialog";
 import type {
-  EnvironmentInfo, InstalledVersion, LauncherUpdateStatus, ProcEntry,
+  EnvironmentInfo, InstalledVersion, StarterUpdateStatus, ProcEntry,
   ProcExitEvent, ProcLogEvent, ProfileInfo, ProfileInstance, ProfileTarget,
   RegistryInfo, Settings as SettingsT, View,
 } from "./types";
@@ -89,7 +89,7 @@ export default function App() {
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [installed, setInstalled] = useState<InstalledVersion[]>([]);
   const [installJob, setInstallJob] = useState<{ version: string; logs: string[] } | null>(null);
-  const [update, setUpdate] = useState<LauncherUpdateStatus | null>(null);
+  const [update, setUpdate] = useState<StarterUpdateStatus | null>(null);
   const [updateApplying, setUpdateApplying] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ received: number; total: number } | null>(null);
   const [pendingUninstall, setPendingUninstall] = useState<string | null>(null);
@@ -261,7 +261,7 @@ export default function App() {
         refreshInstances();
         if (next.autoCheckVersions) refreshRemote();
         if (next.autoCheckUpdate) {
-          api.checkLauncherUpdate().then((u) => {
+          api.checkStarterUpdate().then((u) => {
             if (u.available || u.mode === "error") setUpdate(u);
           }).catch(() => undefined);
         }
@@ -323,7 +323,7 @@ export default function App() {
         addToast("err", `dsh ${e.version} 安装失败：${e.message.split("\n")[0]}`);
       }
     }));
-    track(events.onLauncherUpdate?.((s) => {
+    track(events.onStarterUpdate?.((s) => {
       setUpdate(s);
       // 静默自动更新：后端已经在下载了，这里把进度条顶起来。
       // 必须和后端 emit_startup_checks 的门禁一致（builtin + autoInstall + 不需要提权），
@@ -333,7 +333,7 @@ export default function App() {
         setUpdateProgress({ received: 0, total: 0 });
       }
     }));
-    track(events.onLauncherUpdateProgress?.((p) => setUpdateProgress(p)));
+    track(events.onStarterUpdateProgress?.((p) => setUpdateProgress(p)));
     track(events.onProcLog?.((e: ProcLogEvent) => {
       const hit = /dsh web:\s*(https?:\/\/\S+)/.exec(e.line);
       setProcs((m) => {
@@ -450,7 +450,7 @@ export default function App() {
       addToast(
         "ok",
         v === "detached"
-          ? "启动方式已切换为独立进程（后台常驻，日志写入 ~/.dsh-launcher/instance-logs）"
+          ? "启动方式已切换为独立进程（后台常驻，日志写入 ~/.dsh-starter/instance-logs）"
           : "启动方式已切换为子进程（随启动器退出结束）"
       );
     } catch (e) {
@@ -530,7 +530,7 @@ export default function App() {
   const doCheckUpdate = useCallback(async () => {
     try {
       // 后端统一决策：配了自建清单就查清单，否则查内置 updater（后者可在应用内安装）
-      const status = await api.checkLauncherUpdate();
+      const status = await api.checkStarterUpdate();
       setUpdate(status);
       if (status.available) return;
       if (status.mode === "manifest" || status.mode === "builtin") {
@@ -546,7 +546,7 @@ export default function App() {
     setUpdateProgress(null);
     try {
       // 非 Windows 上这个调用不会返回：安装成功后进程直接重启
-      const msg = await api.installLauncherUpdate();
+      const msg = await api.installStarterUpdate();
       addToast("ok", msg);
       setUpdateApplying(false);
     } catch (e) {
@@ -581,7 +581,7 @@ export default function App() {
         // 否则用户启动完看不到任何反馈（只能去 Profile 实例页找）
         addToast(
           "ok",
-          `profile「${info.profile}」已以独立进程启动（PID ${info.id}），日志：~/.dsh-launcher/instance-logs`
+          `profile「${info.profile}」已以独立进程启动（PID ${info.id}），日志：~/.dsh-starter/instance-logs`
         );
         await refreshInstances();
         setActiveProc(info.id);
@@ -1002,7 +1002,7 @@ export default function App() {
                       <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                       <span className="font-mono">Node v{env.node}</span>
                       <span className="text-xs text-muted-foreground">
-                        {env.nodePath?.includes(".dsh-launcher") ? "（隔离 · 仅本软件使用）" : "（系统级）"}
+                        {env.nodePath?.includes(".dsh-starter") ? "（隔离 · 仅本软件使用）" : "（系统级）"}
                       </span>
                     </div>
                   ) : (
@@ -1316,7 +1316,7 @@ export default function App() {
                 </Tabs>
                 <span className="text-[11px] text-muted-foreground">
                   {settings.launchMode === "detached"
-                    ? "独立进程随系统常驻：关闭启动器后 DSH 继续运行，重启启动器后会自动扫描识别，日志写入 ~/.dsh-launcher/instance-logs"
+                    ? "独立进程随系统常驻：关闭启动器后 DSH 继续运行，重启启动器后会自动扫描识别，日志写入 ~/.dsh-starter/instance-logs"
                     : "子进程模式：日志回传「实例终端」，启动器退出时结束所有 DSH"}
                 </span>
               </div>
@@ -1495,7 +1495,7 @@ export default function App() {
                               <Button
                                 variant="ghost"
                                 size="icon"
-                                title="删除 profile（移入 ~/.dsh-launcher/deleted-profiles，可找回）"
+                                title="删除 profile（移入 ~/.dsh-starter/deleted-profiles，可找回）"
                                 onClick={() => setDeleteTarget(row.profile)}
                               >
                                 <Trash2 />
@@ -1645,7 +1645,7 @@ export default function App() {
           <AlertDialogHeader>
             <AlertDialogTitle>删除 profile「{deleteTarget}」？</AlertDialogTitle>
             <AlertDialogDescription>
-              配置目录会被移动到 <span className="font-mono">~/.dsh-launcher/deleted-profiles/</span>
+              配置目录会被移动到 <span className="font-mono">~/.dsh-starter/deleted-profiles/</span>
               （不会直接销毁，可手动找回）。dsh 内置保留 profile 已受保护、不会出现在这里；
               实例运行中会先被拒绝。
             </AlertDialogDescription>

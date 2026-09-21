@@ -8,7 +8,7 @@ const repoRoot = path.resolve(__dirname, "..");
 /*
  * 下载页（GitHub Pages）构建配置。
  *
- * base 用相对路径 `./`：项目站点（yinxe.github.io/dsh-luncher/）与将来绑自定义域
+ * base 用相对路径 `./`：项目站点（yinxe.github.io/dsh-starter/）与将来绑自定义域
  * （根路径）都能直接跑，不需要改配置 —— 这个页面没有前端路由，相对资源路径是安全的。
  *
  * 页面要用仓库里的品牌资源（public/dsh-logo.svg）与截图（images/preview.png），

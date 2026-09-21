@@ -92,7 +92,9 @@ pub fn snapshot(profile_dir: &Path) -> ProfileSnapshot {
     }
 }
 
-/// 备份到 `<file>.launcher-bak`（只在首次生成，避免反复覆盖掉更早的好状态）
+/// 备份到 `<file>.starter-bak`（只在首次生成，避免反复覆盖掉更早的好状态）。
+/// 0.2.0 改名前的 `<file>.launcher-bak` 会被先接手过来，免得把已被改坏的现状
+/// 当成原件重新备份、把用户真正的原始文件挤掉。
 fn backup_once(path: &Path) -> Result<(), String> {
     if !path.is_file() {
         return Ok(());
@@ -101,7 +103,7 @@ fn backup_once(path: &Path) -> Result<(), String> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let bak = path.with_file_name(format!("{file}.launcher-bak"));
+    let bak = crate::util::adopt_legacy_backup(&path.with_file_name(format!("{file}.starter-bak")));
     if bak.is_file() {
         return Ok(());
     }
@@ -892,7 +894,7 @@ mod tests {
             Some(true)
         );
         // 备份在（可回退）
-        assert!(dir.join("pnpm-workspace.yaml.launcher-bak").is_file());
+        assert!(dir.join("pnpm-workspace.yaml.starter-bak").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -953,7 +955,7 @@ mod tests {
         assert_eq!(s.dep_names(), vec!["b".to_string()]);
         assert_eq!(s.bundle_names(), vec!["b".to_string()]);
         // 备份存在且保留原始内容（可回退）
-        assert!(dir.join("package.json.launcher-bak").is_file());
+        assert!(dir.join("package.json.starter-bak").is_file());
         // 幂等：没这个包时不再改
         assert!(!drop_from_manifest(&dir, "zzz").unwrap());
         let _ = std::fs::remove_dir_all(&dir);

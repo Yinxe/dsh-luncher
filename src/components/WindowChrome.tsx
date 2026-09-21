@@ -93,7 +93,7 @@ export default function WindowChrome({ children }: { children: ReactNode }) {
         {/* 品牌标识跟侧栏头部刻意区别开：这里是「窗口标签」，字号更小、色调更弱 */}
         <div className="titlebar-brand flex min-w-0 items-center gap-2">
           <img src="/dsh-logo.svg" alt="DSH" className="h-4 w-4 shrink-0" draggable={false} />
-          <span className="truncate text-[12px] font-semibold tracking-tight">DSH Launcher</span>
+          <span className="truncate text-[12px] font-semibold tracking-tight">DSH Starter</span>
         </div>
         <div className="min-w-2 flex-1" />
         {!IS_MAC && (

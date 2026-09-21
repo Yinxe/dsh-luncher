@@ -575,7 +575,7 @@ mod tests {
         }
 
         // 首次保存时源文件不存在，不产生备份
-        assert!(!credentials_path().with_file_name(".credentials.launcher-bak").exists());
+        assert!(!credentials_path().with_file_name(".credentials.starter-bak").exists());
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");
     }
@@ -642,7 +642,7 @@ mod tests {
         assert!(rec.payload_keys.contains(&"secret".to_string()));
 
         // 备份产生且内容是保存前的版本
-        let bak = std::fs::read_to_string(dir.with_file_name(".credentials.launcher-bak")).unwrap();
+        let bak = std::fs::read_to_string(dir.with_file_name(".credentials.starter-bak")).unwrap();
         assert!(bak.contains("old-a") && bak.contains("BBB"));
 
         std::fs::remove_dir_all(&tmp).ok();

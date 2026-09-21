@@ -39,7 +39,7 @@ export function Faq({ state }: { state: ReleaseState }) {
       a: (
         <>
           不会。每个 dsh 版本装在{" "}
-          <code className="num text-[12px]">~/.dsh-launcher/versions/&lt;版本&gt;</code> 的独立目录里，
+          <code className="num text-[12px]">~/.dsh-starter/versions/&lt;版本&gt;</code> 的独立目录里，
           互不干扰，也不动全局 npm 前缀；卸载就是删目录。插件装在 profile 自己的{" "}
           <code className="num text-[12px]">node_modules</code> 里。
         </>
@@ -79,7 +79,7 @@ export function Faq({ state }: { state: ReleaseState }) {
         <>
           应用没有做 Apple 公证。首次打开时在「系统设置 → 隐私与安全性」点「仍要打开」，或执行{" "}
           <code className="num text-[12px]">
-            xattr -dr com.apple.quarantine "/Applications/DSH Launcher.app"
+            xattr -dr com.apple.quarantine "/Applications/DSH Starter.app"
           </code>
           。上面的安装说明里也有这条。
         </>
@@ -89,7 +89,7 @@ export function Faq({ state }: { state: ReleaseState }) {
       q: "数据都存在哪？怎么彻底删掉？",
       a: (
         <>
-          启动器数据在 <code className="num text-[12px]">~/.dsh-launcher/</code>
+          启动器数据在 <code className="num text-[12px]">~/.dsh-starter/</code>
           （设置、内置运行时、git 插件克隆、分类日志、各版本目录）；dsh 自己的数据仍在{" "}
           <code className="num text-[12px]">$DSH_HOME</code>（默认{" "}
           <code className="num text-[12px]">~/.dsh</code>），profile 与凭据都在那儿。

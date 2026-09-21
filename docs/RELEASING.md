@@ -1,6 +1,6 @@
 # 发版手册
 
-适用对象：维护 DSH Launcher 的人（包括 AI Agent）。**CHANGELOG.md 是发布说明的唯一来源** ——
+适用对象：维护 DSH Starter 的人（包括 AI Agent）。**CHANGELOG.md 是发布说明的唯一来源** ——
 GitHub Release 正文、`latest.json` 里的 `notes`、客户端「发现新版本」弹窗里看到的特性说明，
 全部由它派生。所以发版的关键动作只有一个：**在下个版本号下写清用户能看到的变化。**
 
@@ -133,7 +133,7 @@ npm run notes:archive    # 从 CHANGELOG 重新生成 docs/releases/vX.Y.Z.md
 gh release view v0.1.3 --json body --jq .body
 
 # 客户端实际拿到的 notes（更新检查就是读这个文件）
-curl -sL https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.json | head -c 400
+curl -sL https://github.com/Yinxe/dsh-starter/releases/latest/download/latest.json | head -c 400
 ```
 
 再打开旧版本客户端点「检查更新」：横幅应出现「查看新特性」，弹窗里就是这份说明。
@@ -143,7 +143,7 @@ curl -sL https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.js
 设置里填了「更新清单地址」时，客户端走 `check_manifest` 读 JSON：
 
 ```json
-{ "version": "0.1.3", "notes": "把 CHANGELOG 段落贴进来即可", "url": "https://…/DSH-Launcher-0.1.3.AppImage" }
+{ "version": "0.1.3", "notes": "把 CHANGELOG 段落贴进来即可", "url": "https://…/DSH-Starter-0.1.3.AppImage" }
 ```
 
 `notes` 建议直接复制 `npm run notes` 的输出（不要手写第二份，会和 CHANGELOG 漂移）。
@@ -160,23 +160,27 @@ curl -sL https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.js
 
 ### 一次性准备（已完成的部分标 ✅）
 
-1. ✅ **建桶并开公共访问**：
+1. ✅ **建桶并开公共访问**（旧桶 `dsh-luncher-release` 已建好；**改名后的新桶还没建**，
+   见后面「换桶待办（0.2.0 遗留）」）：
 
    ```bash
-   npx wrangler r2 bucket create dsh-luncher-release --location apac
-   npx wrangler r2 bucket dev-url enable dsh-luncher-release
+   npx wrangler r2 bucket create dsh-starter-release --location apac
+   npx wrangler r2 bucket dev-url enable dsh-starter-release
    ```
 
-   公共基址形如 `https://pub-<hash>.r2.dev`，**必须同时写进两处且保持一致**：
+   公共基址形如 `https://pub-<hash>.r2.dev`，**必须同时写进下面几处且保持一致**：
 
    | 位置 | 用途 |
    | --- | --- |
    | `src-tauri/src/update_check.rs` 的 `R2_BASE` | 客户端用它拼清单地址 |
+   | `site/src/lib/release.ts` 的 `R2_BASE` | 下载页拼自建源直链 |
    | `.github/workflows/release.yml` 的 `R2_PUBLIC_BASE` | CI 用它改写清单里的下载地址 |
+   | `.github/workflows/release.yml` 的 `R2_BUCKET` | CI 往哪个桶上传（必须与基址同一个桶） |
 
 2. ⬜ **建 R2 API Token**（只能网页建 —— 用 OAuth 登录的 wrangler 没有建 token 的权限）：
    Cloudflare Dashboard → R2 → API → Manage API Tokens → Create API Token →
-   权限 `Object Read & Write`，Scope 选 `dsh-luncher-release`。
+   权限 `Object Read & Write`，Scope 选桶（当前 `dsh-luncher-release`；换桶后要把
+   `dsh-starter-release` 也加进 Scope，否则上传会 403）。
    记下 **Access Key ID** 与 **Secret Access Key**。
 
 3. ⬜ **填三个 secrets**（仓库 Settings → Secrets and variables → Actions）：
@@ -189,6 +193,27 @@ curl -sL https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.js
 
    没配也能正常发版：`publish-r2` 作业会自动跳过并打一条 **warning**（不是静默的 notice ——
    客户端默认走 R2，这里跳过就意味着 R2 上的清单会停在旧版本，得照本节末尾手动补传）。
+
+### 换桶待办（0.2.0 遗留）
+
+0.2.0 把产品改名成 DSH Starter，桶名理应跟着换，但 **R2 不支持改桶名**，只能新建再迁。
+**新桶此刻还没建**，所以 CI 与客户端实际仍在用旧桶 `dsh-luncher-release`
+（`R2_BASE` = `https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev`）——
+这一状态下发布流程与平时完全一样，不需要任何额外操作。要完成换桶：
+
+1. `npx wrangler r2 bucket create dsh-starter-release --location apac`
+2. `npx wrangler r2 bucket dev-url enable dsh-starter-release`，记下新的 `pub-<新hash>.r2.dev`
+3. 把第 1 节表格里的**四处一次性全换**（两处基址 + 桶名），并给 R2 API Token 的 Scope 加上新桶、
+   更新仓库 secret
+4. 下次发布会把清单与安装包写进新桶。旧桶可以留着不删：它的清单会停在最后一个写进去的版本，
+   不再更新，也不再被引用
+
+⚠️ **为什么必须一次性全换**：更新器按顺序取「第一个能解析的清单」，而 R2 排在 GitHub 兜底之前。
+只换一半（例如上传改到新桶、客户端仍读旧桶）时，旧桶那份**陈旧却依然有效**的清单会被先取到，
+客户端据此判定「已是最新」，**连 GitHub 兜底都走不到 —— 静默卡死更新，且不报任何错**。
+
+> 本文档下面的桶名、布局与手动补传命令都按**换桶之后**的目标状态写（`dsh-starter-release`）；
+> 换桶之前要手动补传，请把命令里的桶名换成 `dsh-luncher-release`。
 
 ### 每次发布自动发生什么
 
@@ -210,11 +235,11 @@ curl -sL https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.js
 ### 桶里的布局（固定键，只有一份 latest）
 
 ```
-dsh-luncher-release/
+dsh-starter-release/
 ├── latest.json                        # 更新清单：每次覆盖（no-cache）
 └── latest/                            # 固定键（immutable + ?v=<版本> 指纹）
-    ├── windows-x64-setup.exe          # NSIS（windows-x86_64-nsis）→ 下载名 DSH.Launcher_<版本>_x64-setup.exe
-    ├── windows-x64.msi                # MSI（windows-x86_64 / -msi）→ 下载名 DSH.Launcher_<版本>_x64_en-US.msi
+    ├── windows-x64-setup.exe          # NSIS（windows-x86_64-nsis）→ 下载名 DSH.Starter_<版本>_x64-setup.exe
+    ├── windows-x64.msi                # MSI（windows-x86_64 / -msi）→ 下载名 DSH.Starter_<版本>_x64_en-US.msi
     ├── darwin-universal.app.tar.gz    # macOS 三架构共用 universal 包
     ├── linux-x86_64.AppImage
     ├── linux-x86_64.deb
@@ -235,10 +260,10 @@ dsh-luncher-release/
 对象键被改写成「平台名」，浏览器/下载器就会拿键的最后一段当保存名 —— 人从直链下载
 会得到 `windows-x64-setup.exe`：没有版本号，也认不出是谁的包。所以每个对象上传时
 都要带 `Content-Disposition: attachment; filename="<原始资产名>"`，下载保存名才是
-`DSH.Launcher_0.1.6_x64-setup.exe`。
+`DSH.Starter_0.1.6_x64-setup.exe`。
 
 - 这个头**更新器不看**：它按文件头魔数判 exe/msi/app.tar.gz，落盘用自己的临时名
-  （`DSH Launcher-<版本>-installer.exe`）。所以它对自动更新零影响，纯粹为人服务。
+  （`DSH Starter-<版本>-installer.exe`）。所以它对自动更新零影响，纯粹为人服务。
 - `scripts/r2-manifest.mjs --list-files` 的 TSV 第三列就是算好的这个头，CI 直接透传；
   手写命令时别忘了它，否则文件名又会「丢」。
 - 更新一次**已发布版本**的对象元数据（字节不变）时，路径没变、CDN 边缘缓存里的那份
@@ -273,11 +298,11 @@ node scripts/r2-manifest.mjs --in r2-upload/latest.json --assets-map r2-upload/a
 # upload.tsv 每行是「本地文件 <TAB> R2 键 <TAB> Content-Disposition」；
 # 用本机 OAuth 登录态即可，无需 S3 凭据：
 while IFS=$'\t' read -r local key disposition; do
-  npx wrangler r2 object put "dsh-luncher-release/latest/$key" --file "r2-upload/$local" \
+  npx wrangler r2 object put "dsh-starter-release/latest/$key" --file "r2-upload/$local" \
     --content-type application/octet-stream --content-disposition "$disposition" \
     --cache-control "public, max-age=31536000, immutable" --remote
 done < r2-upload/upload.tsv
-npx wrangler r2 object put dsh-luncher-release/latest.json --file r2-upload/latest.json \
+npx wrangler r2 object put dsh-starter-release/latest.json --file r2-upload/latest.json \
   --content-type application/json --cache-control "no-cache, max-age=0" --remote
 ```
 
@@ -285,13 +310,13 @@ npx wrangler r2 object put dsh-luncher-release/latest.json --file r2-upload/late
 
 - 想换自定义域名：改「一次性准备」表格里的两处基址即可。`r2.dev` 是 Cloudflare 的托管
   开发域名、有速率限制，流量大了建议绑自定义域名。
-- 早期按版本号命名的对象（`DSH.Launcher_0.1.5_*.exe`）已删除；固定键方案下不会再产生，
+- 早期按版本号命名的对象（`DSH.Starter_0.1.5_*.exe`）已删除；固定键方案下不会再产生，
   版本信息改由 `Content-Disposition` 和清单里的 `?v=` 承载。
 
 ## 8. 下载页（GitHub Pages）
 
 站点源码在 `site/`，由 `.github/workflows/pages.yml` 部署到
-<https://yinxe.github.io/dsh-luncher/>（push 到 `main` 且改动 `site/**` 时才跑）。
+<https://yinxe.github.io/dsh-starter/>（push 到 `main` 且改动 `site/**` 时才跑）。
 
 **它与发版是解耦的**：页面在浏览器里现拉自建源清单与 GitHub Release API 得到版本号、体积与直链，
 所以发新版**不需要重新构建页面**，pages 作业也不必等 release 作业。

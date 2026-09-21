@@ -579,7 +579,7 @@ export default function InstallPluginDialog({
                   </Button>
                 </div>
                 <FieldDescription className={descCls}>
-                  克隆到 <span className="font-mono">~/.dsh-launcher/git-plugins/&lt;owner&gt;-&lt;repo&gt;</span>，
+                  克隆到 <span className="font-mono">~/.dsh-starter/git-plugins/&lt;owner&gt;-&lt;repo&gt;</span>，
                   再以 <span className="font-mono">link:</span> 安装。更新方式 = 在该目录 <span className="font-mono">git pull</span>
                   （插件页「本地克隆仓库」里一键执行）。<strong>探测 = 先克隆再本地扫描</strong>：慢一点，
                   但候选与 <span className="font-mono">lib/</span> 判定就是安装用的那份工作树（不再查 jsDelivr 索引）。

@@ -16,7 +16,7 @@ import type { EnvironmentInfo, Settings as SettingsT, View } from "../types";
 
 /** 项目仓库：源码、问题反馈与更新日志都在这里（主栏底栏的「官方源 / 数据目录」并进侧栏后，
  *  侧栏底部顺带给出这个入口，省得用户去设置里翻仓库地址） */
-const REPO_URL = "https://github.com/Yinxe/dsh-luncher";
+const REPO_URL = "https://github.com/Yinxe/dsh-starter";
 const CHANGELOG_URL = `${REPO_URL}/blob/main/CHANGELOG.md`;
 
 interface Props {
@@ -80,13 +80,13 @@ function InfoRow({
 /**
  * 把绝对路径缩成 `~/…` 形式。
  *
- * home 从启动器数据目录反推（后端 `launcher_home()` 固定是 `<home>/.dsh-launcher`），
- * 不引额外的环境字段：宽度只有 200px 出头的侧栏里，`/home/yinxin/.dsh-launcher/versions`
- * 这种整串路径会被截掉大半，`~/.dsh-launcher/versions` 才看得清。
- * 反推失败（自定义 DSH_LAUNCHER_HOME 之类）就原样显示，只靠截断 + tooltip 兜底。
+ * home 从启动器数据目录反推（后端 `starter_home()` 固定是 `<home>/.dsh-starter`），
+ * 不引额外的环境字段：宽度只有 200px 出头的侧栏里，`/home/yinxin/.dsh-starter/versions`
+ * 这种整串路径会被截掉大半，`~/.dsh-starter/versions` 才看得清。
+ * 反推失败（自定义 DSH_STARTER_HOME 之类）就原样显示，只靠截断 + tooltip 兜底。
  */
-function tildePath(p: string, launcherHome: string): string {
-  const home = launcherHome.match(/^(.*)[/\\]\.dsh-launcher[/\\]?$/)?.[1];
+function tildePath(p: string, starterHome: string): string {
+  const home = starterHome.match(/^(.*)[/\\]\.dsh-starter[/\\]?$/)?.[1];
   if (!home) return p;
   if (p === home) return "~";
   if (p.startsWith(`${home}/`) || p.startsWith(`${home}\\`)) return `~${p.slice(home.length)}`;
@@ -157,7 +157,7 @@ export default function AppSidebar({
           {/* 走 public/ 静态资源，避免把 SVG 当 JS 模块加载（见 index.html 的 favicon） */}
           <img src="/dsh-logo.svg" alt="DSH" className="h-8 w-8 shrink-0" draggable={false} />
           <div className="min-w-0 leading-tight">
-            <div className="truncate text-[13px] font-bold tracking-tight">DSH Launcher</div>
+            <div className="truncate text-[13px] font-bold tracking-tight">DSH Starter</div>
             <div className="truncate text-[10px] text-muted-foreground">
               @deepseek-ai/dsh · v{env.appVersion}
             </div>
@@ -286,7 +286,7 @@ export default function AppSidebar({
             <div className="flex items-center gap-2 px-2.5">
               <GitHubMark className="size-3.5 shrink-0 text-muted-foreground" />
               <div className="min-w-0 flex-1">
-                <div className="truncate font-mono text-[11px] font-semibold">Yinxe/dsh-luncher</div>
+                <div className="truncate font-mono text-[11px] font-semibold">Yinxe/dsh-starter</div>
                 <div className="truncate text-[10px] text-muted-foreground">源码 · 问题反馈 · 更新日志</div>
               </div>
             </div>

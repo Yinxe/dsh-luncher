@@ -21,7 +21,7 @@ interface Props {
   onChanged: () => void;
 }
 
-/** 回收站：删除的 profile 只是被移入 ~/.dsh-launcher/deleted-profiles，可还原或彻底删除 */
+/** 回收站：删除的 profile 只是被移入 ~/.dsh-starter/deleted-profiles，可还原或彻底删除 */
 export default function TrashDialog({ open, onClose, onToast, onChanged }: Props) {
   const [items, setItems] = useState<DeletedProfile[]>([]);
   const [loading, setLoading] = useState(false);
@@ -85,7 +85,7 @@ export default function TrashDialog({ open, onClose, onToast, onChanged }: Props
               {items.length > 0 && <Badge variant="secondary">{items.length}</Badge>}
             </DialogTitle>
             <DialogDescription>
-              删除 profile 时不会直接销毁，而是移入 <span className="font-mono">~/.dsh-launcher/deleted-profiles/</span>。
+              删除 profile 时不会直接销毁，而是移入 <span className="font-mono">~/.dsh-starter/deleted-profiles/</span>。
               可在这里还原（回到 profiles 目录）或彻底删除（不可恢复）。还原时若已存在同名
               profile 会被拒绝，避免覆盖。
             </DialogDescription>

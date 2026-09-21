@@ -47,7 +47,7 @@ fn read_pkg_version(pkg_dir: &Path) -> Option<String> {
     j.get("version")?.as_str().map(|s| s.to_string())
 }
 
-/// 扫描启动器管理的 ~/.dsh-launcher/versions/*
+/// 扫描启动器管理的 ~/.dsh-starter/versions/*
 pub fn scan_managed(node: Option<&Path>) -> Vec<InstalledVersion> {
     let mut out = Vec::new();
     let vdir = settings::versions_dir();

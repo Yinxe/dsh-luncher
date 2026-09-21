@@ -78,7 +78,7 @@ pub async fn fetch_registry(registry_base: &str) -> Result<RegistryInfo, String>
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
-        .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("dsh-starter/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("初始化 HTTP 客户端失败: {e}"))?;
 
@@ -409,7 +409,7 @@ fn http_client() -> Result<reqwest::Client, String> {
 fn client_with(timeout: Duration) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .timeout(timeout)
-        .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")));
+        .user_agent(concat!("dsh-starter/", env!("CARGO_PKG_VERSION")));
     builder
         .build()
         .map_err(|e| format!("初始化 HTTP 客户端失败: {e}"))

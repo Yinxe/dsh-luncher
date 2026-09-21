@@ -8,7 +8,7 @@ use crate::settings::Settings;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LauncherUpdateStatus {
+pub struct StarterUpdateStatus {
     pub available: bool,
     pub current: String,
     pub latest: Option<String>,
@@ -24,13 +24,13 @@ pub struct LauncherUpdateStatus {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LauncherUpdateProgress {
+pub struct StarterUpdateProgress {
     pub received: u64,
     pub total: u64,
 }
 
-fn status(current: &str, mode: &str, message: Option<String>) -> LauncherUpdateStatus {
-    LauncherUpdateStatus {
+fn status(current: &str, mode: &str, message: Option<String>) -> StarterUpdateStatus {
+    StarterUpdateStatus {
         available: false,
         current: current.into(),
         latest: None,
@@ -227,16 +227,16 @@ mod tests {
     /// 套错会拼成 `https://gh-proxy.com/https://dl.example.com/...`
     #[test]
     fn accel_never_rewrites_self_hosted_source() {
-        let r2 = "https://dl.example.com/dsh-launcher/latest.json";
+        let r2 = "https://dl.example.com/dsh-starter/latest.json";
         assert_eq!(accel_url(r2, "https://gh-proxy.com/"), r2);
-        let gh = "https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.json";
+        let gh = "https://github.com/Yinxe/dsh-starter/releases/latest/download/latest.json";
         assert_ne!(accel_url(gh, "https://gh-proxy.com/"), gh);
     }
 }
 
 /// 用内置 Tauri updater 检查（endpoints / pubkey 取自 tauri.conf.json 的 plugins.updater）。
 /// 只有这个模式能「下载并安装 + 重启」，自建清单只能跳转下载页。
-pub async fn check_builtin(app: &AppHandle, settings: &Settings) -> LauncherUpdateStatus {
+pub async fn check_builtin(app: &AppHandle, settings: &Settings) -> StarterUpdateStatus {
     let current = app.package_info().version.to_string();
 
     let updater = match build_updater(app, settings) {
@@ -252,7 +252,7 @@ pub async fn check_builtin(app: &AppHandle, settings: &Settings) -> LauncherUpda
 
     let installable = installable();
     match updater.check().await {
-        Ok(Some(u)) => LauncherUpdateStatus {
+        Ok(Some(u)) => StarterUpdateStatus {
             available: true,
             current,
             latest: Some(u.version.clone()),
@@ -272,7 +272,7 @@ pub async fn check_builtin(app: &AppHandle, settings: &Settings) -> LauncherUpda
 }
 
 /// 统一更新检查入口：自建清单优先，未配置清单时回落到内置 updater
-pub async fn check(app: &AppHandle, settings: &Settings) -> LauncherUpdateStatus {
+pub async fn check(app: &AppHandle, settings: &Settings) -> StarterUpdateStatus {
     let manifest = settings.update_manifest_url.trim();
     if !manifest.is_empty() {
         let current = app.package_info().version.to_string();
@@ -294,8 +294,8 @@ async fn download_pkg(
             move |len, total| {
                 received += len as u64;
                 let _ = app2.emit(
-                    "launcher-update-progress",
-                    LauncherUpdateProgress {
+                    "starter-update-progress",
+                    StarterUpdateProgress {
                         received,
                         total: total.unwrap_or(0),
                     },
@@ -341,8 +341,8 @@ pub async fn install_builtin(app: &AppHandle, settings: &Settings) -> Result<Str
                 Err(e) => {
                     // 代理不支持这个地址 / 中途断流：把进度回零后直连重试
                     let _ = app.emit(
-                        "launcher-update-progress",
-                        LauncherUpdateProgress { received: 0, total: 0 },
+                        "starter-update-progress",
+                        StarterUpdateProgress { received: 0, total: 0 },
                     );
                     eprintln!("[updater] 加速下载失败，回退直连：{e}");
                     download_pkg(&update, app)
@@ -370,10 +370,10 @@ pub async fn install_builtin(app: &AppHandle, settings: &Settings) -> Result<Str
 }
 
 /// 拉取自建更新清单 {version, notes?, url?} 并与当前版本比较
-pub async fn check_manifest(url: &str, current: &str) -> LauncherUpdateStatus {
+pub async fn check_manifest(url: &str, current: &str) -> StarterUpdateStatus {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
-        .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("dsh-starter/", env!("CARGO_PKG_VERSION")))
         .build()
     {
         Ok(c) => c,
@@ -401,7 +401,7 @@ pub async fn check_manifest(url: &str, current: &str) -> LauncherUpdateStatus {
     match latest.as_deref() {
         Some(l) => {
             let available = crate::semver::compare(l, current) == std::cmp::Ordering::Greater;
-            LauncherUpdateStatus {
+            StarterUpdateStatus {
                 available,
                 current: current.into(),
                 latest: Some(l.to_string()),

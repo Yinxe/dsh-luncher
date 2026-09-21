@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DSH Launcher",
+  "productName": "DSH Starter",
   "version": "0.1.8",
-  "identifier": "com.deepseek.dsh-launcher",
+  "identifier": "com.deepseek.dsh-starter",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "DSH Launcher",
+        "title": "DSH Starter",
         "label": "main",
         "width": 1100,
         "height": 740,
@@ -45,7 +45,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM2QzcxQ0FFNzhCRDBCMzUKUldRMUM3MTRyaHpITnNXZjhzamRQVEtaSUx4cjNWMmxGbXRKOGQwc2dIaDI3WW5HT1c3UTkxcXMK",
       "endpoints": [
-        "https://github.com/Yinxe/dsh-luncher/releases/latest/download/latest.json"
+        "https://github.com/Yinxe/dsh-starter/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

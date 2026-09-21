@@ -634,7 +634,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
                   同时删除本地克隆目录 <span className="font-mono">{pendingUninstall.cloneName}</span>
                 </label>
                 <p className="text-[10.5px] leading-relaxed text-muted-foreground">
-                  该依赖来自 clone+link 安装，删除后 ~/.dsh-launcher/git-plugins 下的这份克隆
+                  该依赖来自 clone+link 安装，删除后 ~/.dsh-starter/git-plugins 下的这份克隆
                   （含未提交改动）会一并移除；不勾选则保留，可在「本地克隆仓库」里单独管理。
                 </p>
               </div>

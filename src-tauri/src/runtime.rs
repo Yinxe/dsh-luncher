@@ -12,7 +12,7 @@ use crate::settings::{self, Settings};
 pub const NODE_VERSION: &str = "24.15.0";
 
 pub fn runtime_root() -> PathBuf {
-    settings::launcher_home().join("runtime")
+    settings::starter_home().join("runtime")
 }
 
 pub fn runtime_dir() -> PathBuf {
@@ -97,7 +97,7 @@ pub async fn install(app: tauri::AppHandle, settings: &Settings) -> Result<Strin
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(600))
-        .user_agent(concat!("dsh-launcher/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("dsh-starter/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("初始化 HTTP 客户端失败: {e}"))?;
     let resp = client

@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CHANGELOG = join(ROOT, "CHANGELOG.md");
 const ARCHIVE_DIR = join(ROOT, "docs", "releases");
-const REPO = "https://github.com/Yinxe/dsh-luncher";
+const REPO = "https://github.com/Yinxe/dsh-starter";
 
 const PACKAGE_FILES = [
   "src-tauri/tauri.conf.json",
@@ -102,7 +102,7 @@ function archivePath(version) {
 
 function archiveContent(version, date, body) {
   return [
-    `# DSH Launcher v${version} 发布说明`,
+    `# DSH Starter v${version} 发布说明`,
     "",
     date ? `发布日期：${date}` : "",
     `GitHub Release：${REPO}/releases/tag/v${version}`,

@@ -915,7 +915,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dsh-launcher"
+name = "dsh-starter"
 version = "0.1.8"
 dependencies = [
  "libc",

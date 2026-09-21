@@ -6,8 +6,8 @@ import type {
   InstallLogEvent,
   InstanceLog,
   InstalledVersion,
-  LauncherUpdateStatus,
-  LauncherUpdateProgress,
+  StarterUpdateStatus,
+  StarterUpdateProgress,
   LaunchResult,
   ProcExitEvent,
   ProcInfo,
@@ -134,7 +134,7 @@ export const api = {
   /** 导出某个任务的完整日志，返回文件路径 */
   exportPluginJobLog: (jobId: number) =>
     invoke<string>("export_plugin_job_log", { jobId }),
-  /** ~/.dsh-launcher/git-plugins 下的克隆仓库清单 */
+  /** ~/.dsh-starter/git-plugins 下的克隆仓库清单 */
   listClonedPlugins: () => invoke<ClonedPlugin[]>("list_cloned_plugins"),
   /** 探测本地目录里的插件包（monorepo 子包一并列出） */
   probeLocalPlugins: (path: string) => invoke<PluginCandidate[]>("probe_local_plugins", { path }),
@@ -156,7 +156,7 @@ export const api = {
   /** 重命名 profile（dsh 内置保留 profile 会被后端拒绝）；返回新名字 */
   renameProfile: (name: string, newName: string) =>
     invoke<string>("rename_profile", { name, newName }),
-  /** 删除 profile（移入 ~/.dsh-launcher/deleted-profiles/ 可找回）；返回回收站路径 */
+  /** 删除 profile（移入 ~/.dsh-starter/deleted-profiles/ 可找回）；返回回收站路径 */
   deleteProfile: (name: string) =>
     invoke<string>("delete_profile", { name }),
   /** 回收站：删除的 profile 可列出 / 还原 / 彻底删除 */
@@ -198,9 +198,9 @@ export const api = {
   reveal: (path: string) => invoke<void>("reveal_folder", { path }),
   openUrl: (url: string) => invoke<void>("open_external", { url }),
   installRuntime: () => invoke<string>("install_runtime"),
-  checkLauncherUpdate: () => invoke<LauncherUpdateStatus>("check_launcher_update"),
+  checkStarterUpdate: () => invoke<StarterUpdateStatus>("check_starter_update"),
   /** 下载并安装启动器新版本；非 Windows 上成功后进程会直接重启，不返回 */
-  installLauncherUpdate: () => invoke<string>("install_launcher_update"),
+  installStarterUpdate: () => invoke<string>("install_starter_update"),
 };
 
 export const events = {
@@ -208,10 +208,10 @@ export const events = {
     listen<InstallLogEvent>("install-log", (e) => cb(e.payload)),
   onInstallFinished: (cb: (e: InstallFinishedEvent) => void): Promise<UnlistenFn> =>
     listen<InstallFinishedEvent>("install-finished", (e) => cb(e.payload)),
-  onLauncherUpdate: (cb: (s: LauncherUpdateStatus) => void): Promise<UnlistenFn> =>
-    listen<LauncherUpdateStatus>("launcher-update", (e) => cb(e.payload)),
-  onLauncherUpdateProgress: (cb: (e: LauncherUpdateProgress) => void): Promise<UnlistenFn> =>
-    listen<LauncherUpdateProgress>("launcher-update-progress", (e) => cb(e.payload)),
+  onStarterUpdate: (cb: (s: StarterUpdateStatus) => void): Promise<UnlistenFn> =>
+    listen<StarterUpdateStatus>("starter-update", (e) => cb(e.payload)),
+  onStarterUpdateProgress: (cb: (e: StarterUpdateProgress) => void): Promise<UnlistenFn> =>
+    listen<StarterUpdateProgress>("starter-update-progress", (e) => cb(e.payload)),
   onProcLog: (cb: (e: ProcLogEvent) => void): Promise<UnlistenFn> =>
     listen<ProcLogEvent>("proc-log", (e) => cb(e.payload)),
   onProcExit: (cb: (e: ProcExitEvent) => void): Promise<UnlistenFn> =>

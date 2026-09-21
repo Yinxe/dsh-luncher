@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成 DSH Launcher 的 1024x1024 应用图标源图（深色圆角方块 + 终端提示符 + 波形）。"""
+"""生成 DSH Starter 的 1024x1024 应用图标源图（深色圆角方块 + 终端提示符 + 波形）。"""
 from PIL import Image, ImageDraw
 
 SIZE = 1024

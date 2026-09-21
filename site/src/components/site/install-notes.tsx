@@ -27,7 +27,7 @@ function notesFor(platform: "windows" | "macos" | "linux", version: string): Not
       {
         title: "MSI 静默部署",
         body: "组策略或命令行批量安装时选 .msi：",
-        code: `msiexec /i DSH.Launcher_${v}_x64_en-US.msi /qn`,
+        code: `msiexec /i DSH.Starter_${v}_x64_en-US.msi /qn`,
       },
       {
         title: "首次启动",
@@ -39,12 +39,12 @@ function notesFor(platform: "windows" | "macos" | "linux", version: string): Not
     return [
       {
         title: "拖进「应用程序」",
-        body: "打开 .dmg，把 DSH Launcher 拖进「应用程序」。通用二进制，Apple Silicon 与 Intel 用同一个文件。",
+        body: "打开 .dmg，把 DSH Starter 拖进「应用程序」。通用二进制，Apple Silicon 与 Intel 用同一个文件。",
       },
       {
         title: "首次打开被系统拦下",
         body: "应用没有做 Apple 公证，可能提示「无法验证开发者」。在「系统设置 → 隐私与安全性」点「仍要打开」，或者执行：",
-        code: `xattr -dr com.apple.quarantine "/Applications/DSH Launcher.app"`,
+        code: `xattr -dr com.apple.quarantine "/Applications/DSH Starter.app"`,
       },
       {
         title: "自动更新包不用手装",
@@ -56,18 +56,18 @@ function notesFor(platform: "windows" | "macos" | "linux", version: string): Not
     {
       title: "AppImage（免安装）",
       body: "一个文件就是整份程序，不需要 root，也不写系统目录：",
-      code: `chmod +x DSH.Launcher_${v}_amd64.AppImage\n./DSH.Launcher_${v}_amd64.AppImage`,
+      code: `chmod +x DSH.Starter_${v}_amd64.AppImage\n./DSH.Starter_${v}_amd64.AppImage`,
       warn: "极简发行版可能缺 FUSE，装一下 libfuse2（Debian / Ubuntu）即可运行。",
     },
     {
       title: "Debian / Ubuntu",
       body: "用 apt 安装可以把依赖一起带上（dpkg -i 不会自动补依赖）：",
-      code: `sudo apt install ./DSH.Launcher_${v}_amd64.deb`,
+      code: `sudo apt install ./DSH.Starter_${v}_amd64.deb`,
     },
     {
       title: "Fedora / openSUSE",
       body: "rpm 系发行版用 -U 升级安装：",
-      code: `sudo rpm -U DSH.Launcher-${v}-1.x86_64.rpm`,
+      code: `sudo rpm -U DSH.Starter-${v}-1.x86_64.rpm`,
     },
     {
       title: "更新方式的差别",
@@ -147,7 +147,7 @@ export function InstallNotes({ state }: { state: ReleaseState }) {
           <div>
             <h3 className="text-[14px] font-medium">启动器的数据</h3>
             <p className="mt-1.5 text-[13px] text-muted-foreground">
-              <code className="num rounded bg-code px-1.5 py-0.5 text-[12.5px]">~/.dsh-launcher/</code> —— 版本装在{" "}
+              <code className="num rounded bg-code px-1.5 py-0.5 text-[12.5px]">~/.dsh-starter/</code> —— 版本装在{" "}
               <span className="num text-[12.5px]">versions/&lt;版本&gt;</span>、内置 Node 在{" "}
               <span className="num text-[12.5px]">runtime/</span>、日志在{" "}
               <span className="num text-[12.5px]">logs/</span>。各版本互不干扰，也不污染全局 npm。

@@ -28,7 +28,7 @@ export function TopBar({ controller }: { controller: ReleaseController }) {
         <a href="#top" className="flex items-center gap-2.5" aria-label="回到页面顶部">
           <WhaleMark className="size-[22px] text-primary" />
           <span className="text-display hidden text-[12.5px] tracking-[0.22em] uppercase sm:inline">
-            DSH Launcher
+            DSH Starter
           </span>
         </a>
 

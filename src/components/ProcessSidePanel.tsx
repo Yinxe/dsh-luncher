@@ -183,7 +183,7 @@ export default function ProcessSidePanel({
                 </Button>
               )}
               {!external && active.lines.length > 0 && (
-                <Button size="sm" variant="ghost" onClick={onExport} title="保存到 ~/.dsh-launcher/logs/">
+                <Button size="sm" variant="ghost" onClick={onExport} title="保存到 ~/.dsh-starter/logs/">
                   <Download /> 导出
                 </Button>
               )}

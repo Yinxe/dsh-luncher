@@ -154,7 +154,7 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
       >
         <SheetHeader className="border-b border-border">
           <SheetTitle>设置</SheetTitle>
-          <SheetDescription>保存到 ~/.dsh-launcher/settings.json</SheetDescription>
+          <SheetDescription>保存到 ~/.dsh-starter/settings.json</SheetDescription>
         </SheetHeader>
 
         <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-5">
@@ -381,7 +381,7 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
                 className="font-mono"
                 type="text"
                 value={draft.updateManifestUrl}
-                placeholder="https://example.com/dsh-launcher/latest.json"
+                placeholder="https://example.com/dsh-starter/latest.json"
                 onChange={(e) => set("updateManifestUrl", e.target.value)}
               />
               <FieldDescription>

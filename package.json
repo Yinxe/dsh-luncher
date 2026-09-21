@@ -1,5 +1,5 @@
 {
-  "name": "dsh-launcher",
+  "name": "dsh-starter",
   "private": true,
   "version": "0.1.8",
   "description": "Cross-platform launcher for @deepseek-ai/dsh",

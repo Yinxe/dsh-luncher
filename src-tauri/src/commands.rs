@@ -2,10 +2,10 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::installer::InstallState;
-use crate::launcher::{self, LaunchResult};
+use crate::starter::{self, LaunchResult};
 use crate::registry::{self, RegistryInfo};
 use crate::settings::{self, AppState, Settings};
-use crate::update_check::{self, LauncherUpdateStatus};
+use crate::update_check::{self, StarterUpdateStatus};
 use crate::util;
 
 #[derive(Clone, Serialize)]
@@ -90,7 +90,7 @@ pub async fn get_environment(state: State<'_, AppState>) -> Result<EnvironmentIn
             node_path: node.map(|p| p.to_string_lossy().into_owned()),
             npm: npm_version,
             npm_path: npm.map(|i| i.program.to_string_lossy().into_owned()),
-            dsh_home: settings::launcher_home().to_string_lossy().into_owned(),
+            dsh_home: settings::starter_home().to_string_lossy().into_owned(),
             versions_dir: settings::versions_dir().to_string_lossy().into_owned(),
             registry: settings.registry,
             dsh_native_home: crate::profiles::dsh_native_home().to_string_lossy().into_owned(),
@@ -338,7 +338,7 @@ pub async fn launch_version(
         if let Err(msg) = ensure_profile_free(&proc_state, &profile) {
             return Err(msg.into());
         }
-        Ok(launcher::launch(
+        Ok(starter::launch(
             &settings,
             &target,
             &launch_args,
@@ -708,7 +708,7 @@ pub async fn rename_profile(
     Ok(new)
 }
 
-/// 删除 profile：移入 ~/.dsh-launcher/deleted-profiles/ 可找回；
+/// 删除 profile：移入 ~/.dsh-starter/deleted-profiles/ 可找回；
 /// dsh 内置保留 profile 由后端拒绝。
 #[tauri::command]
 pub async fn delete_profile(
@@ -771,14 +771,14 @@ pub async fn create_recovery_profile(
         .map_err(|e| format!("创建恢复模式失败: {e}"))?
 }
 
-/// 把运行日志导出到 ~/.dsh-launcher/logs/
+/// 把运行日志导出到 ~/.dsh-starter/logs/
 #[tauri::command]
 pub fn export_proc_log(
     profile: String,
     pid: u32,
     content: String,
 ) -> Result<String, String> {
-    let dir = settings::launcher_home().join("logs");
+    let dir = settings::starter_home().join("logs");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1311,7 +1311,7 @@ pub fn clear_plugin_jobs(jobs: State<'_, crate::plugin::PluginJobState>) -> usiz
     jobs.clear_finished()
 }
 
-/// 把某个插件任务的完整日志导出到 ~/.dsh-launcher/logs/，返回文件路径
+/// 把某个插件任务的完整日志导出到 ~/.dsh-starter/logs/，返回文件路径
 #[tauri::command]
 pub fn export_plugin_job_log(
     jobs: State<'_, crate::plugin::PluginJobState>,
@@ -1320,7 +1320,7 @@ pub fn export_plugin_job_log(
     let text = jobs
         .job_log_text(job_id)
         .ok_or_else(|| format!("任务 {job_id} 不存在（可能已被清理）"))?;
-    let dir = settings::launcher_home().join("logs");
+    let dir = settings::starter_home().join("logs");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1331,7 +1331,7 @@ pub fn export_plugin_job_log(
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 列出 ~/.dsh-launcher/git-plugins 下的克隆仓库（git 状态 + 插件候选）
+/// 列出 ~/.dsh-starter/git-plugins 下的克隆仓库（git 状态 + 插件候选）
 #[tauri::command]
 pub async fn list_cloned_plugins() -> Result<Vec<crate::plugin::ClonedPlugin>, String> {
     tauri::async_runtime::spawn_blocking(crate::plugin::list_cloned)
@@ -1555,10 +1555,10 @@ pub fn write_credential_refs(
 }
 
 #[tauri::command]
-pub async fn check_launcher_update(
+pub async fn check_starter_update(
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<LauncherUpdateStatus, String> {
+) -> Result<StarterUpdateStatus, String> {
     let settings = state.settings.lock().unwrap().clone();
     let status = update_check::check(&app, &settings).await;
     if status.mode == "error" {
@@ -1587,7 +1587,7 @@ pub async fn check_launcher_update(
 /// 下载并安装启动器新版本（内置 updater 模式）。
 /// 非 Windows 平台上本调用不会返回：安装成功后直接重启应用。
 #[tauri::command]
-pub async fn install_launcher_update(
+pub async fn install_starter_update(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -1641,13 +1641,13 @@ pub fn emit_startup_checks(app: &AppHandle) {
             return;
         }
         if settings.auto_install_update && status.mode == "builtin" && !status.needs_elevation {
-            let _ = app2.emit("launcher-update", status);
+            let _ = app2.emit("starter-update", status);
             if let Err(e) = update_check::install_builtin(&app2, &settings).await {
                 crate::diag::error("app", &format!("自动更新安装失败：{e}"));
                 let _ = app2.emit("toast", format!("自动更新失败：{e}"));
             }
             return;
         }
-        let _ = app2.emit("launcher-update", status);
+        let _ = app2.emit("starter-update", status);
     });
 }

@@ -37,12 +37,12 @@ export function Shot() {
                 <span className="size-2.5 rounded-full bg-muted-foreground/25" />
                 <span className="size-2.5 rounded-full bg-muted-foreground/25" />
               </span>
-              <span className="num text-[11.5px] text-muted-foreground">DSH Launcher — 版本与安装</span>
+              <span className="num text-[11.5px] text-muted-foreground">DSH Starter — 版本与安装</span>
               <span className="eyebrow ml-auto hidden sm:inline">深色主题</span>
             </div>
             <img
               src={preview}
-              alt="DSH Launcher 的「版本与安装」界面：左侧侧栏列出环境状态与数据目录，主区是版本列表与安装按钮，底部是日志面板。"
+              alt="DSH Starter 的「版本与安装」界面：左侧侧栏列出环境状态与数据目录，主区是版本列表与安装按钮，底部是日志面板。"
               width={1383}
               height={846}
               loading="lazy"

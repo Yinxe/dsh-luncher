@@ -15,7 +15,7 @@
 // 4. 对象键被改成了固定键，**原始文件名并没有消失**：上传时要带
 //    `Content-Disposition: attachment; filename="<原始资产名>"`（见 contentDisposition）。
 //    不带的话，人从直链下载下来的文件就叫 `windows-x64-setup.exe` —— 没有版本号、
-//    认不出是谁的包；带了就还是 `DSH.Launcher_0.1.6_x64-setup.exe`。
+//    认不出是谁的包；带了就还是 `DSH.Starter_0.1.6_x64-setup.exe`。
 //    更新器不看这个头（它按文件头魔数判类型、自己拼临时文件名），纯为人服务。
 //
 // 签名（signature）字段原样保留：安装包字节没变，客户端照常验签。
@@ -156,7 +156,7 @@ function looksLikeFileName(name) {
  *
  * 对象键是固定键（`latest/windows-x64-setup.exe`），人类下载时浏览器/下载器默认拿
  * 键的最后一段当文件名，于是版本号和产品名都没了。这里把**原始资产名**塞进响应头，
- * 下载下来的文件名就恢复成 `DSH.Launcher_0.1.6_x64-setup.exe`。
+ * 下载下来的文件名就恢复成 `DSH.Starter_0.1.6_x64-setup.exe`。
  *
  * 纯 ASCII 名用 `filename="…"`；含空格以外的非 ASCII 字符时再补一个 RFC 5987 的
  * `filename*=UTF-8''…`（老客户端认前者，新客户端优先认后者）。

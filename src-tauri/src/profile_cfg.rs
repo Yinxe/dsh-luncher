@@ -279,8 +279,11 @@ fn collect_disabled_ids(item: &serde_yaml::Value, set: &mut std::collections::BT
     }
 }
 
-/// 覆写前先备份原文件。固定单一备份文件 <名>.launcher-bak，每次覆写覆盖同一份；
-/// 同时清理旧版按时间戳堆积的 <名>.launcher-bak-<ts> 备份。
+/// 覆写前先备份原文件。固定单一备份文件 <名>.starter-bak，每次覆写覆盖同一份；
+/// 同时清理旧版按时间戳堆积的 <名>.starter-bak-<ts> 备份。
+///
+/// 0.2.0 改名前的 <名>.launcher-bak 会被先接手过来（见 `util::adopt_legacy_backup`），
+/// 清理时也把旧名的堆积备份一起扫掉，别让用户的目录里留着认不出的垃圾。
 pub(crate) fn backup(path: &Path) -> Result<(), String> {
     let content = match std::fs::read(path) {
         Ok(c) => c,
@@ -290,13 +293,18 @@ pub(crate) fn backup(path: &Path) -> Result<(), String> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let bak = path.with_file_name(format!("{stem}.launcher-bak"));
+    let bak = crate::util::adopt_legacy_backup(&path.with_file_name(format!("{stem}.starter-bak")));
     std::fs::write(&bak, content).map_err(|e| format!("写备份失败: {e}"))?;
     if let Some(dir) = path.parent() {
-        let legacy_prefix = format!("{stem}.launcher-bak-");
-        if let Ok(entries) = std::fs::read_dir(dir) {
+        for prefix in [
+            format!("{stem}.starter-bak-"),
+            format!("{stem}.launcher-bak-"),
+        ] {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().starts_with(&legacy_prefix) {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
@@ -691,7 +699,7 @@ fn drop_block_with_marker(out: &mut Vec<String>) {
     while last > 0 && out[last - 1].trim().is_empty() {
         last -= 1;
     }
-    if last > 0 && out[last - 1].trim_start().starts_with(MANAGE_MARKER) {
+    if last > 0 && is_manage_marker(out[last - 1].trim_start()) {
         out.truncate(last - 1);
     }
 }
@@ -850,7 +858,16 @@ pub fn write_global_config(content: &str) -> Result<(), String> {
 
 // ── 基于 cordis.patch 的插件包启停 ─────────────────────
 
-const MANAGE_MARKER: &str = "# dsh-launcher: disable";
+const MANAGE_MARKER: &str = "# dsh-starter: disable";
+
+/// 0.2.0 改名前的同一个标记。老用户的 `cordis.patch.yml` 里已经写进去了，必须继续认得 ——
+/// 否则这些块既删不掉也改不了，用户看到的现象是「插件开关失效」。
+const LEGACY_MANAGE_MARKER: &str = "# dsh-launcher: disable";
+
+/// 这一行是不是本程序写的插件启停标记（新名与旧名都算自己的）
+fn is_manage_marker(line: &str) -> bool {
+    line.starts_with(MANAGE_MARKER) || line.starts_with(LEGACY_MANAGE_MARKER)
+}
 
 fn user_patch_path(profile: &str) -> Result<PathBuf, String> {
     Ok(profile_dir(profile)?.join("cordis.patch.yml"))
@@ -876,7 +893,15 @@ pub fn patch_reload_mode(profile: &str) -> String {
 
 // ── Web 快捷配置（接管 webserver / web-runtime / connection 三个 patch 条目） ──
 
-const WEB_QUICK_MARKER: &str = "# dsh-launcher: web-quick";
+const WEB_QUICK_MARKER: &str = "# dsh-starter: web-quick";
+
+/// 同上的旧名版本（0.2.0 改名前的 web-quick 标记）
+const LEGACY_WEB_QUICK_MARKER: &str = "# dsh-launcher: web-quick";
+
+/// 这一行是不是本程序写的 web 快捷配置标记（新名与旧名都算自己的）
+fn is_web_quick_marker(line: &str) -> bool {
+    line.starts_with(WEB_QUICK_MARKER) || line.starts_with(LEGACY_WEB_QUICK_MARKER)
+}
 
 /// web 快捷配置当前值（解析自 cordis.patch.yml；条目不存在 = present=false，键缺失 = None）
 #[derive(Clone, Serialize, Debug, Default)]
@@ -1003,7 +1028,7 @@ fn drop_web_quick_marker(out: &mut Vec<String>) {
     while last > 0 && out[last - 1].trim().is_empty() {
         last -= 1;
     }
-    if last > 0 && out[last - 1].trim_start().starts_with(WEB_QUICK_MARKER) {
+    if last > 0 && is_web_quick_marker(out[last - 1].trim_start()) {
         out.truncate(last - 1);
     }
 }
@@ -1105,7 +1130,7 @@ pub fn set_web_quick_config(profile: &str, input: &WebQuickConfigInput) -> Resul
         // 插入点：首个插件启停管理标记之前；没有则追加到末尾
         let mut at = out
             .iter()
-            .position(|l| l.starts_with(MANAGE_MARKER))
+            .position(|l| is_manage_marker(l))
             .unwrap_or(out.len());
         while at > 0 && out[at - 1].trim().is_empty() {
             out.remove(at - 1);
@@ -1263,7 +1288,7 @@ pub fn rename_profile(old: &str, new_name: &str) -> Result<String, String> {
     Ok(dst.to_string_lossy().into_owned())
 }
 
-/// 删除 profile：不直接 `rm -rf`，而是移入 `~/.dsh-launcher/deleted-profiles/`，
+/// 删除 profile：不直接 `rm -rf`，而是移入 `~/.dsh-starter/deleted-profiles/`，
 /// 误删可手动找回。dsh 内置保留 profile 一律拒绝。返回回收站路径。
 pub fn delete_profile(name: &str) -> Result<String, String> {
     let name = name.trim();
@@ -1275,7 +1300,7 @@ pub fn delete_profile(name: &str) -> Result<String, String> {
     let Some(src) = existing_profile_path(name) else {
         return Err(format!("profile「{name}」不存在"));
     };
-    let trash = crate::settings::launcher_home().join("deleted-profiles");
+    let trash = crate::settings::starter_home().join("deleted-profiles");
     std::fs::create_dir_all(&trash).map_err(|e| format!("创建回收目录失败: {e}"))?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1568,7 +1593,7 @@ pub struct DeletedProfile {
 }
 
 fn trash_dir() -> PathBuf {
-    crate::settings::launcher_home().join("deleted-profiles")
+    crate::settings::starter_home().join("deleted-profiles")
 }
 
 /// 回收站条目名是否合法（挡住路径穿越）
@@ -1697,7 +1722,7 @@ pub struct PluginUpdateInfo {
     pub local_path: Option<String>,
     /// git 工作树根目录绝对路径（git-clone 源，更新走 git pull）
     pub clone_dir: Option<String>,
-    /// 该 git 工作树是否由启动器克隆（落在 ~/.dsh-launcher/git-plugins 下）
+    /// 该 git 工作树是否由启动器克隆（落在 ~/.dsh-starter/git-plugins 下）
     pub managed_clone: Option<bool>,
     /// 插件目录相对 git 根的路径（git-clone 源，重新 link 用）
     pub sub_path: Option<String>,
@@ -2029,6 +2054,19 @@ fn github_repo_of(url: &str) -> String {
 }
 #[cfg(test)]
 mod tests {
+    /// 改名前的旧标记必须继续被认作「自己的块」：认不出来，老用户的插件开关就直接失效
+    /// （块删不掉、改不了，还会被当成用户自己的注释留在文件里）。
+    #[test]
+    fn legacy_markers_are_still_recognized() {
+        assert!(is_manage_marker(MANAGE_MARKER));
+        assert!(is_manage_marker(LEGACY_MANAGE_MARKER));
+        assert!(is_web_quick_marker(WEB_QUICK_MARKER));
+        assert!(is_web_quick_marker(LEGACY_WEB_QUICK_MARKER));
+        // 两类标记互不串台
+        assert!(!is_manage_marker(LEGACY_WEB_QUICK_MARKER));
+        assert!(!is_web_quick_marker(LEGACY_MANAGE_MARKER));
+        assert!(!is_manage_marker("# 用户自己写的注释"));
+    }
     use super::*;
 
     use crate::util::DSH_ENV_LOCK;
@@ -2210,14 +2248,14 @@ mod tests {
         // 幂等：已全部禁用再禁用不追加
         set_ids_disabled("web", bundle, &ids, true).unwrap();
         let raw = std::fs::read_to_string(prof_dir.join("cordis.patch.yml")).unwrap();
-        assert_eq!(raw.matches("dsh-launcher: disable").count(), 2);
+        assert_eq!(raw.matches("dsh-starter: disable").count(), 2);
 
         // 启用：该包管理块整体移除，用户内容保留
         set_ids_disabled("web", bundle, &ids, false).unwrap();
         let raw = std::fs::read_to_string(prof_dir.join("cordis.patch.yml")).unwrap();
         assert!(raw.contains("# my notes"));
         assert!(raw.contains("- id: webserver"));
-        assert!(!raw.contains("dsh-launcher: disable"));
+        assert!(!raw.contains("dsh-starter: disable"));
         assert!(!raw.contains("disabled: true"));
         serde_yaml::from_str::<serde_yaml::Value>(&raw).unwrap();
 
@@ -2351,18 +2389,18 @@ mod tests {
         let f = tmp.join("cordis.patch.yml");
         std::fs::write(&f, "v1").unwrap();
         // 旧版按时间戳堆积的备份应被清理
-        std::fs::write(tmp.join("cordis.patch.launcher-bak-1700000000"), "old").unwrap();
+        std::fs::write(tmp.join("cordis.patch.starter-bak-1700000000"), "old").unwrap();
 
         backup(&f).unwrap();
         assert_eq!(
-            std::fs::read_to_string(tmp.join("cordis.patch.launcher-bak")).unwrap(),
+            std::fs::read_to_string(tmp.join("cordis.patch.starter-bak")).unwrap(),
             "v1"
         );
 
         std::fs::write(&f, "v2").unwrap();
         backup(&f).unwrap();
         assert_eq!(
-            std::fs::read_to_string(tmp.join("cordis.patch.launcher-bak")).unwrap(),
+            std::fs::read_to_string(tmp.join("cordis.patch.starter-bak")).unwrap(),
             "v2"
         );
 
@@ -2370,9 +2408,9 @@ mod tests {
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.contains("launcher-bak"))
+            .filter(|n| n.contains("starter-bak"))
             .collect();
-        assert_eq!(baks, vec!["cordis.patch.launcher-bak".to_string()]);
+        assert_eq!(baks, vec!["cordis.patch.starter-bak".to_string()]);
 
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -2431,7 +2469,7 @@ mod tests {
             "# user notes\n\
              - id: webserver\n  config:\n    host: '0.0.0.0'\n    port: 3080\n\
              \n\
-             # dsh-launcher: disable x/y（启动器管理：关闭开关会自动移除此块）\n\
+             # dsh-starter: disable x/y（启动器管理：关闭开关会自动移除此块）\n\
              - id: other\n  disabled: true\n",
         )
         .unwrap();
@@ -2459,7 +2497,7 @@ mod tests {
         assert!(raw.contains("cookieMaxAgeDays: 36500"));
         // 无关的禁用管理块保留，且新条目都在它之前（否则 disabled 会被覆盖回启用）
         assert!(raw.contains("- id: other") && raw.contains("disabled: true"));
-        let disable_pos = raw.find("# dsh-launcher: disable").unwrap();
+        let disable_pos = raw.find("# dsh-starter: disable").unwrap();
         for id in ["webserver", "web-runtime", "connection"] {
             assert!(
                 raw.find(&format!("- id: {id}")).unwrap() < disable_pos,
@@ -2720,10 +2758,10 @@ mod tests {
     fn rename_delete_and_recovery_profile() {
         let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("dsh-rd-test-{}", std::process::id()));
-        let home = tmp.join("launcher-home");
+        let home = tmp.join("starter-home");
         std::fs::create_dir_all(&home).unwrap();
         std::env::set_var("DSH_HOME", &tmp);
-        std::env::set_var("DSH_LAUNCHER_HOME", &home);
+        std::env::set_var("DSH_STARTER_HOME", &home);
 
         let profiles = tmp.join("profiles");
         let web = profiles.join("web");
@@ -2865,7 +2903,7 @@ mod tests {
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");
-        std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::env::remove_var("DSH_STARTER_HOME");
     }
 
     /// 恢复模式的另外两种情况：本地没有任何 web profile 时也要能建（端口退到 dsh 默认端口）；
@@ -2875,10 +2913,10 @@ mod tests {
         let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("dsh-rec-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        let home = tmp.join("launcher-home");
+        let home = tmp.join("starter-home");
         std::fs::create_dir_all(&home).unwrap();
         std::env::set_var("DSH_HOME", &tmp);
-        std::env::set_var("DSH_LAUNCHER_HOME", &home);
+        std::env::set_var("DSH_STARTER_HOME", &home);
         let profiles = tmp.join("profiles");
 
         // 1) 完全没有官方 web profile：端口基准退到 3080，用 dsh 默认值补齐快捷配置
@@ -2946,6 +2984,6 @@ mod tests {
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");
-        std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::env::remove_var("DSH_STARTER_HOME");
     }
 }

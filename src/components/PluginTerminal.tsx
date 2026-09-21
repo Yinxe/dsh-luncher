@@ -137,7 +137,7 @@ export default function PluginTerminal({
           <Button size="sm" variant="ghost" disabled={!active || lineCount === 0} onClick={copyLog} title="复制当前任务输出">
             <Copy /> 复制
           </Button>
-          <Button size="sm" variant="ghost" disabled={!active} onClick={exportLog} title="导出到 ~/.dsh-launcher/logs/">
+          <Button size="sm" variant="ghost" disabled={!active} onClick={exportLog} title="导出到 ~/.dsh-starter/logs/">
             <Download /> 导出
           </Button>
           <Button

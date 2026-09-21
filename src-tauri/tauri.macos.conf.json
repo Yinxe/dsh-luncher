@@ -3,7 +3,7 @@
   "app": {
     "windows": [
       {
-        "title": "DSH Launcher",
+        "title": "DSH Starter",
         "label": "main",
         "width": 1100,
         "height": 740,

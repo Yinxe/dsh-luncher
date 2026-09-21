@@ -122,13 +122,15 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # ★2 签名私钥：本地 `npm run tauri signer generate -w ~/.tauri/dsh-launcher.key`
+          # ★2 签名私钥：本地 `npm run tauri signer generate -w ~/.tauri/dsh-starter.key`
           # 生成，私钥内容进仓库 secret（同名的 _PASSWORD 也要配，空密码就填空串）
+          # ⚠️ 0.2.0 改名**不要重新生成密钥**：沿用原来那份（旧文件叫 dsh-launcher.key，
+          # 改个文件名即可）。换密钥 = 公钥变了 = 已装版本的更新全部验签失败。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
-          releaseName: 'DSH Launcher v__VERSION__'
+          releaseName: 'DSH Starter v__VERSION__'
           # ★3 真正的更新说明：与 latest.json 的 notes 同源，客户端直接展示
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
@@ -227,6 +229,11 @@ jobs:
     runs-on: ubuntu-22.04
     if: github.repository_owner == 'Yinxe' && needs.publish.outputs.released == 'true'
     env:
+      # ⚠️ 桶名暂时**保持旧名**：R2 不支持改桶名，新桶 `dsh-starter-release` 建好后，
+      # 下面三个值必须一次性同时换（本文件两项 + `update_check.rs` 的 R2_BASE +
+      # `site/src/lib/release.ts` 的 R2_BASE）。只换一半是最坏情况：清单传进新桶、客户端
+      # 还在读旧桶，而旧桶那份陈旧清单依然「有效」→ 客户端判定「已是最新」，
+      # 连 GitHub 兜底都走不到，等于静默卡死更新。步骤见 docs/RELEASING.md 第 1 节。
       R2_BUCKET: dsh-luncher-release
       R2_PUBLIC_BASE: https://pub-65e25af191f546ddb6c2d4fa976345c7.r2.dev
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com

@@ -1164,7 +1164,7 @@ pub fn start_job<R: Runtime>(
                                                 id,
                                                 "info",
                                                 &format!(
-                                                    "✔ 已按磁盘事实删除 {} 在 package.json 里的依赖/bundle 残留行（原件备份为 package.json.launcher-bak）",
+                                                    "✔ 已按磁盘事实删除 {} 在 package.json 里的依赖/bundle 残留行（原件备份为 package.json.starter-bak）",
                                                     f.name
                                                 ),
                                             ),
@@ -1493,7 +1493,7 @@ pub struct CloneInstallInput {
 #[serde(rename_all = "camelCase")]
 pub struct CloneProbe {
     pub url: String,
-    /// 克隆落点（~/.dsh-launcher/git-plugins/<owner>-<repo>）
+    /// 克隆落点（~/.dsh-starter/git-plugins/<owner>-<repo>）
     pub root: String,
     pub dir_name: String,
     pub git_ref: Option<String>,
@@ -1657,7 +1657,7 @@ pub fn steps_for_clone_install(
 }
 
 /// 「git pull 更新已 link 的克隆仓库」步骤序列（按 git 工作树绝对路径，
-/// 兼容启动器管理的 ~/.dsh-launcher/git-plugins 与用户自建 clone）
+/// 兼容启动器管理的 ~/.dsh-starter/git-plugins 与用户自建 clone）
 pub fn steps_for_pull_update_root(
     root: &Path,
     sub_path: Option<&str>,
@@ -1698,9 +1698,9 @@ pub fn steps_for_pull_update_root(
 
 // ── 本地克隆仓库（clone + link 安装的落点） ─────────────────
 
-/// clone 安装的仓库根目录：~/.dsh-launcher/git-plugins
+/// clone 安装的仓库根目录：~/.dsh-starter/git-plugins
 pub fn git_plugins_dir() -> PathBuf {
-    crate::settings::launcher_home().join("git-plugins")
+    crate::settings::starter_home().join("git-plugins")
 }
 
 /// 仓库目录名：<owner>-<repo>
@@ -1716,7 +1716,7 @@ pub fn clone_dir_name(owner: &str, repo: &str) -> String {
 /// 禁止 git / ssh 走交互式登录的环境变量。
 ///
 /// 启动器起的进程没有可交互的 stdin：一旦 git 需要账号密码，它会直接往**继承来的
-/// 控制终端**（`/dev/tty`，也就是启动 launcher / tauri dev 的那个终端）打印
+/// 控制终端**（`/dev/tty`，也就是启动本程序 / tauri dev 的那个终端）打印
 /// `Username for 'https://github.com':` 并一直等输入——用户看到的就是这样一行莫名其妙的提示，
 /// 而我们这边只能干等到超时。统一设上下面的变量后，git 会立刻失败并把原因写进 stderr，
 /// 由内置终端/更新检测如实展示。
@@ -1794,7 +1794,7 @@ pub struct ClonedPlugin {
     pub candidates: Vec<crate::registry::PluginCandidate>,
 }
 
-/// 列出 ~/.dsh-launcher/git-plugins 下的克隆仓库（带 git 状态与插件探测）
+/// 列出 ~/.dsh-starter/git-plugins 下的克隆仓库（带 git 状态与插件探测）
 pub fn list_cloned() -> Vec<ClonedPlugin> {
     let root = git_plugins_dir();
     let Ok(entries) = std::fs::read_dir(&root) else {
@@ -2253,7 +2253,7 @@ mod tests {
         }
         // 公开仓库
         match tauri::async_runtime::block_on(crate::registry::probe_remote_access(
-            "https://github.com/Yinxe/dsh-luncher.git",
+            "https://github.com/Yinxe/dsh-starter.git",
             None,
         )) {
             RepoAccess::Public => {}
@@ -2281,7 +2281,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("dsh-clone-steps-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
 
         let input = CloneInstallInput {
             url: "https://github.com/Yinxe/deepseek-harness-plugins.git".into(),
@@ -2290,8 +2290,8 @@ mod tests {
             build: true,
         };
         let (steps, root) = steps_for_clone_install(&input).unwrap();
-        // DSH_LAUNCHER_HOME 覆盖的是 HOME，因此落点仍带 .dsh-launcher 前缀
-        assert_eq!(root, tmp.join(".dsh-launcher/git-plugins/Yinxe-deepseek-harness-plugins"));
+        // DSH_STARTER_HOME 覆盖的是 HOME，因此落点仍带 .dsh-starter 前缀
+        assert_eq!(root, tmp.join(".dsh-starter/git-plugins/Yinxe-deepseek-harness-plugins"));
         // 全新克隆：git clone（浅克隆 + 指定分支）→ 构建提示 → pnpm install → pnpm build → dsh plugin add
         assert_eq!(steps.len(), 5, "steps={steps:?}");
         match &steps[0] {
@@ -2307,7 +2307,7 @@ mod tests {
             Step::Dsh { args } => {
                 assert_eq!(args[0], "add");
                 assert!(
-                    args[1].ends_with("/.dsh-launcher/git-plugins/Yinxe-deepseek-harness-plugins/plugins/mcwiki-search"),
+                    args[1].ends_with("/.dsh-starter/git-plugins/Yinxe-deepseek-harness-plugins/plugins/mcwiki-search"),
                     "link 目标 = {}",
                     args[1]
                 );
@@ -2354,7 +2354,7 @@ mod tests {
         // 非 git 目录必须被拒
         assert!(steps_for_pull_update_root(&tmp, None, false).is_err());
 
-        std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::env::remove_var("DSH_STARTER_HOME");
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -2366,7 +2366,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("dsh-clone-dirty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
 
         let input = CloneInstallInput {
             url: "https://github.dpik.top/https://github.com/Yinxe/deepseek-harness-plugins".into(),
@@ -2390,9 +2390,9 @@ mod tests {
             other => panic!("首步应为 git clone，实际 {other:?}"),
         }
         // 目录名按原始地址推导
-        assert_eq!(root, tmp.join(".dsh-launcher/git-plugins/Yinxe-deepseek-harness-plugins"));
+        assert_eq!(root, tmp.join(".dsh-starter/git-plugins/Yinxe-deepseek-harness-plugins"));
 
-        std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::env::remove_var("DSH_STARTER_HOME");
         std::fs::remove_dir_all(&tmp).ok();
     }
 

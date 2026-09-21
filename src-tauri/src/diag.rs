@@ -23,7 +23,7 @@
 //! —— 时间可读、`run=` 能区分不同次启动、`LEVEL` 能 grep（`grep ERROR ui.log`）。
 //!
 //! 级别：默认 INFO（`info/warn/error` 都写）；`debug()` 默认丢弃，把环境变量
-//! `DSH_LAUNCHER_LOG=debug` 打开后才会落盘（轮询类的逐次细节走 debug，避免日志被刷爆）。
+//! `DSH_STARTER_LOG=debug` 打开后才会落盘（轮询类的逐次细节走 debug，避免日志被刷爆）。
 //!
 //! 约束：日志**不能自己变成故障源** —— 写入失败一律静默忽略，单文件超上限就滚动一份
 //! `.1`；`debug` 级别关掉时连字符串都不拼。
@@ -78,7 +78,7 @@ impl Level {
     }
 }
 
-/// 当前级别（默认 INFO；`DSH_LAUNCHER_LOG=debug` 打开细节日志）
+/// 当前级别（默认 INFO；`DSH_STARTER_LOG=debug` 打开细节日志）
 fn min_level() -> Level {
     static LEVEL: AtomicU8 = AtomicU8::new(u8::MAX);
     let cached = LEVEL.load(Ordering::Relaxed);
@@ -89,7 +89,7 @@ fn min_level() -> Level {
             _ => Level::Info,
         };
     }
-    let parsed = match std::env::var("DSH_LAUNCHER_LOG")
+    let parsed = match std::env::var("DSH_STARTER_LOG")
         .unwrap_or_default()
         .to_ascii_lowercase()
         .as_str()
@@ -108,9 +108,9 @@ pub fn level_label() -> &'static str {
     min_level().label()
 }
 
-/// 日志目录（`~/.dsh-launcher/logs/`）：设置里「打开日志目录」按钮指向它
+/// 日志目录（`~/.dsh-starter/logs/`）：设置里「打开日志目录」按钮指向它
 pub fn logs_dir() -> PathBuf {
-    crate::settings::launcher_home().join("logs")
+    crate::settings::starter_home().join("logs")
 }
 
 /// 本次启动的标识（秒级 epoch）：同一个日志文件里混着多次启动的记录，
@@ -233,7 +233,7 @@ pub fn error(cat: &str, msg: &str) {
 }
 
 /// 细节日志：默认丢弃。轮询类（实例状态、端口归属）逐次记录会刷爆日志，
-/// 需要时用 `DSH_LAUNCHER_LOG=debug` 打开。
+/// 需要时用 `DSH_STARTER_LOG=debug` 打开。
 pub fn debug(cat: &str, msg: impl FnOnce() -> String) {
     if min_level() > Level::Debug {
         return;
@@ -289,7 +289,7 @@ pub fn install_panic_hook() {
 /// 「装的哪个版本」。**绝不包含凭据**：settings 走脱敏输出。
 pub fn diagnostics(app_version: &str, settings: &crate::settings::Settings) -> String {
     let mut out = String::new();
-    out.push_str("==== DSH Launcher 诊断包 ====\n");
+    out.push_str("==== DSH Starter 诊断包 ====\n");
     out.push_str(&format!("生成时间: {}\n", utc_iso(now_ms())));
     out.push_str(&format!(
         "本次启动: run={} pid={} 已运行 +{}ms\n",
@@ -450,7 +450,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("dsh-diag-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        std::env::set_var("DSH_LAUNCHER_HOME", &tmp);
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
 
         info("install", "npm 命令：node npm-cli.js install --prefix X");
         error("ui", "渲染报错：Cannot read properties of undefined");
@@ -460,7 +460,7 @@ mod tests {
         settings.registry = "https://user:tok@registry.example.com".into();
 
         let body = diagnostics("9.9.9", &settings);
-        assert!(body.contains("==== DSH Launcher 诊断包 ===="), "缺标题");
+        assert!(body.contains("==== DSH Starter 诊断包 ===="), "缺标题");
         assert!(body.contains("npm 命令：node npm-cli.js install"), "缺 install 日志");
         assert!(body.contains("渲染报错"), "缺 ui 日志");
         assert!(body.contains("PATH:"), "缺 PATH");
@@ -470,7 +470,7 @@ mod tests {
         assert!(body.contains("github_token = （已设置，长度 15）"), "脱敏摘要不对");
         assert!(body.contains("***@registry.example.com"), "registry 应脱敏");
 
-        std::env::remove_var("DSH_LAUNCHER_HOME");
+        std::env::remove_var("DSH_STARTER_HOME");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

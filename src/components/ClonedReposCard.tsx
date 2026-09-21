@@ -36,7 +36,7 @@ function DetailRow({ label, children }: { label: string; children: React.ReactNo
 }
 
 /**
- * 本地克隆仓库（clone + link 安装的落点 ~/.dsh-launcher/git-plugins）。
+ * 本地克隆仓库（clone + link 安装的落点 ~/.dsh-starter/git-plugins）。
  * 更新方式就是 git pull：这里一键执行 pull →（可选）构建 → 重新 link。
  */
 export default function ClonedReposCard({ profile, busy, onToast, onPull, onLinkInstall }: Props) {
@@ -104,7 +104,7 @@ export default function ClonedReposCard({ profile, busy, onToast, onPull, onLink
         <div className="text-[13px] font-semibold">
           本地克隆仓库
           <span className="ml-2 text-xs font-normal text-muted-foreground">
-            ~/.dsh-launcher/git-plugins · link 安装会装进 <span className="font-mono text-foreground">{profile}</span> · 更新方式 git pull
+            ~/.dsh-starter/git-plugins · link 安装会装进 <span className="font-mono text-foreground">{profile}</span> · 更新方式 git pull
           </span>
         </div>
         <span className="flex-1" />
@@ -295,7 +295,7 @@ export default function ClonedReposCard({ profile, busy, onToast, onPull, onLink
           <AlertDialogHeader>
             <AlertDialogTitle>删除本地克隆 {pendingDelete?.dirName}？</AlertDialogTitle>
             <AlertDialogDescription>
-              只删除 ~/.dsh-launcher/git-plugins 下的这份克隆（含未提交的本地改动）。
+              只删除 ~/.dsh-starter/git-plugins 下的这份克隆（含未提交的本地改动）。
               已 link 安装的插件会因源目录消失而失效，需要先卸载或重新指向其他源。
             </AlertDialogDescription>
           </AlertDialogHeader>

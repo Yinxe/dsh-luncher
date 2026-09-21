@@ -10,10 +10,10 @@ import {
 } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
 import ReleaseNotes, { notesTeaser } from "./ReleaseNotes";
-import type { LauncherUpdateStatus } from "../types";
+import type { StarterUpdateStatus } from "../types";
 
 interface Props {
-  status: LauncherUpdateStatus;
+  status: StarterUpdateStatus;
   onDismiss: () => void;
   onOpenUrl: (url: string) => void;
   onApply: () => void;

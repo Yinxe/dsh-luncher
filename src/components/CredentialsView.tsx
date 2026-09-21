@@ -81,7 +81,7 @@ export default function CredentialsView({ onToast }: Props) {
     setBusy(true);
     try {
       await api.writeCredentialRefs(refs);
-      onToast("ok", "凭据已保存（原文件已备份为 .credentials.launcher-bak）");
+      onToast("ok", "凭据已保存（原文件已备份为 .credentials.starter-bak）");
       await reload();
     } catch (e) {
       onToast("err", String(e));

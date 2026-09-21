@@ -182,7 +182,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip("DSH Launcher")
+        .tooltip("DSH Starter")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
             "quit" => app.exit(0),

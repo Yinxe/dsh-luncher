@@ -58,7 +58,7 @@ export function Footer({ state }: { state: ReleaseState }) {
           <div className="lg:col-span-5">
             <div className="flex items-center gap-2.5">
               <WhaleMark className="size-[22px] text-primary" />
-              <span className="text-display text-[12.5px] tracking-[0.22em] uppercase">DSH Launcher</span>
+              <span className="text-display text-[12.5px] tracking-[0.22em] uppercase">DSH Starter</span>
             </div>
             <p className="mt-4 max-w-[40ch] text-[13px] text-muted-foreground">
               DeepSeek Harness（@deepseek-ai/dsh）的跨平台图形启动器。
@@ -72,7 +72,7 @@ export function Footer({ state }: { state: ReleaseState }) {
                 className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-[12.5px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
               >
                 <GithubMark className="size-3.5" />
-                Yinxe/dsh-luncher
+                Yinxe/dsh-starter
               </a>
             </div>
           </div>
@@ -102,7 +102,7 @@ export function Footer({ state }: { state: ReleaseState }) {
         </div>
 
         <div className="mt-12 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-hairline pt-6 text-[11.5px] text-muted-foreground">
-          <span>© {year} DSH Launcher</span>
+          <span>© {year} DSH Starter</span>
           <span className="num">
             {state.version ? `v${state.version}` : "版本未知"}
             {state.publishedAt ? ` · ${formatDate(state.publishedAt)}` : ""}
