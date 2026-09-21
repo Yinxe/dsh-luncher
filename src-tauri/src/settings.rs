@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// 持久化在 ~/.dsh-starter/settings.json 的启动器设置
@@ -165,43 +165,15 @@ pub fn home_dir() -> Option<PathBuf> {
     }
 }
 
-/// 数据根目录名（0.2.0 起）。`LEGACY_HOME_DIR` 只在首次启动搬运旧数据时用。
-const HOME_DIR: &str = ".dsh-starter";
-const LEGACY_HOME_DIR: &str = ".dsh-launcher";
-
 /// 启动器数据根目录（区别于 dsh 自身的 ~/.dsh）
 ///
-/// 0.2.0 把目录从 `~/.dsh-launcher` 改名成 `~/.dsh-starter`：首次调用时把旧目录整体
-/// `rename` 过来，已装版本 / profile / 设置原样保留（同卷 rename 不复制字节，再大也是瞬时）。
-/// 搬不动（跨设备挂载、Windows 上目录被占用）就**继续用旧目录** —— 名字不一致只是不好看，
-/// 让用户以为数据丢了才是事故。
-///
-/// ⚠️ 这个函数里不能调 `diag::*`：它算日志目录时会回调本函数，直接无限递归。
+/// 0.2.0 起叫 `~/.dsh-starter`（旧名 `~/.dsh-launcher`）。**刻意不做旧目录迁移与兼容**：
+/// 改名那一版本来就没有用户，留一套搬运/兜底代码只会变成长期包袱 —— 需要旧数据的人
+/// 手动把目录改个名即可。
 pub fn starter_home() -> PathBuf {
-    match home_dir() {
-        Some(home) => migrate_home(&home),
-        None => PathBuf::from(HOME_DIR),
-    }
-}
-
-/// 首次调用把 `~/.dsh-launcher` 搬到 `~/.dsh-starter`，返回真正该用的那个目录。
-fn migrate_home(home: &Path) -> PathBuf {
-    let new = home.join(HOME_DIR);
-    let old = home.join(LEGACY_HOME_DIR);
-    if new.exists() || !old.is_dir() {
-        return new;
-    }
-    match std::fs::rename(&old, &new) {
-        Ok(()) => new,
-        Err(e) => {
-            eprintln!(
-                "数据目录改名失败（{} → {}）：{e}；继续使用旧目录，数据未丢失",
-                old.display(),
-                new.display()
-            );
-            old
-        }
-    }
+    home_dir()
+        .map(|h| h.join(".dsh-starter"))
+        .unwrap_or_else(|| PathBuf::from(".dsh-starter"))
 }
 
 /// 启动器管理的 dsh 版本安装根目录
@@ -286,30 +258,24 @@ mod tests {
         fs::remove_dir_all(&tmp).ok();
     }
 
-    /// 改名搬家：老用户的 `~/.dsh-launcher` 要被整体搬到 `~/.dsh-starter`，内容一份不少；
-    /// 新目录已存在时绝不覆盖（避免第二次启动把新数据盖掉）。
+    /// 数据目录就是 `~/.dsh-starter`：改名不做旧目录迁移（有旧数据的人自己改个目录名）
     #[test]
-    fn legacy_home_is_migrated_once_and_never_overwrites_new() {
-        let tmp = std::env::temp_dir().join(format!("dsh-home-migrate-{}", std::process::id()));
+    fn starter_home_is_the_new_dir_and_ignores_the_legacy_one() {
+        let tmp = std::env::temp_dir().join(format!("dsh-home-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
-        let old = tmp.join(LEGACY_HOME_DIR);
-        fs::create_dir_all(old.join("versions")).unwrap();
-        fs::write(old.join(SETTINGS_FILE), "{\"registry\":\"x\"}").unwrap();
+        fs::create_dir_all(tmp.join(".dsh-launcher")).unwrap();
+        let _env = crate::util::DSH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
 
-        assert_eq!(migrate_home(&tmp), tmp.join(HOME_DIR));
-        assert!(tmp.join(HOME_DIR).join(SETTINGS_FILE).is_file(), "设置要跟着搬");
-        assert!(tmp.join(HOME_DIR).join("versions").is_dir(), "已装版本要跟着搬");
-        assert!(!old.exists(), "旧目录应已搬走");
+        assert_eq!(starter_home(), tmp.join(".dsh-starter"));
+        assert!(
+            tmp.join(".dsh-launcher").exists(),
+            "旧目录不该被动过：不搬运、不删除"
+        );
 
-        // 幂等：再调一次还是新目录
-        assert_eq!(migrate_home(&tmp), tmp.join(HOME_DIR));
-
-        // 新目录已存在、旧目录又冒出来 → 保持新目录，不覆盖
-        fs::create_dir_all(&old).unwrap();
-        fs::write(tmp.join(HOME_DIR).join("keep.txt"), "new").unwrap();
-        assert_eq!(migrate_home(&tmp), tmp.join(HOME_DIR));
-        assert!(tmp.join(HOME_DIR).join("keep.txt").is_file());
-
+        std::env::remove_var("DSH_STARTER_HOME");
         fs::remove_dir_all(&tmp).ok();
     }
 }

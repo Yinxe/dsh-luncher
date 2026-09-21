@@ -92,9 +92,7 @@ pub fn snapshot(profile_dir: &Path) -> ProfileSnapshot {
     }
 }
 
-/// 备份到 `<file>.starter-bak`（只在首次生成，避免反复覆盖掉更早的好状态）。
-/// 0.2.0 改名前的 `<file>.launcher-bak` 会被先接手过来，免得把已被改坏的现状
-/// 当成原件重新备份、把用户真正的原始文件挤掉。
+/// 备份到 `<file>.starter-bak`（只在首次生成，避免反复覆盖掉更早的好状态）
 fn backup_once(path: &Path) -> Result<(), String> {
     if !path.is_file() {
         return Ok(());
@@ -103,7 +101,7 @@ fn backup_once(path: &Path) -> Result<(), String> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let bak = crate::util::adopt_legacy_backup(&path.with_file_name(format!("{file}.starter-bak")));
+    let bak = path.with_file_name(format!("{file}.starter-bak"));
     if bak.is_file() {
         return Ok(());
     }

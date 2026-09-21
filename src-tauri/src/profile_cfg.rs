@@ -281,9 +281,6 @@ fn collect_disabled_ids(item: &serde_yaml::Value, set: &mut std::collections::BT
 
 /// 覆写前先备份原文件。固定单一备份文件 <名>.starter-bak，每次覆写覆盖同一份；
 /// 同时清理旧版按时间戳堆积的 <名>.starter-bak-<ts> 备份。
-///
-/// 0.2.0 改名前的 <名>.launcher-bak 会被先接手过来（见 `util::adopt_legacy_backup`），
-/// 清理时也把旧名的堆积备份一起扫掉，别让用户的目录里留着认不出的垃圾。
 pub(crate) fn backup(path: &Path) -> Result<(), String> {
     let content = match std::fs::read(path) {
         Ok(c) => c,
@@ -293,18 +290,13 @@ pub(crate) fn backup(path: &Path) -> Result<(), String> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let bak = crate::util::adopt_legacy_backup(&path.with_file_name(format!("{stem}.starter-bak")));
+    let bak = path.with_file_name(format!("{stem}.starter-bak"));
     std::fs::write(&bak, content).map_err(|e| format!("写备份失败: {e}"))?;
     if let Some(dir) = path.parent() {
-        for prefix in [
-            format!("{stem}.starter-bak-"),
-            format!("{stem}.launcher-bak-"),
-        ] {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                continue;
-            };
+        let legacy_prefix = format!("{stem}.starter-bak-");
+        if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                if entry.file_name().to_string_lossy().starts_with(&legacy_prefix) {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
@@ -699,7 +691,7 @@ fn drop_block_with_marker(out: &mut Vec<String>) {
     while last > 0 && out[last - 1].trim().is_empty() {
         last -= 1;
     }
-    if last > 0 && is_manage_marker(out[last - 1].trim_start()) {
+    if last > 0 && out[last - 1].trim_start().starts_with(MANAGE_MARKER) {
         out.truncate(last - 1);
     }
 }
@@ -860,15 +852,6 @@ pub fn write_global_config(content: &str) -> Result<(), String> {
 
 const MANAGE_MARKER: &str = "# dsh-starter: disable";
 
-/// 0.2.0 改名前的同一个标记。老用户的 `cordis.patch.yml` 里已经写进去了，必须继续认得 ——
-/// 否则这些块既删不掉也改不了，用户看到的现象是「插件开关失效」。
-const LEGACY_MANAGE_MARKER: &str = "# dsh-launcher: disable";
-
-/// 这一行是不是本程序写的插件启停标记（新名与旧名都算自己的）
-fn is_manage_marker(line: &str) -> bool {
-    line.starts_with(MANAGE_MARKER) || line.starts_with(LEGACY_MANAGE_MARKER)
-}
-
 fn user_patch_path(profile: &str) -> Result<PathBuf, String> {
     Ok(profile_dir(profile)?.join("cordis.patch.yml"))
 }
@@ -894,14 +877,6 @@ pub fn patch_reload_mode(profile: &str) -> String {
 // ── Web 快捷配置（接管 webserver / web-runtime / connection 三个 patch 条目） ──
 
 const WEB_QUICK_MARKER: &str = "# dsh-starter: web-quick";
-
-/// 同上的旧名版本（0.2.0 改名前的 web-quick 标记）
-const LEGACY_WEB_QUICK_MARKER: &str = "# dsh-launcher: web-quick";
-
-/// 这一行是不是本程序写的 web 快捷配置标记（新名与旧名都算自己的）
-fn is_web_quick_marker(line: &str) -> bool {
-    line.starts_with(WEB_QUICK_MARKER) || line.starts_with(LEGACY_WEB_QUICK_MARKER)
-}
 
 /// web 快捷配置当前值（解析自 cordis.patch.yml；条目不存在 = present=false，键缺失 = None）
 #[derive(Clone, Serialize, Debug, Default)]
@@ -1028,7 +1003,7 @@ fn drop_web_quick_marker(out: &mut Vec<String>) {
     while last > 0 && out[last - 1].trim().is_empty() {
         last -= 1;
     }
-    if last > 0 && is_web_quick_marker(out[last - 1].trim_start()) {
+    if last > 0 && out[last - 1].trim_start().starts_with(WEB_QUICK_MARKER) {
         out.truncate(last - 1);
     }
 }
@@ -1130,7 +1105,7 @@ pub fn set_web_quick_config(profile: &str, input: &WebQuickConfigInput) -> Resul
         // 插入点：首个插件启停管理标记之前；没有则追加到末尾
         let mut at = out
             .iter()
-            .position(|l| is_manage_marker(l))
+            .position(|l| l.starts_with(MANAGE_MARKER))
             .unwrap_or(out.len());
         while at > 0 && out[at - 1].trim().is_empty() {
             out.remove(at - 1);
@@ -2054,19 +2029,6 @@ fn github_repo_of(url: &str) -> String {
 }
 #[cfg(test)]
 mod tests {
-    /// 改名前的旧标记必须继续被认作「自己的块」：认不出来，老用户的插件开关就直接失效
-    /// （块删不掉、改不了，还会被当成用户自己的注释留在文件里）。
-    #[test]
-    fn legacy_markers_are_still_recognized() {
-        assert!(is_manage_marker(MANAGE_MARKER));
-        assert!(is_manage_marker(LEGACY_MANAGE_MARKER));
-        assert!(is_web_quick_marker(WEB_QUICK_MARKER));
-        assert!(is_web_quick_marker(LEGACY_WEB_QUICK_MARKER));
-        // 两类标记互不串台
-        assert!(!is_manage_marker(LEGACY_WEB_QUICK_MARKER));
-        assert!(!is_web_quick_marker(LEGACY_MANAGE_MARKER));
-        assert!(!is_manage_marker("# 用户自己写的注释"));
-    }
     use super::*;
 
     use crate::util::DSH_ENV_LOCK;

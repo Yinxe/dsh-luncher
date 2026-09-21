@@ -21,29 +21,6 @@ pub(crate) static DSH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(())
 #[cfg(test)]
 pub(crate) static NET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// 备份文件名在 0.2.0 随产品改名从 `.launcher-bak` 变成 `.starter-bak`：把老用户**既有的
-/// 那份备份**就地把名字接过来，再交给调用方。
-///
-/// 为什么非搬不可：`backup_once` 这类「已有备份就不覆盖」的逻辑，一旦看不到旧备份，就会把
-/// **已经被改坏的现状**当成原件重新备份一遍 —— 用户真正的原始文件从此永久没了。
-/// 搬不动（权限、被占用）就返回旧路径，让调用方继续用旧名：备份宁可名字旧，也不能没有。
-pub fn adopt_legacy_backup(bak: &Path) -> PathBuf {
-    let Some(name) = bak.file_name().and_then(|n| n.to_str()) else {
-        return bak.to_path_buf();
-    };
-    let Some(stem) = name.strip_suffix(".starter-bak") else {
-        return bak.to_path_buf();
-    };
-    let legacy = bak.with_file_name(format!("{stem}.launcher-bak"));
-    if bak.exists() || !legacy.is_file() {
-        return bak.to_path_buf();
-    }
-    match std::fs::rename(&legacy, bak) {
-        Ok(()) => bak.to_path_buf(),
-        Err(_) => legacy,
-    }
-}
-
 pub fn home_dir() -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var("USERPROFILE").ok().map(PathBuf::from)
@@ -602,32 +579,8 @@ pub fn split_args(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_legacy_backup, expand_tilde, home_dir, is_safe_version, shell_quote, split_args,
-        strip_tilde_prefix,
+        expand_tilde, home_dir, is_safe_version, shell_quote, split_args, strip_tilde_prefix,
     };
-
-    /// 旧备份文件要被接手：`.launcher-bak` → `.starter-bak`；新备份已存在时旧文件原地不动
-    #[test]
-    fn legacy_backup_file_is_adopted() {
-        let tmp = std::env::temp_dir().join(format!("dsh-bak-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let file = tmp.join("cordis.patch.starter-bak");
-        let legacy = tmp.join("cordis.patch.launcher-bak");
-        std::fs::write(&legacy, "原始内容").unwrap();
-
-        assert_eq!(adopt_legacy_backup(&file), file);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "原始内容");
-        assert!(!legacy.exists(), "旧名备份应已改名接手");
-
-        // 新备份已在 → 旧文件留着不动，两份都不覆盖
-        std::fs::write(&legacy, "更早的").unwrap();
-        assert_eq!(adopt_legacy_backup(&file), file);
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "原始内容");
-        assert!(legacy.exists());
-
-        std::fs::remove_dir_all(&tmp).ok();
-    }
 
     /// 反例防护：除白名单外，生产代码里不得直接 `Command::new`。
     ///
