@@ -10,6 +10,8 @@ DSH Launcher 每个版本的用户可见变化。格式参考 [Keep a Changelog]
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-21
+
 ### 修复
 
 - **设置里填 `~/…` 的路径现在能用了**：启动器不经过 shell 起进程，没有任何东西会替用户展开 `~`（Windows 的 cmd 本身也不认 `~`，只有 PowerShell / git-bash 认），此前把 `~/.bun/bin/node` 填进「Node 路径」、终端路径或插件「本地 link」都会静默失败。现在这几处都会自行展开 `~`（包含 `~/` 与 `~\\`）。
