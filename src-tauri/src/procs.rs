@@ -979,7 +979,13 @@ fn run_capture_hidden(program: &str, args: &[&str], timeout: Duration) -> Option
                 break;
             }
             Ok(None) => {}
-            Err(_) => break,
+            Err(_) => {
+                // try_wait 报错不等于子进程已经没了：不补一刀，stdout 管道就一直开着，
+                // reader.join() 永久阻塞 —— 而调用方在进程枚举的必经之路上，整机界面跟着卡死
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
         }
         if start.elapsed() > timeout {
             let _ = child.kill();
