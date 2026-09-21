@@ -319,7 +319,10 @@ pub fn spawn_keeper(
     args: String,
 ) -> std::sync::mpsc::Receiver<Result<ProcInfo, String>> {
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
+    // 线程起不来（系统资源耗尽等）不该 panic 掉命令所在的执行器线程：
+    // panic 会让前端那条 invoke 永远等不到回复，改从通道回一个可操作的错误。
+    let tx_for_spawn = tx.clone();
+    if let Err(e) = std::thread::Builder::new()
         .name("dsh-keeper".into())
         .spawn(move || {
             let result = spawn_embedded(app.clone(), &state, &settings, &target, &profile, &args);
@@ -334,7 +337,13 @@ pub fn spawn_keeper(
                 }
             }
         })
-        .expect("创建 dsh keeper 线程失败");
+    {
+        crate::diag::error("procs", &format!("创建 dsh 守候线程失败: {e}"));
+        let _ = tx_for_spawn.send(Err(format!(
+            "无法创建 dsh 守候线程（{e}）：这台机器的线程/内存资源可能已耗尽，\
+             关掉一些程序后重试"
+        )));
+    }
     rx
 }
 
