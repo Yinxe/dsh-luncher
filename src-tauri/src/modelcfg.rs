@@ -657,10 +657,18 @@ pub fn write(input: &ModelConfigInput) -> Result<(), String> {
 
     serde_yaml::from_str::<Yaml>(&out).map_err(|e| format!("生成的 YAML 不合法，已中止: {e}"))?;
     backup(&path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "settings.yaml 路径缺少父目录".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    // 原子写：先落同目录临时文件再 rename 覆盖。直接 fs::write 会先截断目标，
+    // 中途崩溃 / 断电留下半截 YAML —— 下次 dsh 与启动器都读不回模型配置。
+    let tmp = parent.join("settings.yaml.tmp");
+    std::fs::write(&tmp, &out).map_err(|e| format!("写入失败: {e}"))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("写入失败: {e}"));
     }
-    std::fs::write(&path, out).map_err(|e| format!("写入失败: {e}"))?;
     Ok(())
 }
 
@@ -1051,7 +1059,36 @@ dshp-token-meter:
         std::env::remove_var("DSH_HOME");
     }
 
-    /// 提取顶层 key 节的文本（find_section 的文本版，断言用）
+    /// 原子写的事后核对：成功写入后目录里不得残留 `settings.yaml.tmp`，
+    /// 落盘内容必须仍是合法 YAML（rename 整体替换，不存在「半截配置」这种中间态）。
+    #[test]
+    fn write_is_atomic_and_leaves_no_temp_file() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = setup("atomic", Some(SAMPLE));
+        write(&simple_input()).unwrap();
+        let leftovers: Vec<String> = std::fs::read_dir(tmp_home("atomic"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "不该残留临时文件：{leftovers:?}");
+        let out = std::fs::read_to_string(cfg_path()).unwrap();
+        serde_yaml::from_str::<Yaml>(&out).unwrap();
+        // 备份照旧存在（写坏时用户还能自己找回旧配置）
+        assert!(
+            cfg_path()
+                .parent()
+                .unwrap()
+                .read_dir()
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().contains("starter-bak")),
+            "写前应留一份备份"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
     fn section_text(text: &str, key: &str) -> String {
         let lines: Vec<&str> = text.lines().collect();
         match find_section(&lines, key) {
