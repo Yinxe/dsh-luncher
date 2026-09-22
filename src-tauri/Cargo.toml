@@ -50,3 +50,9 @@ libc = "0.2"
 lto = "thin"
 codegen-units = 16
 strip = true
+
+# dev 构建的调试信息等级：默认 2（全量 DWARF）会让单个 Tauri 调试二进制到 330 MB 以上，
+# target/ 轻易滚到几十 GB。降到 1 保留行号与函数级信息，体积约减半。
+# 需要逐变量调试时临时改回 2（会触发全量重编）。
+[profile.dev]
+debug = 1
