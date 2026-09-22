@@ -12,7 +12,7 @@ on:
     paths:
       - 'site/**'
       - '.github/workflows/pages.yml'
-      - 'images/preview.png'
+      - 'images/**'
       - 'public/dsh-logo.svg'
   workflow_dispatch:
 
