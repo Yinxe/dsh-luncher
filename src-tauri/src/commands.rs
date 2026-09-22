@@ -2012,6 +2012,19 @@ pub fn open_external(url: String) -> Result<(), String> {
     tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| format!("打开链接失败: {e}"))
 }
 
+/// 高版本 dsh 的 WebUI 可能写入低版本读不懂的 localStorage 值，降级后页面直接渲染失败。
+/// 注入脚本先于页面自身脚本执行，在 dsh 读到坏值之前清掉 `dsh.*` 键。
+const PURGE_DSH_STORAGE_JS: &str = r#"
+try {
+  const keys = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith("dsh.")) keys.push(k);
+  }
+  for (const k of keys) localStorage.removeItem(k);
+} catch (_) {}
+"#;
+
 /// 在应用内为实例的 Web UI 开一个独立窗口（无浏览器地址栏，像桌面端一样）。
 /// 同一地址复用同一窗口（已开则前置聚焦），多个实例可以同时各开一个窗口。
 ///
@@ -2062,6 +2075,7 @@ pub fn open_web_window(
         .min_inner_size(480.0, 520.0)
         .resizable(true)
         .center()
+        .initialization_script(PURGE_DSH_STORAGE_JS)
         .build()
         .map_err(|e| format!("打开窗口失败：{e}"))?;
     Ok(())
