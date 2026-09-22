@@ -262,7 +262,7 @@ pub fn write_refs(items: &[CredentialRefInput], expected_fingerprint: Option<&st
         })?;
     }
     #[cfg(not(unix))]
-    std::fs::write(&path, out).map_err(|e| format!("写入失败: {e}"))?;
+    std::fs::write(&path, &out).map_err(|e| format!("写入失败: {e}"))?;
     crate::diag::info(
         "profile",
         &format!(
