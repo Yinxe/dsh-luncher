@@ -10,6 +10,8 @@ import { api } from "../api";
 interface Props {
   /** 要复制的源 profile 名；null = 关闭 */
   source: string | null;
+  /** 打开时预填的新实例名（版本风险框的「复制试用」入口用）；空 = 留空手输 */
+  initialName?: string;
   /** 现有 profile 名列表（重名即时校验） */
   existing: string[];
   onClose: () => void;
@@ -18,14 +20,14 @@ interface Props {
 }
 
 /** 复制 profile 实例：手动输入新实例名，后端整目录拷贝（跳过 node_modules / cache） */
-export default function CopyProfileDialog({ source, existing, onClose, onToast, onCopied }: Props) {
+export default function CopyProfileDialog({ source, initialName = "", existing, onClose, onToast, onCopied }: Props) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // 每次打开都从空输入开始：实例名必须手动输入
+  // 每次打开都重置输入：默认空，调用方可预填建议名
   useEffect(() => {
-    if (source != null) setName("");
-  }, [source]);
+    if (source != null) setName(initialName);
+  }, [source, initialName]);
 
   const trimmed = name.trim();
   const duplicated = trimmed !== "" && existing.includes(trimmed);

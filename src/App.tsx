@@ -28,7 +28,7 @@ import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogMedia, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import InstallCard from "./components/InstallCard";
 import ConfigView from "./components/ConfigView";
@@ -128,6 +128,8 @@ export default function App() {
   const [versionWarn, setVersionWarn] = useState<VersionChange | null>(null);
   /** 复制实例对话框的源 profile；null = 关闭 */
   const [copySource, setCopySource] = useState<string | null>(null);
+  /** 本次复制来自版本风险框的「复制试用」：复制成功后直接启动副本 */
+  const [copyAndStart, setCopyAndStart] = useState(false);
   /** 重命名对话框的目标 profile；null = 关闭 */
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   /** 删除确认的目标 profile；null = 关闭 */
@@ -1761,10 +1763,17 @@ export default function App() {
       {/* 复制 profile 实例 */}
       <CopyProfileDialog
         source={copySource}
+        initialName={copyAndStart && copySource ? `${copySource}-try` : ""}
         existing={profiles.map((p) => p.name)}
-        onClose={() => setCopySource(null)}
+        onClose={() => { setCopySource(null); setCopyAndStart(false); }}
         onToast={addToast}
-        onCopied={() => refreshProfiles()}
+        onCopied={(name) => {
+          void refreshProfiles();
+          if (copyAndStart) {
+            setCopyAndStart(false);
+            void doStartProfile(name);
+          }
+        }}
       />
 
       {/* 回收站 */}
@@ -1808,58 +1817,65 @@ export default function App() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* 版本变化风险确认：这个 profile 上次是用另一个 dsh 版本跑起来的，
-          换版本（尤其降级）可能让插件加载失败、profile 起不来，必须先让用户认这个风险 */}
+      {/* 版本变化提示：说清风险即可，给出三条出路——取消 / 复制 profile 无损试用 / 认风险强制启动 */}
       <AlertDialog
         open={versionWarn != null}
         onOpenChange={(o) => { if (!o) setVersionWarn(null); }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle className="flex flex-wrap items-center gap-2">
-              换版本启动 profile「{versionWarn?.profile}」？
-              <Badge variant={versionWarn?.direction === "downgrade" ? "destructive" : "warning"}>
-                {versionWarn?.direction === "downgrade" ? "降级" : "升级"}
-              </Badge>
-            </AlertDialogTitle>
+            <AlertDialogMedia className="bg-warning/15">
+              <TriangleAlert className="text-warning" />
+            </AlertDialogMedia>
+            <AlertDialogTitle>dsh 启动版本与上次不一致</AlertDialogTitle>
             <AlertDialogDescription>
-              <span className="block space-y-1.5">
-                <span className="flex flex-wrap items-center gap-x-2">
-                  <span>上次成功启动</span>
-                  <span className="font-mono text-foreground">dsh {versionWarn?.fromVersion ?? "-"}</span>
-                </span>
-                <span className="flex flex-wrap items-center gap-x-2">
-                  <span>本次将启动</span>
-                  <span className="font-mono text-foreground">dsh {versionWarn?.toVersion ?? "-"}</span>
-                </span>
-              </span>
+              profile「{versionWarn?.profile}」要换用不同的 dsh 版本启动，
+              可能因插件或配置不兼容导致启动失败。推荐先复制一份试用，
+              跑不起来原实例也不受影响。
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <Alert variant="destructive">
-            <TriangleAlert />
-            <AlertTitle>可能导致 profile 无法启动</AlertTitle>
-            <AlertDescription>
-              dsh 版本变化后，这个 profile 里的插件可能版本不兼容、配置格式对不上，
-              表现为启动报错、界面打不开，甚至读写到一半的数据异常。
-              <span className="text-foreground">降级比升级更危险</span>
-              ：新版本写过的配置，旧版本可能读不了。
-              建议先停止该 profile 之外的其它实例、必要时到「版本」页换回上一个可用版本再试。
-            </AlertDescription>
-          </Alert>
-          <p className="text-xs text-muted-foreground">
-            确认后会把它记为新的绑定版本，同样的版本组合不再重复提示；取消则不启动。
-          </p>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
+          <div className="grid gap-px overflow-hidden rounded-lg border border-border/60 bg-border/60">
+            <div className="grid grid-cols-[6.5rem_1fr] items-center gap-2 bg-popover px-3 py-1.5 text-sm">
+              <span className="text-xs text-muted-foreground">上次成功启动</span>
+              <span className="truncate font-mono text-[13px]">dsh {versionWarn?.fromVersion ?? "-"}</span>
+            </div>
+            <div className="grid grid-cols-[6.5rem_1fr] items-center gap-2 bg-popover px-3 py-1.5 text-sm">
+              <span className="text-xs text-muted-foreground">本次将启动</span>
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="truncate font-mono text-[13px]">dsh {versionWarn?.toVersion ?? "-"}</span>
+                <Badge variant={versionWarn?.direction === "downgrade" ? "destructive" : "warning"}>
+                  {versionWarn?.direction === "downgrade" ? "降级" : "升级"}
+                </Badge>
+              </span>
+            </div>
+          </div>
+          {/* 三档纵向排布：推荐动作在最上，取消收底（flex-col-reverse 下 DOM 序与视觉相反） */}
+          <AlertDialogFooter className="sm:flex-col-reverse">
+            <AlertDialogCancel className="w-full">取消</AlertDialogCancel>
             <AlertDialogAction
               variant="destructive"
+              className="w-full"
               onClick={() => {
                 const w = versionWarn;
                 setVersionWarn(null);
                 if (w) void doStartProfile(w.profile, true);
               }}
             >
-              已知风险，继续启动
+              <TriangleAlert /> 同意风险，强制启动
+            </AlertDialogAction>
+            <AlertDialogAction
+              className="w-full"
+              onClick={() => {
+                const w = versionWarn;
+                setVersionWarn(null);
+                if (w) {
+                  setCopyAndStart(true);
+                  setCopySource(w.profile);
+                }
+              }}
+            >
+              <CopyPlus /> 复制 profile 试用启动
+              <Badge variant="secondary" className="ml-1">推荐</Badge>
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
