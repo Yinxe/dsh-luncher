@@ -1,5 +1,5 @@
 /** 主内容区的视图标识（侧栏导航项与之对应） */
-export type View = "versions" | "profiles" | "plugins" | "models" | "config" | "credentials";
+export type View = "quick" | "versions" | "profiles" | "plugins" | "models" | "config" | "credentials";
 
 export type InstallSource = "managed" | "global" | "path";
 

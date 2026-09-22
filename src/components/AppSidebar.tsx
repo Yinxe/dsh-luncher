@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import {
-  Bot, Copy, ExternalLink, FileCog, KeyRound, Package, Puzzle, Rocket, ScrollText, X,
+  Bot, Copy, ExternalLink, FileCog, Home, KeyRound, Package, Puzzle, Rocket, ScrollText, X,
 } from "lucide-react";
 
 import {
@@ -136,6 +136,7 @@ export default function AppSidebar({
   );
 
   const navItems: Array<[View, string, typeof Package, number | null, "warning" | "success" | null]> = [
+    ["quick", "首页", Home, null, null],
     ["versions", "版本与安装", Package, upgradableCount > 0 ? upgradableCount : null, "warning"],
     ["profiles", "Profile 实例", Rocket, runningInstanceCount > 0 ? runningInstanceCount : null, "success"],
     ["plugins", "插件管理", Puzzle, null, null],

@@ -38,6 +38,7 @@ import ConfigView from "./components/ConfigView";
 import ModelConfigView from "./components/ModelConfigView";
 import CredentialsView from "./components/CredentialsView";
 import PluginsView from "./components/PluginsView";
+import QuickActionsView from "./components/QuickActionsView";
 import ProcessSidePanel from "./components/ProcessSidePanel";
 import VersionRow from "./components/VersionRow";
 import SettingsDrawer from "./components/SettingsDrawer";
@@ -101,7 +102,7 @@ export default function App() {
   const [runtimeJob, setRuntimeJob] = useState<{ received: number; total: number; log: string[] } | null>(null);
   const runtimeBusy = useRef(false);
   const [instances, setInstances] = useState<ProfileInstance[]>([]);
-  const [view, setView] = useState<View>("versions");
+  const [view, setView] = useState<View>("quick");
   const [verScope, setVerScope] = useState<"all" | "installed">("all");
   /** 更新日志对话框当前定位的 dsh 版本（null = 关闭） */
   const [notesVersion, setNotesVersion] = useState<string | null>(null);
@@ -981,6 +982,28 @@ export default function App() {
           key={view}
           className="min-h-0 flex-1 animate-in fade-in slide-in-from-bottom-2 overflow-y-auto p-3 duration-200 sm:p-4 lg:p-5"
         >
+          {view === "quick" && (
+            <QuickActionsView
+              row={instanceRows.find((r) => r.profile === "web") ?? null}
+              activeVersion={settings.activeVersion}
+              hasNode={!!env.node}
+              hasInstalled={installed.length > 0}
+              starting={startingProfile === "web"}
+              restarting={restartingProfile === "web"}
+              initBusy={initBusy}
+              onStart={(p) => void doStartProfile(p)}
+              onStop={(row) => void doStopInstance(row)}
+              onRestart={(p) => void doRestartProfile(p)}
+              onOpenWeb={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
+              onNavigate={(v) => {
+                // 与侧栏一致：进入插件页清掉 Profile 卡片带过来的预选
+                if (v === "plugins") setPluginsSeed(null);
+                setView(v);
+              }}
+              onInitDsh={() => void doInitDsh()}
+            />
+          )}
+
           {view === "versions" && (
             <div className="space-y-4">
               {/* 两张总览卡片：窄窗口单列堆叠，宽窗口并排 */}
