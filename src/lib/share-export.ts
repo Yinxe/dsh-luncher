@@ -72,11 +72,16 @@ export async function nodeToPngBlob(node: HTMLElement, scale = 2): Promise<Blob>
     `<div xmlns="http://www.w3.org/1999/xhtml"><style>${xmlEscapeText(collectCss())}</style>${inner}</div>` +
     `</foreignObject></svg>`;
   const img = new Image();
+  // 用 blob: URL 而不是 data: URI——整板 SVG 序列化后可达数 MB，
+  // encodeURIComponent 后中文按 9 字符/字膨胀，会撞上 WebKit 的 data URI 长度上限，
+  // 表现为 img 静默 error（图片光栅化失败）。
+  const svgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
   await new Promise<void>((resolve, reject) => {
     img.addEventListener("load", () => resolve(), { once: true });
     img.addEventListener("error", () => reject(new Error(`图片光栅化失败（SVG ${svg.length} 字符 / ${pw}×${ph}）`)), { once: true });
-    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    img.src = svgUrl;
   });
+  URL.revokeObjectURL(svgUrl);
   const canvas = document.createElement("canvas");
   canvas.width = pw;
   canvas.height = ph;

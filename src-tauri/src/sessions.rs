@@ -710,7 +710,17 @@ pub struct ModelTokens { pub model: String, pub tokens: u64 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DayCell { pub day: String, pub tokens: u64, pub sessions: usize }
+pub struct DayCell {
+    pub day: String,
+    pub tokens: u64,
+    pub sessions: usize,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    /// 当日 Token 最高的模型（悬浮明细用）
+    pub top_model: Option<ModelTokens>,
+}
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -848,6 +858,8 @@ fn aggregate(
     }
     // 日聚合
     let mut by_day: BTreeMap<String, (u64, u64)> = BTreeMap::new(); // day → (tokens, calls)
+    let mut day_io: BTreeMap<String, [u64; 4]> = BTreeMap::new(); // day → (input, output, cacheRead, cacheWrite)
+    let mut day_models: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
     let mut by_model: BTreeMap<String, ModelUsage> = BTreeMap::new();
     let mut total = Overview::default();
     for r in global.values() {
@@ -855,6 +867,9 @@ fn aggregate(
         let day = by_day.entry(r.d.clone()).or_default();
         day.0 += tokens;
         day.1 += r.n;
+        let io = day_io.entry(r.d.clone()).or_insert([0; 4]);
+        io[0] += r.i; io[1] += r.o; io[2] += r.cr; io[3] += r.cw;
+        *day_models.entry(r.d.clone()).or_default().entry(r.m.clone()).or_default() += tokens;
         let m = by_model.entry(r.m.clone()).or_insert_with(|| ModelUsage { model: r.m.clone(), ..Default::default() });
         m.tokens += tokens; m.input += r.i; m.output += r.o; m.cache_read += r.cr; m.cache_write += r.cw; m.calls += r.n;
         total.total_input += r.i;
@@ -891,7 +906,21 @@ fn aggregate(
     while d <= today {
         let tokens = by_day.get(&d).map(|x| x.0).unwrap_or(0);
         let sessions = day_sessions.get(&d).copied().unwrap_or(0);
-        heatmap.push(DayCell { day: d.clone(), tokens, sessions });
+        let io = day_io.get(&d).copied().unwrap_or([0; 4]);
+        let top_model = day_models
+            .get(&d)
+            .and_then(|m| m.iter().max_by_key(|(_, v)| *v))
+            .map(|(model, tokens)| ModelTokens { model: model.clone(), tokens: *tokens });
+        heatmap.push(DayCell {
+            day: d.clone(),
+            tokens,
+            sessions,
+            input: io[0],
+            output: io[1],
+            cache_read: io[2],
+            cache_write: io[3],
+            top_model,
+        });
         d = day_add(&d, 1);
     }
 

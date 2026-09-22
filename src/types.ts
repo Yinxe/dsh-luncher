@@ -662,6 +662,11 @@ export interface DayCell {
   day: string;
   tokens: number;
   sessions: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  topModel: ModelTokens | null;
 }
 
 export interface ModelUsage {

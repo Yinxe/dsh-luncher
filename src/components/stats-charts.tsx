@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   Bar,
   BarChart,
@@ -6,12 +6,25 @@ import {
   Cell,
   ComposedChart,
   Line,
+  Pie,
+  PieChart,
   XAxis,
   YAxis,
 } from "recharts";
 import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
 import type { ModelTokens, ModelUsage, OnlineDay } from "../types";
-import { fmtDur, fmtHourAxis, fmtTok, fmtTokAxis, md, OTHER_COLOR, SERIES_COLORS } from "./stats-parts";
+import {
+  fmtDur,
+  fmtHourAxis,
+  fmtNum,
+  fmtTok,
+  fmtTokAxis,
+  FloatTip,
+  md,
+  OTHER_COLOR,
+  SERIES_COLORS,
+  tipAnchorRect,
+} from "./stats-parts";
 
 /**
  * 统计图表族：全部基于 recharts（经 shadcn ChartContainer 接入主题），
@@ -229,56 +242,124 @@ export function OnlineDayChart({
   );
 }
 
-function RankTip({ active, payload }: { active?: boolean; payload?: TipEntry[] }) {
+function DonutTip({ active, payload }: { active?: boolean; payload?: Array<{ payload?: { name: string; value: number; pct: number } }> }) {
   if (!active || !payload || payload.length === 0) return null;
-  const row = payload[0].payload as unknown as { full: string; v: number; share: number; calls: number } | undefined;
-  if (!row) return null;
+  const d = payload[0].payload;
+  if (!d) return null;
   return (
     <TipBox
-      title={<span className="font-mono">{row.full}</span>}
-      rows={[
-        { k: "Token", v: fmtTok(row.v) },
-        { k: "占比", v: `${(row.share * 100).toFixed(1)}%` },
-        { k: "请求", v: row.calls.toLocaleString() },
-      ]}
+      title={<span className="font-mono">{d.name}</span>}
+      rows={[{ k: "Token", v: fmtTok(d.value) }, { k: "占比", v: `${d.pct.toFixed(1)}%` }]}
     />
   );
 }
 
-/** 模型排行横向条（Top N，取色与堆叠图一致） */
-export function ModelRankChart({ models, topN = 8, disableAnimation }: { models: ModelUsage[]; topN?: number; disableAnimation?: boolean }) {
-  const top = models.slice(0, topN);
-  if (top.length === 0) return null;
-  // 分类轴自下而上渲染，反转让第一名落在顶部
-  const data = top
-    .map((m, i) => ({
-      y: m.model.length > 17 ? `${m.model.slice(0, 16)}…` : m.model,
-      full: m.model,
-      v: m.tokens,
-      share: m.share,
-      calls: m.calls,
-      c: SERIES_COLORS[i] ?? OTHER_COLOR,
-    }))
-    .reverse();
+interface ModelTip {
+  m: ModelUsage;
+  x: number;
+  y: number;
+}
+
+/** 模型用量分布：环形图（中心=累计 Token）+ 响应式卡片网格，悬浮卡片看用量构成 */
+export function ModelUsageBoard({ models, disableAnimation }: { models: ModelUsage[]; disableAnimation?: boolean }) {
+  const [tip, setTip] = useState<ModelTip | null>(null);
+  const total = models.reduce((a, m) => a + m.tokens, 0);
+  if (models.length === 0) return <div className="py-8 text-center text-sm text-muted-foreground">还没有任何模型用量记录</div>;
+  const top = models.slice(0, SERIES_COLORS.length);
+  const otherTokens = models.slice(top.length).reduce((a, m) => a + m.tokens, 0);
+  const pieData = [
+    ...top.map((m, i) => ({ name: m.model, value: m.tokens, color: SERIES_COLORS[i], pct: m.share * 100 })),
+    ...(otherTokens > 0 ? [{ name: "其他", value: otherTokens, color: OTHER_COLOR, pct: (otherTokens / Math.max(1, total)) * 100 }] : []),
+  ];
+  const colorOf = (i: number) => (i < SERIES_COLORS.length ? SERIES_COLORS[i] : OTHER_COLOR);
   return (
-    <ChartContainer config={{}} className="aspect-auto w-full" style={{ height: top.length * 30 + 12 }}>
-      <BarChart layout="vertical" data={data} margin={{ top: 2, right: 12, bottom: 2, left: 0 }}>
-        <XAxis type="number" hide />
-        <YAxis
-          type="category"
-          dataKey="y"
-          width={128}
-          tickLine={false}
-          axisLine={false}
-          tick={{ ...AXIS_TICK, fontFamily: "var(--font-mono)" }}
-        />
-        <ChartTooltip content={<RankTip />} />
-        <Bar dataKey="v" radius={[0, 4, 4, 0]} maxBarSize={18} isAnimationActive={!disableAnimation}>
-          {data.map((d, i) => (
-            <Cell key={i} fill={d.c} />
+    <div className="flex flex-col gap-5 sm:flex-row sm:items-start">
+      <div className="relative mx-auto w-[150px] shrink-0 sm:mx-0">
+        <ChartContainer config={{}} className="aspect-auto w-full" style={{ height: 150 }}>
+          <PieChart>
+            <ChartTooltip content={<DonutTip />} />
+            <Pie
+              data={pieData}
+              dataKey="value"
+              nameKey="name"
+              innerRadius="64%"
+              outerRadius="94%"
+              paddingAngle={pieData.length > 1 ? 2 : 0}
+              stroke="var(--card)"
+              startAngle={90}
+              endAngle={-270}
+              isAnimationActive={!disableAnimation}
+            >
+              {pieData.map((d, i) => (
+                <Cell key={i} fill={d.color} />
+              ))}
+            </Pie>
+          </PieChart>
+        </ChartContainer>
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+          <div className="font-mono text-lg font-bold leading-tight tabular-nums">{fmtTok(total)}</div>
+          <div className="text-[10px] text-muted-foreground">累计 Token</div>
+        </div>
+      </div>
+      <div
+        className="grid min-w-0 flex-1 content-start gap-x-5 gap-y-2.5 sm:grid-cols-2 xl:grid-cols-3"
+        onMouseLeave={() => setTip(null)}
+      >
+        {models.map((m, i) => {
+          const slash = m.model.indexOf("/");
+          const provider = slash > 0 ? m.model.slice(0, slash) : "—";
+          const short = slash > 0 ? m.model.slice(slash + 1) : m.model;
+          const c = colorOf(i);
+          return (
+            <div
+              key={m.model}
+              className="min-w-0"
+              onMouseEnter={(e) => {
+                const a = tipAnchorRect(e.currentTarget.getBoundingClientRect(), 170);
+                setTip({ m, ...a });
+              }}
+            >
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="h-2 w-2 shrink-0 rounded-[3px]" style={{ background: c }} />
+                <span className="min-w-0 truncate font-medium" title={m.model}>{short}</span>
+                <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
+                  {fmtTok(m.tokens)} · {(m.share * 100).toFixed(1)}%
+                </span>
+              </div>
+              <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted">
+                <div className="h-full rounded-full" style={{ width: `${Math.max(1.5, m.share * 100)}%`, background: c }} />
+              </div>
+              <div className="mt-1 truncate text-[10px] text-muted-foreground" title={`${provider} · ${m.calls} 次请求`}>
+                {provider} · 输入 {fmtTok(m.input)} · 输出 {fmtTok(m.output)} · 缓存 {fmtTok(m.cacheRead + m.cacheWrite)} ·{" "}
+                {fmtNum(m.calls)} 次
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {tip && (
+        <FloatTip x={tip.x} y={tip.y}>
+          <div className="truncate font-medium" title={tip.m.model}>
+            {tip.m.model} 用量构成
+          </div>
+          {([
+            ["输入", tip.m.input],
+            ["输出", tip.m.output],
+            ["缓存读", tip.m.cacheRead],
+            ["缓存写", tip.m.cacheWrite],
+          ] as const).map(([k, v]) => (
+            <div key={k} className="flex items-baseline justify-between gap-4 text-[11px]">
+              <span className="text-muted-foreground">{k}</span>
+              <span className="font-mono tabular-nums">
+                {fmtNum(v)} · {tip.m.tokens ? ((v / tip.m.tokens) * 100).toFixed(1) : "0.0"}%
+              </span>
+            </div>
           ))}
-        </Bar>
-      </BarChart>
-    </ChartContainer>
+          <div className="mt-1 border-t border-border/60 pt-1 text-[10px] text-muted-foreground">
+            共 {fmtNum(tip.m.tokens)} tokens · {fmtNum(tip.m.calls)} 次请求
+          </div>
+        </FloatTip>
+      )}
+    </div>
   );
 }

@@ -1,8 +1,7 @@
 import { forwardRef, useMemo } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { SessionStats, ShareIdentity } from "../types";
-import { ModelRankChart, OnlineDayChart, StackModelChart, type StackPoint } from "./stats-charts";
+import { ModelUsageBoard, OnlineDayChart, StackModelChart, type StackPoint } from "./stats-charts";
 import { fmtDur, fmtNum, fmtTok, Heatmap, md, ModelLegend, SERIES_COLORS, StatCard } from "./stats-parts";
 
 interface Props {
@@ -26,8 +25,8 @@ function BoardTitle({ eyebrow, title }: { eyebrow: string; title: string }) {
 }
 
 /**
- * 分享卡（1280px 定宽板）。导出时对这块 DOM 做 2× 光栅化，
- * 版式：页头（署名/来源条）→ 三大主数 → KPI 阵列 → 趋势 → 在线+排行 → 热力图 → 模型明细。
+ * 分享卡（流式板：宽屏封顶 1280px，窄屏随容器降列）。导出时对这块 DOM 做 2× 光栅化，
+ * 版式：页头（署名/来源条）→ 三大主数 → KPI 阵列 → 趋势 → 在线 → 热力图 → 模型用量分布。
  * 所有图表关闭动画（disableAnimation），保证逐帧光栅化的确定性。
  */
 export const ShareBoard = forwardRef<HTMLDivElement, Props>(function ShareBoard(
@@ -47,11 +46,10 @@ export const ShareBoard = forwardRef<HTMLDivElement, Props>(function ShareBoard(
     [stats],
   );
 
-  const topModels = stats.models.slice(0, 10);
   const totalOnline = on.totalMs[gap] ?? 0;
 
   return (
-    <div ref={ref} className="w-[1280px] space-y-4 bg-background p-10 text-foreground">
+    <div ref={ref} className="mx-auto w-full min-w-[720px] max-w-[1280px] space-y-4 bg-background p-6 text-foreground sm:p-10">
       <header className="space-y-2">
         <div className="flex items-end justify-between border-b border-border pb-3">
           <div>
@@ -77,7 +75,7 @@ export const ShareBoard = forwardRef<HTMLDivElement, Props>(function ShareBoard(
       </header>
 
       {/* 三大主数 */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <Card className="border-primary/25 bg-gradient-to-br from-secondary/70 via-card to-card">
           <CardContent className="p-4">
             <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--eyebrow)]">总 Token · 全历史</div>
@@ -108,7 +106,7 @@ export const ShareBoard = forwardRef<HTMLDivElement, Props>(function ShareBoard(
       </div>
 
       {/* KPI 阵列 */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
         <StatCard label="今日" value={fmtTok(stats.today.total)} sub={`${fmtNum(stats.today.calls)} 次请求 · 昨日 ${fmtTok(stats.today.yesterdayTotal)}`} />
         <StatCard label="峰值日" value={ov.peakDay ? fmtTok(ov.peakDay.tokens) : "—"} sub={ov.peakDay?.day} />
         <StatCard label="最大单请求" value={ov.peakStep ? fmtTok(ov.peakStep.tokens) : "—"} sub={ov.peakStep ? `${ov.peakStep.day} · ${ov.peakStep.model}` : undefined} />
@@ -126,68 +124,33 @@ export const ShareBoard = forwardRef<HTMLDivElement, Props>(function ShareBoard(
         </CardContent>
       </Card>
 
-      {/* 每日在线 + 模型排行 */}
-      <div className="grid grid-cols-2 gap-3">
-        <Card>
-          <CardContent className="p-4">
-            <BoardTitle eyebrow="Daily Online" title={`近 30 天每日在线（阈值 ${gapMin} 分钟）`} />
-            <OnlineDayChart
-              days={on.days.slice(-30)}
-              gap={gap}
-              height={232}
-              disableAnimation
-              emptyHint="没有在线记录"
-            />
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4">
-            <BoardTitle eyebrow="Models" title={`模型用量排行（全历史 Top ${Math.min(8, stats.models.length)}）`} />
-            <ModelRankChart models={stats.models} topN={8} disableAnimation />
-          </CardContent>
-        </Card>
-      </div>
+      {/* 每日在线整行 */}
+      <Card>
+        <CardContent className="p-4">
+          <BoardTitle eyebrow="Daily Online" title={`近 30 天每日在线（阈值 ${gapMin} 分钟）`} />
+          <OnlineDayChart
+            days={on.days.slice(-30)}
+            gap={gap}
+            height={232}
+            disableAnimation
+            emptyHint="没有在线记录"
+          />
+        </CardContent>
+      </Card>
 
       {/* 热力图整行（53 周需要全宽） */}
       <Card>
         <CardContent className="p-4">
-          <BoardTitle eyebrow="Activity" title="近 53 周活跃热力图" />
+          <BoardTitle eyebrow="Activity" title="近 53 周 Token 活动热力图" />
           <Heatmap cells={stats.heatmap} />
         </CardContent>
       </Card>
 
-      {/* 模型明细 */}
+      {/* 模型用量分布：环形图 + 卡片网格（导出时静态呈现，悬浮明细不出现） */}
       <Card>
         <CardContent className="p-4">
-          <BoardTitle eyebrow="Detail" title="模型用量明细（全历史 Top 10）" />
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-10">#</TableHead>
-                <TableHead>模型</TableHead>
-                <TableHead className="text-right">占比</TableHead>
-                <TableHead className="text-right">Token</TableHead>
-                <TableHead className="text-right">输入</TableHead>
-                <TableHead className="text-right">输出</TableHead>
-                <TableHead className="text-right">缓存读</TableHead>
-                <TableHead className="text-right">请求</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {topModels.map((m, i) => (
-                <TableRow key={m.model}>
-                  <TableCell className="text-muted-foreground">{i + 1}</TableCell>
-                  <TableCell className="max-w-[320px] truncate font-mono text-xs" title={m.model}>{m.model}</TableCell>
-                  <TableCell className="text-right font-mono tabular-nums">{(m.share * 100).toFixed(1)}%</TableCell>
-                  <TableCell className="text-right font-mono font-semibold tabular-nums">{fmtTok(m.tokens)}</TableCell>
-                  <TableCell className="text-right font-mono tabular-nums text-muted-foreground">{fmtTok(m.input)}</TableCell>
-                  <TableCell className="text-right font-mono tabular-nums text-muted-foreground">{fmtTok(m.output)}</TableCell>
-                  <TableCell className="text-right font-mono tabular-nums text-muted-foreground">{fmtTok(m.cacheRead)}</TableCell>
-                  <TableCell className="text-right font-mono tabular-nums text-muted-foreground">{fmtNum(m.calls)}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          <BoardTitle eyebrow="Models" title={`模型用量分布（全历史 ${stats.models.length} 个模型）`} />
+          <ModelUsageBoard models={stats.models} disableAnimation />
         </CardContent>
       </Card>
 
