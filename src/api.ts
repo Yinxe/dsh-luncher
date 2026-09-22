@@ -240,8 +240,8 @@ export const api = {
   reveal: (path: string) => invoke<void>("reveal_folder", { path }),
   openUrl: (url: string) => invoke<void>("open_external", { url }),
   /** 应用内独立窗口打开实例 Web UI；同一地址复用同一窗口，多实例可各开一个 */
-  openWebWindow: (url: string, title?: string) =>
-    invoke<void>("open_web_window", { url, title: title ?? null }),
+  openWebWindow: (url: string, title?: string, theme?: "dark" | "light") =>
+    invoke<void>("open_web_window", { url, title: title ?? null, theme: theme ?? null }),
   installRuntime: () => invoke<string>("install_runtime"),
   checkStarterUpdate: () => invoke<StarterUpdateStatus>("check_starter_update"),
   /** 下载并安装启动器新版本；非 Windows 上成功后进程会直接重启，不返回 */

@@ -522,9 +522,9 @@ export default function App() {
   const openDshWeb = useCallback((url: string, title?: string) => {
     const p = settingsRef.current?.webOpenMode === "browser"
       ? api.openUrl(url)
-      : api.openWebWindow(url, title);
+      : api.openWebWindow(url, title, resolved);
     p.catch((e) => addToast("err", String(e)));
-  }, [addToast]);
+  }, [addToast, resolved]);
 
   const doSetActiveVersion = useCallback(async (v: string) => {
     const s = settingsRef.current;

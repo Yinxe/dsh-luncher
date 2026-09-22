@@ -2036,6 +2036,7 @@ pub fn open_web_window(
     app: AppHandle,
     url: String,
     title: Option<String>,
+    theme: Option<String>,
 ) -> Result<(), String> {
     let parsed: tauri::Url = url
         .parse()
@@ -2069,15 +2070,54 @@ pub fn open_web_window(
         win.set_focus().map_err(|e| format!("聚焦窗口失败: {e}"))?;
         return Ok(());
     }
+    // 白屏刺眼的修复：外部页面要等网络/JS 就绪，先按主题铺好窗口底色，
+    // 并以隐藏方式创建，首屏加载完成（或 5 秒兜底）再显示。
+    let dark = theme.as_deref() != Some("light");
+    let bg = if dark {
+        tauri::utils::config::Color(23, 23, 23, 255)
+    } else {
+        tauri::utils::config::Color(251, 247, 239, 255)
+    };
+    let shown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shown_on_load = shown.clone();
     tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(parsed))
         .title(&win_title)
         .inner_size(1000.0, 720.0)
         .min_inner_size(480.0, 520.0)
         .resizable(true)
         .center()
+        .theme(Some(if dark {
+            tauri::Theme::Dark
+        } else {
+            tauri::Theme::Light
+        }))
+        .background_color(bg)
+        .visible(false)
         .initialization_script(PURGE_DSH_STORAGE_JS)
+        .on_page_load(move |win, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished
+                && !shown_on_load.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        })
         .build()
         .map_err(|e| format!("打开窗口失败：{e}"))?;
+    // 兜底：加载事件不来（实例已挂、导航失败等）也要把窗口亮出来，
+    // 让用户至少能看到并读到错误，而不是「点了没窗口」。
+    let shown_timeout = shown.clone();
+    let app_p = app.clone();
+    let label_p = label.clone();
+    let _ = std::thread::Builder::new().name("dsh-web-show-fallback".into()).spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        if shown_timeout.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        if let Some(win) = app_p.get_webview_window(&label_p) {
+            let _ = win.show();
+        }
+    });
     Ok(())
 }
 
