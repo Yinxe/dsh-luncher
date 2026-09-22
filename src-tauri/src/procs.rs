@@ -875,7 +875,8 @@ pub fn start_process_watcher() {
                     started.elapsed().as_millis(),
                 );
                 // 首轮与异常轮留痕：白屏/实例状态不更新这类问题的第一现场证据。
-                // 正常轮走 debug，否则每 8 秒一行会把日志刷掉。
+                // 正常轮不留痕：这行每几秒就出一条，DEBUG 级别下几分钟就能把 app.log
+                // 刷成同一行的复读，真正该看见的关键路径留痕反而被顶出屏幕。
                 let slow = started.elapsed() > Duration::from_secs(3);
                 if first {
                     crate::diag::info("app", &format!("首轮进程枚举 {ms}ms ok={ok}"));
@@ -885,8 +886,6 @@ pub fn start_process_watcher() {
                         "app",
                         &format!("进程枚举异常：{ms}ms ok={ok}（超时或 PowerShell/ps 不可用）"),
                     );
-                } else {
-                    crate::diag::debug("app", || format!("进程枚举 {ms}ms ok={ok}"));
                 }
                 match rx.recv_timeout(snapshot_ttl()) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
