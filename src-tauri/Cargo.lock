@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-starter"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "libc",

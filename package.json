@@ -1,7 +1,7 @@
 {
   "name": "dsh-starter",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Cross-platform launcher for @deepseek-ai/dsh",
   "type": "module",
   "scripts": {
