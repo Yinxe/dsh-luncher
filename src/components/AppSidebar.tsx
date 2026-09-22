@@ -158,9 +158,9 @@ export default function AppSidebar({
           {/* 走 public/ 静态资源，避免把 SVG 当 JS 模块加载（见 index.html 的 favicon） */}
           <img src="/dsh-logo.svg" alt="DSH" className="h-8 w-8 shrink-0" draggable={false} />
           <div className="min-w-0 leading-tight">
-            <div className="truncate text-[13px] font-bold tracking-tight">DSH Starter</div>
+            <div className="truncate text-[13px] font-bold tracking-tight">DSH Starter v{env.appVersion}</div>
             <div className="truncate text-[10px] text-muted-foreground">
-              @deepseek-ai/dsh · v{env.appVersion}
+              @deepseek-ai/dsh · {settings.activeVersion ? `v${settings.activeVersion}` : "未安装"}
             </div>
           </div>
           {/* 抽屉态没有 Sheet 自带的关闭按钮（Sidebar 隐藏了它），这里补一个 */}
