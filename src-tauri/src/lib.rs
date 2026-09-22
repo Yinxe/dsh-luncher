@@ -192,11 +192,20 @@ pub fn run() {
         .expect("error while building dsh starter");
 
     app.run(|app, event| {
-        // 启动器退出 → 结束所有内嵌 dsh 子进程
-        if let tauri::RunEvent::Exit = event {
-            diag::info("app", "启动器退出，结束所有内嵌实例");
-            let state = app.state::<procs::ProcState>();
-            procs::stop_all(&app, &state);
+        match event {
+            // macOS：最小化或隐藏到托盘后，点 Dock 图标系统只会发 Reopen 事件，
+            // 不会自己把窗口带回来 —— 不处理就是「图标点了没反应，只能从状态栏唤出」。
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
+                tray::show_main_window(app);
+            }
+            // 启动器退出 → 结束所有内嵌 dsh 子进程
+            tauri::RunEvent::Exit => {
+                diag::info("app", "启动器退出，结束所有内嵌实例");
+                let state = app.state::<procs::ProcState>();
+                procs::stop_all(&app, &state);
+            }
+            _ => {}
         }
     });
 }
