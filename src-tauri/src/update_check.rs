@@ -336,6 +336,14 @@ pub async fn install_builtin(app: &AppHandle, settings: &Settings) -> Result<Str
         let url = accel_url(update.download_url.as_str(), &prefix);
         tauri::Url::parse(&url).ok().filter(|u| *u != update.download_url)
     });
+    crate::diag::info(
+        "app",
+        &format!(
+            "开始应用内更新：{} → {}（下载源 {}）",
+            update.current_version, update.download_url,
+            if proxied.is_some() { "加速代理" } else { "直连" }
+        ),
+    );
 
     let bytes = match proxied {
         Some(url) => {
@@ -349,7 +357,7 @@ pub async fn install_builtin(app: &AppHandle, settings: &Settings) -> Result<Str
                         "starter-update-progress",
                         StarterUpdateProgress { received: 0, total: 0 },
                     );
-                    eprintln!("[updater] 加速下载失败，回退直连：{e}");
+                    crate::diag::warn("app", &format!("加速下载失败，回退直连：{e}"));
                     download_pkg(&update, app)
                         .await
                         .map_err(|e| format!("下载或校验安装包失败：{e}"))?
@@ -360,8 +368,16 @@ pub async fn install_builtin(app: &AppHandle, settings: &Settings) -> Result<Str
             .await
             .map_err(|e| format!("下载或校验安装包失败：{e}"))?,
     };
+    crate::diag::info(
+        "app",
+        &format!("更新包下载完成并通过验签：{}（{} 字节）", update.version, bytes.len()),
+    );
 
-    update.install(bytes).map_err(|e| format!("安装失败：{e}"))?;
+    if let Err(e) = update.install(bytes) {
+        crate::diag::warn("app", &format!("应用内更新安装失败：{e}"));
+        return Err(format!("安装失败：{e}"));
+    }
+    crate::diag::info("app", "更新已安装，即将重启/交给安装器");
 
     #[cfg(windows)]
     {

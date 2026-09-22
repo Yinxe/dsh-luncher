@@ -188,6 +188,10 @@ pub fn read() -> Result<ModelConfig, String> {
     let doc: Yaml = match serde_yaml::from_str(&raw) {
         Ok(d) => d,
         Err(e) => {
+            crate::diag::warn(
+                "profile",
+                &format!("settings.yaml 解析失败（模型配置不可用）：{}：{e}", path.display()),
+            );
             out.parse_error = Some(e.to_string());
             return Ok(out);
         }
@@ -669,6 +673,21 @@ pub fn write(input: &ModelConfigInput) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("写入失败: {e}"));
     }
+    // 只记 provider/model 名与字节数：settings.yaml 同节可能带 apiKeyEnv 等引用信息
+    crate::diag::info(
+        "profile",
+        &format!(
+            "模型配置已保存：{} 共 {} 个 provider（{} 字节）providers=[{}] 默认={}",
+            path.display(),
+            providers.len(),
+            out.len(),
+            providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", "),
+            default_model
+                .as_ref()
+                .map(|d| format!("{}/{}", d.provider, d.model))
+                .unwrap_or_else(|| "（清除）".into()),
+        ),
+    );
     Ok(())
 }
 
@@ -763,14 +782,31 @@ pub async fn fetch_provider_models(
     } else if let Some(k) = key {
         req = req.header("Authorization", format!("Bearer {k}"));
     }
-    let resp = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
+    let resp = req.send().await.map_err(|e| {
+        crate::diag::warn("network", &format!("拉取模型列表失败：{}：{e}", crate::registry::scrub_url(&url)));
+        format!("请求失败: {e}")
+    })?;
     let status = resp.status();
     let text = resp.text().await.map_err(|e| format!("读取响应失败: {e}"))?;
     if !status.is_success() {
         let brief: String = text.chars().take(200).collect();
+        // 响应体可能回显请求头片段，日志只记状态码
+        crate::diag::warn(
+            "network",
+            &format!("拉取模型列表 HTTP {status}：{}", crate::registry::scrub_url(&url)),
+        );
         return Err(format!("HTTP {status}：{brief}"));
     }
-    parse_models_response(&text)
+    let models = parse_models_response(&text)?;
+    crate::diag::info(
+        "network",
+        &format!(
+            "拉取模型列表成功：{} → {} 个模型",
+            crate::registry::scrub_url(&url),
+            models.len()
+        ),
+    );
+    Ok(models)
 }
 
 #[cfg(test)]
@@ -1297,11 +1333,14 @@ dshp-token-meter:
             Some("from-env")
         );
         // 凭据 refs 优先于环境变量
-        crate::credentials::write_refs(&[crate::credentials::CredentialRefInput {
-            name: "TEST_MODEL_KEY_ENV".into(),
-            value: "from-cred".into(),
-            note: Some("模型密钥".into()),
-        }])
+        crate::credentials::write_refs(
+            &[crate::credentials::CredentialRefInput {
+                name: "TEST_MODEL_KEY_ENV".into(),
+                value: "from-cred".into(),
+                note: Some("模型密钥".into()),
+            }],
+            None,
+        )
         .unwrap();
         assert_eq!(
             resolve_api_key("TEST_MODEL_KEY_ENV").as_deref(),

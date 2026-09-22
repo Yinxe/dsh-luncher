@@ -322,19 +322,27 @@ fn validate_yaml(content: &str) -> Result<(), String> {
     serde_yaml::from_str::<serde_yaml::Value>(content)
         .map(|_| ())
         .map_err(|e| {
+            // 前端已按行列拦一道，这里是写盘前的权威兜底：同样带上「第 X 行第 Y 列」，
+            // 让用户拿到的报错能直接对到编辑器行号（Location 已做 1 起始换算）。
+            let loc = e.location().map(|l| format!("第 {} 行第 {} 列：", l.line(), l.column()));
+            let located = |msg: &str| match loc {
+                Some(l) => format!("{l}{msg}"),
+                None => msg.to_string(),
+            };
             let msg = e.to_string();
             // 「多文档」来路基本只有一个：顶层 `[]`（flow 写法）后面接了 `- id: …` 这类
             // block 条目 —— `[]` 自己就构成整个文档，后面只能靠 `---` 开新文档。原文
             // 只说了「不支持多文档」，一个字都没说该怎么改，这里补上下一步动作。
             if msg.contains("more than one document") {
                 return format!(
-                    "YAML 语法错误：{msg}\n\
+                    "YAML 语法错误：{}\n\
                      提示：这份文件里有多个 YAML 文档 —— 顶层的 `[]` 是 flow 写法，\
                      后面不能再接 `- id: …` 这样的 block 条目。删掉那行 `[]`（条目照旧逐条列出）即可；\
-                     单个 `[]` 本身是合法的空补丁层。"
+                     单个 `[]` 本身是合法的空补丁层。",
+                    located(&msg)
                 );
             }
-            format!("YAML 语法错误：{msg}")
+            format!("YAML 语法错误：{}", located(&msg))
         })
 }
 
@@ -473,7 +481,16 @@ pub fn set_bundle_enabled(
             "无法解析插件包 {name} 声明的插件 ID，无法启停（可卸载该包或手动编辑 cordis.patch.yml）"
         ));
     }
-    set_ids_disabled(profile, name, &ids, !enabled)
+    set_ids_disabled(profile, name, &ids, !enabled)?;
+    crate::diag::info(
+        "profile",
+        &format!(
+            "插件包启停：profile「{profile}」{name} → {}（涉及 {} 个插件 id）",
+            if enabled { "启用" } else { "停用" },
+            ids.len()
+        ),
+    );
+    Ok(())
 }
 
 /// 顶层「空 flow 占位」行判定：profile 模板自带的 patch 文件就是
@@ -841,6 +858,10 @@ pub fn write_profile_file(profile: &str, file: &str, content: &str) -> Result<()
     let path = profile_dir(profile)?.join(file);
     backup(&path)?;
     std::fs::write(&path, content).map_err(|e| format!("写入失败: {e}"))?;
+    crate::diag::info(
+        "profile",
+        &format!("profile「{profile}」配置已保存：{file}（{} 字节）", content.len()),
+    );
     Ok(())
 }
 
@@ -858,6 +879,11 @@ pub fn write_global_config(content: &str) -> Result<(), String> {
     let path = global_config_path();
     backup(&path)?;
     std::fs::write(&path, content).map_err(|e| format!("写入失败: {e}"))?;
+    // settings.yaml 含 apiKeyEnv 等引用信息，只记路径与字节数
+    crate::diag::info(
+        "profile",
+        &format!("全局配置已保存：{}（{} 字节）", path.display(), content.len()),
+    );
     Ok(())
 }
 
@@ -1136,7 +1162,15 @@ pub fn set_web_quick_config(profile: &str, input: &WebQuickConfigInput) -> Resul
     }
     validate_yaml(&out_text)?;
     backup(&path)?;
+    let written = out_text.len();
     std::fs::write(&path, out_text).map_err(|e| format!("写入失败: {e}"))?;
+    crate::diag::info(
+        "profile",
+        &format!(
+            "web 快捷配置已保存：profile「{profile}」{}:{}（{written} 字节）",
+            input.host, input.port
+        ),
+    );
     Ok(())
 }
 
@@ -1161,7 +1195,7 @@ pub fn copy_profile(source: &str, new_name: &str) -> Result<(), String> {
         }
     }
     let src_dir = root.join(source);
-    if src_dir.is_dir() {
+    let r = if src_dir.is_dir() {
         copy_dir_excluding(&src_dir, &dst, &["node_modules", "cache"])
     } else {
         let src = ["yaml", "yml", "json"]
@@ -1175,7 +1209,11 @@ pub fn copy_profile(source: &str, new_name: &str) -> Result<(), String> {
         std::fs::copy(&src, root.join(format!("{name}.{ext}")))
             .map(|_| ())
             .map_err(|e| format!("复制失败: {e}"))
+    };
+    if r.is_ok() {
+        crate::diag::info("profile", &format!("profile 已复制：{source} → {name}"));
     }
+    r
 }
 
 /// 递归复制目录，跳过指定名称的子目录（可重建的运行时产物）与符号链接等非普通文件
@@ -1273,6 +1311,10 @@ pub fn rename_profile(old: &str, new_name: &str) -> Result<String, String> {
         root.join(format!("{name}.{ext}"))
     };
     move_path(&src, &dst)?;
+    crate::diag::info(
+        "profile",
+        &format!("profile 已重命名：{old} → {name}（{}）", dst.display()),
+    );
     Ok(dst.to_string_lossy().into_owned())
 }
 
@@ -1301,6 +1343,10 @@ pub fn delete_profile(name: &str) -> Result<String, String> {
         trash.join(format!("{name}-{ts}.{ext}"))
     };
     move_path(&src, &dst)?;
+    crate::diag::info(
+        "profile",
+        &format!("profile「{name}」已删除并移入回收：{}", dst.display()),
+    );
     Ok(dst.to_string_lossy().into_owned())
 }
 
@@ -1471,15 +1517,21 @@ fn init_profile_from_template(
         .output()
         .map_err(|e| format!("无法执行 dsh（{}）: {e}", bin_js.display()))?;
     if out.status.success() {
+        crate::diag::info(
+            "profile",
+            &format!("dsh 模板初始化 profile 成功：{name} ← 模板 {template}"),
+        );
         return Ok(());
     }
     let err = String::from_utf8_lossy(&out.stderr);
     let err = err.trim();
-    Err(if err.is_empty() {
+    let msg = if err.is_empty() {
         format!("dsh 初始化 profile 失败（退出码 {:?}）", out.status.code())
     } else {
         format!("dsh 初始化 profile 失败：{err}")
-    })
+    };
+    crate::diag::warn("profile", &format!("{msg}：{name} ← 模板 {template}"));
+    Err(msg)
 }
 
 /// 防呆：骨架必须就是「官方 base + web-app」。模板被本地改过（或 dsh 换了模板）时
@@ -1553,11 +1605,21 @@ where
         write_recovery_quick_config(RECOVERY_PROFILE)
     })();
     match built {
-        Ok(port) => Ok(RecoveryCreated {
-            name: RECOVERY_PROFILE.to_string(),
-            port,
-        }),
+        Ok(port) => {
+            crate::diag::info(
+                "profile",
+                &format!("恢复模式 profile「{RECOVERY_PROFILE}」已创建（端口 {port}）"),
+            );
+            Ok(RecoveryCreated {
+                name: RECOVERY_PROFILE.to_string(),
+                port,
+            })
+        }
         Err(e) => {
+            crate::diag::warn(
+                "profile",
+                &format!("恢复模式创建失败，已回滚骨架：{e}"),
+            );
             let _ = std::fs::remove_dir_all(&dir);
             Err(e)
         }
@@ -1665,6 +1727,10 @@ pub fn restore_deleted_profile(dir_name: &str) -> Result<String, String> {
         root.join(format!("{name}.{ext}"))
     };
     move_path(&src, &dst)?;
+    crate::diag::info(
+        "profile",
+        &format!("回收站条目「{dir_name}」已还原为 profile「{name}」（{}）", dst.display()),
+    );
     Ok(dst.to_string_lossy().into_owned())
 }
 
@@ -1675,10 +1741,17 @@ pub fn purge_deleted_profile(dir_name: &str) -> Result<(), String> {
     if !path.exists() {
         return Err("回收站里找不到该条目".into());
     }
-    if path.is_dir() {
-        std::fs::remove_dir_all(&path).map_err(|e| format!("彻底删除失败: {e}"))
+    let r = if path.is_dir() {
+        std::fs::remove_dir_all(&path)
     } else {
-        std::fs::remove_file(&path).map_err(|e| format!("彻底删除失败: {e}"))
+        std::fs::remove_file(&path)
+    };
+    match r {
+        Ok(()) => {
+            crate::diag::warn("profile", &format!("回收站条目已彻底删除（不可恢复）：{dir_name}"));
+            Ok(())
+        }
+        Err(e) => Err(format!("彻底删除失败: {e}")),
     }
 }
 
@@ -2502,6 +2575,18 @@ mod tests {
         assert_eq!(mode, 0o600, "备份权限应跟随源文件，实际 {mode:#o}");
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 语法错误的报错必须带「第 X 行第 Y 列」，让用户能直接对到编辑器行号
+    #[test]
+    fn validate_yaml_errors_are_located() {
+        assert!(validate_yaml("a: 1\nb:\n  c: [1, 2]\n").is_ok());
+        let err = validate_yaml("a: 1\n  b: broken\n").unwrap_err();
+        assert!(err.contains('行') && err.contains('列'), "报错应带行列定位：{err}");
+        // 多文档提示同样不能丢定位
+        let err = validate_yaml("[]\n- id: x\n").unwrap_err();
+        assert!(err.contains("多个 YAML 文档"), "{err}");
+        assert!(err.contains('行'), "多文档报错也要带行号：{err}");
     }
 
     #[test]

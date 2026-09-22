@@ -13,6 +13,8 @@
   /* 无边框窗口的圆角：.app-frame 与 body 上的弹层遮罩共用；
      最大化时由 html.window-maximized 置零（见文件末尾） */
   --window-radius: 12px;
+  /* 自绘标题栏高度：侧栏的 fixed 定位要整体避开它（见本文件末尾 sidebar-container 覆盖） */
+  --titlebar-h: 34px;
   --background: #fbf7ef;
   --foreground: #1f2a24;
   --card: #ffffff;
@@ -362,9 +364,10 @@ body {
 }
 
 .window-titlebar {
+  position: relative; /* 居中的窗口标签以标题栏为定位父级 */
   display: flex;
   align-items: center;
-  height: 34px;
+  height: var(--titlebar-h);
   flex-shrink: 0;
   padding-left: 10px;
   border-bottom: 1px solid var(--border);
@@ -427,5 +430,13 @@ body {
 [data-slot="sheet-content"][data-side="bottom"] {
   border-bottom-right-radius: var(--window-radius);
   border-bottom-left-radius: var(--window-radius);
+}
+
+/* 侧栏的 fixed 容器默认 inset-y-0 + h-svh，会盖住顶部的自绘标题栏：
+   折叠态侧栏头部的 logo 正好压在标题栏「DSH Starter」上，应用名被截断。
+   整体下移让侧栏从标题栏下方起算（移动端 Sheet 抽屉是独立遮罩，不受影响）。 */
+[data-slot="sidebar-container"] {
+  top: var(--titlebar-h);
+  height: calc(100svh - var(--titlebar-h));
 }
 

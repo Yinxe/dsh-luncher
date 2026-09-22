@@ -277,6 +277,10 @@ fn run_install(
     if success {
         let pkg = target.join(crate::installed::PKG_DIR_IN_NODE_MODULES);
         if pkg.join("package.json").is_file() {
+            crate::diag::info(
+                "install",
+                &format!("安装 dsh {version} 完成：{}", target.display()),
+            );
             emit_log(app, version, "安装完成 ✔", "info");
             return Ok(format!("已安装到 {}", target.display()));
         }
@@ -293,6 +297,7 @@ fn run_install(
     // 失败或取消：清理半成品目录
     let _ = remove_version_dir(&target);
     if cancelled {
+        crate::diag::info("install", &format!("用户取消安装 dsh {version}，已清理半成品目录"));
         return Err("安装已取消".into());
     }
     let tail = stderr_tail.lock().unwrap().join("\n");
@@ -370,5 +375,9 @@ pub fn uninstall_managed(version: &str) -> Result<(), String> {
         return Err("未找到该版本的安装目录（全局/PATH 安装请在终端里自行卸载）".into());
     }
     remove_version_dir(&dir)?;
+    crate::diag::info(
+        "install",
+        &format!("已卸载启动器管理的 dsh {version}：{}", dir.display()),
+    );
     Ok(())
 }

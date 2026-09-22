@@ -10,11 +10,11 @@
 //! | --- | --- |
 //! | `app.log` | 生命周期：启动各阶段、版本、托盘、设置读写、环境探测、自更新 |
 //! | `instance.log` | dsh 实例：内嵌/独立/外部的启动、发现、归属判定、停止 |
-//! | `install.log` | dsh 版本：安装（npm 命令/退出码/stderr）、卸载、切换 |
+//! | `install.log` | dsh 版本：安装（npm 命令/退出码/stderr）、取消清理、卸载、切换、绑定版本 |
 //! | `runtime.log` | 内置 Node：下载字节数、解压尝试、目录快照 |
-//! | `plugin.log` | 插件：安装/更新/克隆任务的命令与结果 |
-//! | `profile.log` | profile：增删改、配置读写 |
-//! | `network.log` | 网络：registry / GitHub / 更新清单的请求与失败原因 |
+//! | `plugin.log` | 插件：安装/更新/克隆任务的命令与结果、清单修复 |
+//! | `profile.log` | profile：增删改、配置与凭据读写（只记键名，绝不记值） |
+//! | `network.log` | 网络：registry / GitHub / 更新清单的请求与失败原因、通道熔断、额度耗尽 |
 //! | `ui.log` | 前端报错（window.onerror / 未处理的 Promise / 报错 toast） |
 //! | `panic.log` | 崩溃：位置、消息、回溯 |
 //!
@@ -22,8 +22,9 @@
 //! `2026-09-21T01:23:45.678Z run=<本次启动标识> pid=<pid> +<距启动毫秒>ms LEVEL 正文`
 //! —— 时间可读、`run=` 能区分不同次启动、`LEVEL` 能 grep（`grep ERROR ui.log`）。
 //!
-//! 级别：默认 INFO（`info/warn/error` 都写）；`debug()` 默认丢弃，把环境变量
-//! `DSH_STARTER_LOG=debug` 打开后才会落盘（轮询类的逐次细节走 debug，避免日志被刷爆）。
+//! 级别：默认 INFO（`info/warn/error` 都写）；`debug()` 默认丢弃。
+//! 可在应用内「系统日志」页设置（settings.json 的 `log_level`，**运行期立即生效**）；
+//! 环境变量 `DSH_STARTER_LOG=debug` 优先于设置并锁定（给高级用户留强制覆盖通道）。
 //!
 //! 约束：日志**不能自己变成故障源** —— 写入失败一律静默忽略，单文件超上限就滚动一份
 //! `.1`；`debug` 级别关掉时连字符串都不拼。
@@ -37,15 +38,18 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 /// 单个日志文件上限；超过就滚动一份 `.1`（只留一代，不会无限增长）
 const MAX_BYTES: u64 = 1024 * 1024;
 
+/// 诊断包里每个分类日志带的尾部大小
+const DIAG_TAIL_BYTES: u64 = 16 * 1024;
+
 /// 目录名 → 用途（README / 诊断包里都引用这张表，避免以后各写一份）
 pub const CATEGORIES: &[(&str, &str)] = &[
     ("app", "生命周期：启动阶段、版本、托盘、设置、环境探测、自更新"),
     ("instance", "dsh 实例：内嵌/独立/外部的启动、发现、归属判定、停止"),
-    ("install", "dsh 版本：安装（npm 命令/退出码/stderr）、卸载、切换"),
+    ("install", "dsh 版本：安装（npm 命令/退出码/stderr）、取消清理、卸载、切换、绑定版本"),
     ("runtime", "内置 Node：下载、解压尝试、目录快照"),
-    ("plugin", "插件：安装/更新/克隆任务的命令与结果"),
-    ("profile", "profile：增删改与配置读写"),
-    ("network", "网络：registry / GitHub / 更新清单请求与失败原因"),
+    ("plugin", "插件：安装/更新/克隆任务的命令与结果、清单修复"),
+    ("profile", "profile：增删改、配置与凭据读写（只记键名）"),
+    ("network", "网络：registry / GitHub / 更新清单请求、通道熔断、额度耗尽"),
     ("ui", "前端报错"),
     ("panic", "崩溃：位置、消息、回溯"),
 ];
@@ -68,7 +72,7 @@ impl Level {
         }
     }
 
-    fn code(self) -> u8 {
+    const fn code(self) -> u8 {
         match self {
             Level::Debug => 0,
             Level::Info => 1,
@@ -76,31 +80,57 @@ impl Level {
             Level::Error => 3,
         }
     }
+
+    /// 解析 `debug` / `trace` / `info` / `warn` / `error`（大小写不敏感）；非法值返回 None
+    pub fn parse(s: &str) -> Option<Level> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "debug" | "trace" => Some(Level::Debug),
+            "info" => Some(Level::Info),
+            "warn" => Some(Level::Warn),
+            "error" => Some(Level::Error),
+            _ => None,
+        }
+    }
 }
 
-/// 当前级别（默认 INFO；`DSH_STARTER_LOG=debug` 打开细节日志）
+/// `DSH_STARTER_LOG` 的解析结果（OnceLock：环境变量只在进程启动时有效一次）
+fn env_level() -> Option<Level> {
+    static ENV: std::sync::OnceLock<Option<Level>> = std::sync::OnceLock::new();
+    *ENV.get_or_init(|| Level::parse(&std::env::var("DSH_STARTER_LOG").unwrap_or_default()))
+}
+
+/// 设置里的级别（运行期可写；环境变量存在时被其覆盖）
+static CONFIGURED: AtomicU8 = AtomicU8::new(Level::Info.code());
+
+/// 当前生效级别：环境变量 > 设置（默认 INFO）
 fn min_level() -> Level {
-    static LEVEL: AtomicU8 = AtomicU8::new(u8::MAX);
-    let cached = LEVEL.load(Ordering::Relaxed);
-    if cached != u8::MAX {
-        return match cached {
-            0 => Level::Debug,
-            2 => Level::Warn,
-            _ => Level::Info,
-        };
+    if let Some(l) = env_level() {
+        return l;
     }
-    let parsed = match std::env::var("DSH_STARTER_LOG")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "debug" | "trace" => Level::Debug,
-        "warn" => Level::Warn,
-        "error" => Level::Error,
+    match CONFIGURED.load(Ordering::Relaxed) {
+        0 => Level::Debug,
+        2 => Level::Warn,
+        3 => Level::Error,
         _ => Level::Info,
-    };
-    LEVEL.store(parsed.code(), Ordering::Relaxed);
-    parsed
+    }
+}
+
+/// 级别是否被 `DSH_STARTER_LOG` 环境变量锁定（锁定时应用内改级别不生效）
+pub fn env_pinned() -> bool {
+    env_level().is_some()
+}
+
+/// 应用设置里的日志级别（启动时与保存设置时都调它）。
+/// 返回 false = 被环境变量覆盖，本次设置被忽略。
+pub fn set_runtime_level(s: &str) -> bool {
+    if env_pinned() {
+        return false;
+    }
+    CONFIGURED.store(
+        Level::parse(s).unwrap_or(Level::Info).code(),
+        Ordering::Relaxed,
+    );
+    true
 }
 
 /// 当前级别名（写进启动横幅，排查时先确认「是不是没开 debug」）
@@ -108,7 +138,7 @@ pub fn level_label() -> &'static str {
     min_level().label()
 }
 
-/// 日志目录（`~/.dsh-starter/logs/`）：设置里「打开日志目录」按钮指向它
+/// 日志目录（`~/.dsh-starter/logs/`）：「系统日志」页的「打开日志目录」按钮指向它
 pub fn logs_dir() -> PathBuf {
     crate::settings::starter_home().join("logs")
 }
@@ -176,9 +206,21 @@ fn line(level: Level, msg: &str) -> String {
 
 /// 追加一行到 `logs/<cat>.log`。多线程可能同时写（panic hook 也在内），统一加锁。
 fn append(cat: &str, text: &str) {
-    static LOCK: Mutex<()> = Mutex::new(());
-    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    write_append(&logs_dir(), cat, text);
+    // 单测里彻底不落盘：`starter_home()` 跟着 `DSH_STARTER_HOME` 走，而测试线程会
+    // 并发 set/remove 这个变量 —— 谁赶上「没设」的那一瞬间，就会把测试噪音（甚至
+    // 凭据键名）写进用户真实的日志目录，再随诊断包发给别人。
+    // 需要验证写入内容的测试请直接用 `write_append` 指定临时目录。
+    #[cfg(test)]
+    {
+        let _ = (cat, text);
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        write_append(&logs_dir(), cat, text);
+    }
 }
 
 /// 可指定目录的追加（诊断包等场景复用；测试也用它避免污染真实日志目录）
@@ -233,7 +275,7 @@ pub fn error(cat: &str, msg: &str) {
 }
 
 /// 细节日志：默认丢弃。轮询类（实例状态、端口归属）逐次记录会刷爆日志，
-/// 需要时用 `DSH_STARTER_LOG=debug` 打开。
+/// 需要时在应用内「系统日志」页把级别调到 debug（或用 `DSH_STARTER_LOG=debug`）。
 pub fn debug(cat: &str, msg: impl FnOnce() -> String) {
     if min_level() > Level::Debug {
         return;
@@ -373,10 +415,12 @@ pub fn diagnostics(app_version: &str, settings: &crate::settings::Settings) -> S
     out.push_str("\n---- 日志 ----\n");
     for (cat, desc) in CATEGORIES {
         out.push_str(&format!("\n===== {cat}.log（{desc}）=====\n"));
-        match read_tail(&logs_dir().join(format!("{cat}.log")), 64 * 1024) {
+        // 每个分类只带末尾 16KB：诊断包是拿去聊天里发的，排查靠的是最近一段，
+        // 全量 9×64KB 既难粘贴也没人读
+        match read_tail(&logs_dir().join(format!("{cat}.log")), DIAG_TAIL_BYTES) {
             Some((text, truncated)) => {
                 if truncated {
-                    out.push_str("（仅显示末尾 64KB）\n");
+                    out.push_str(&format!("（仅显示末尾 {}KB）\n", DIAG_TAIL_BYTES / 1024));
                 }
                 out.push_str(&text);
                 if !text.ends_with('\n') {
@@ -411,6 +455,84 @@ fn read_tail(path: &Path, max: u64) -> Option<(String, bool)> {
         }
     }
     (!text.is_empty()).then_some((text, truncated))
+}
+
+/// 某个分类日志（`.1` + 当前文件连续）的尾部，供「系统日志」页展示。
+/// `cat` 必须是 [`CATEGORIES`] 里的名字（调用方先校验），空/缺失返回 ("", false)。
+pub fn read_cat_tail(cat: &str, max: u64) -> (String, bool) {
+    read_tail(&logs_dir().join(format!("{cat}.log")), max).unwrap_or_default()
+}
+
+/// 删除某个分类的当前与滚动日志（`.log` + `.log.1`），返回释放的字节数。
+/// `cat` 必须是 [`CATEGORIES`] 里的名字（调用方先校验）。文件不存在算成功；
+/// 删不掉（例如 Windows 上正被无 FILE_SHARE_DELETE 的句柄占用）会把原因收进 Err。
+pub fn clear_cat_log(cat: &str) -> Result<u64, String> {
+    let dir = logs_dir();
+    let mut freed = 0u64;
+    let mut errs: Vec<String> = Vec::new();
+    for name in [format!("{cat}.log"), format!("{cat}.log.1")] {
+        let path = dir.join(&name);
+        // 先取大小再删：删掉以后就统计不到了
+        let size = match std::fs::metadata(&path) {
+            Ok(md) => md.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                errs.push(format!("{name}: {e}"));
+                continue;
+            }
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => freed += size,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => errs.push(format!("{name}: {e}")),
+        }
+    }
+    if errs.is_empty() {
+        Ok(freed)
+    } else {
+        Err(errs.join("；"))
+    }
+}
+
+/// 「系统日志」页的文件清单元数据：每个分类一条（文件不存在也列出，size=0）
+pub struct LogFileInfo {
+    pub category: &'static str,
+    pub description: &'static str,
+    /// `<cat>.log` 字节数（不存在为 0）
+    pub size: u64,
+    /// 滚动出的 `<cat>.log.1` 字节数；不存在为 None
+    pub rotated_size: Option<u64>,
+    /// 当前文件最后修改时间（epoch 毫秒）
+    pub modified_ms: Option<u64>,
+}
+
+fn file_meta(dir: &Path, name: &str) -> Option<(u64, Option<u64>)> {
+    let md = std::fs::metadata(dir.join(name)).ok()?;
+    let ms = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+    Some((md.len(), ms))
+}
+
+pub fn list_log_files() -> Vec<LogFileInfo> {
+    let dir = logs_dir();
+    CATEGORIES
+        .iter()
+        .map(|(cat, desc)| {
+            let (size, modified_ms) =
+                file_meta(&dir, &format!("{cat}.log")).unwrap_or((0, None));
+            let rotated_size = file_meta(&dir, &format!("{cat}.log.1")).map(|(s, _)| s);
+            LogFileInfo {
+                category: cat,
+                description: desc,
+                size,
+                rotated_size,
+                modified_ms,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -452,8 +574,11 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("DSH_STARTER_HOME", &tmp);
 
-        info("install", "npm 命令：node npm-cli.js install --prefix X");
-        error("ui", "渲染报错：Cannot read properties of undefined");
+        // append() 在单测里不落盘（防止并发测试把噪音写进真实日志目录），
+        // 所以这里直接用 write_append 往临时目录造日志
+        let dir = logs_dir();
+        write_append(&dir, "install", &line(Level::Info, "npm 命令：node npm-cli.js install --prefix X"));
+        write_append(&dir, "ui", &line(Level::Error, "渲染报错：Cannot read properties of undefined"));
 
         let mut settings = crate::settings::Settings::default();
         settings.github_token = "ghp_supersecret".into();
@@ -469,6 +594,94 @@ mod tests {
         assert!(!body.contains("tok@registry"), "泄露了 registry 凭据");
         assert!(body.contains("github_token = （已设置，长度 15）"), "脱敏摘要不对");
         assert!(body.contains("***@registry.example.com"), "registry 应脱敏");
+
+        std::env::remove_var("DSH_STARTER_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn level_parse_accepts_known_names() {
+        assert_eq!(Level::parse("debug"), Some(Level::Debug));
+        assert_eq!(Level::parse("TRACE"), Some(Level::Debug));
+        assert_eq!(Level::parse(" info "), Some(Level::Info));
+        assert_eq!(Level::parse("warn"), Some(Level::Warn));
+        assert_eq!(Level::parse("error"), Some(Level::Error));
+        assert_eq!(Level::parse(""), None);
+        assert_eq!(Level::parse("verbose"), None);
+    }
+
+    /// 运行期切级：设置立即生效；若开发者环境里挂了 DSH_STARTER_LOG 则跳过（环境变量优先）
+    #[test]
+    fn runtime_level_switch_takes_effect_immediately() {
+        let _env = crate::util::DSH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if env_pinned() {
+            return;
+        }
+        assert!(set_runtime_level("debug"));
+        assert_eq!(min_level(), Level::Debug);
+        assert!(set_runtime_level("warn"));
+        assert_eq!(min_level(), Level::Warn);
+        // 非法值收敛为 INFO；复原避免影响其它用例
+        assert!(set_runtime_level("nonsense"));
+        assert_eq!(min_level(), Level::Info);
+    }
+
+    #[test]
+    fn list_and_read_expose_category_files() {
+        let _env = crate::util::DSH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-logpage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
+        let dir = logs_dir();
+        write_append(&dir, "ui", "one");
+        write_append(&dir, "ui", "two");
+        std::fs::write(dir.join("install.log.1"), "rotated\n").unwrap();
+
+        let list = list_log_files();
+        assert_eq!(list.len(), CATEGORIES.len());
+        let ui = list.iter().find(|f| f.category == "ui").unwrap();
+        assert!(ui.size > 0 && ui.rotated_size.is_none() && ui.modified_ms.is_some());
+        let install = list.iter().find(|f| f.category == "install").unwrap();
+        assert_eq!(install.size, 0);
+        assert_eq!(install.rotated_size, Some(8));
+
+        let (text, truncated) = read_cat_tail("ui", 4096);
+        assert!(text.contains("one") && text.contains("two"), "{text}");
+        assert!(!truncated);
+        assert_eq!(read_cat_tail("app", 4096), (String::new(), false));
+
+        std::env::remove_var("DSH_STARTER_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn clear_cat_log_removes_current_and_rotated() {
+        let _env = crate::util::DSH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-logclear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
+        let dir = logs_dir();
+        write_append(&dir, "ui", "one");
+        std::fs::write(dir.join("ui.log.1"), "rotated\n").unwrap();
+
+        let freed = clear_cat_log("ui").unwrap();
+        assert!(freed > 8, "{freed}"); // 当前文件 + 8 字节的滚动文件
+        assert!(!dir.join("ui.log").exists());
+        assert!(!dir.join("ui.log.1").exists());
+        // 没有文件的分类：成功、释放 0 字节
+        assert_eq!(clear_cat_log("network").unwrap(), 0);
+        // 删掉后日志系统会自行重建文件
+        write_append(&dir, "ui", "two");
+        let (text, _) = read_cat_tail("ui", 4096);
+        assert!(text.contains("two") && !text.contains("one"), "{text}");
 
         std::env::remove_var("DSH_STARTER_HOME");
         let _ = std::fs::remove_dir_all(&tmp);

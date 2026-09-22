@@ -82,15 +82,37 @@ pub async fn fetch_registry(registry_base: &str) -> Result<RegistryInfo, String>
         .build()
         .map_err(|e| format!("初始化 HTTP 客户端失败: {e}"))?;
 
-    let resp = client
+    let t0 = Instant::now();
+    let resp = match client
         .get(&url)
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| format!("请求 registry 失败（{}）: {e}", scrub_url(&url)))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            crate::diag::warn(
+                "network",
+                &format!(
+                    "拉取 registry 版本列表失败：请求异常 {}（{}）",
+                    short_err(&scrub_url(&e.to_string())),
+                    scrub_url(base)
+                ),
+            );
+            return Err(format!("请求 registry 失败（{}）: {e}", scrub_url(&url)));
+        }
+    };
 
     let status = resp.status();
     if !status.is_success() {
+        crate::diag::warn(
+            "network",
+            &format!(
+                "拉取 registry 版本列表失败：HTTP {}（{}）",
+                status.as_u16(),
+                scrub_url(base)
+            ),
+        );
         return Err(format!("registry 返回 {status}（{}）", scrub_url(&url)));
     }
     let pack: serde_json::Value = resp
@@ -153,9 +175,19 @@ pub async fn fetch_registry(registry_base: &str) -> Result<RegistryInfo, String>
     }
 
     if versions.is_empty() {
+        crate::diag::warn("network", &format!("registry 响应中没有版本数据（{}）", scrub_url(base)));
         return Err("registry 响应中没有版本数据".into());
     }
     versions.sort_by(|a, b| crate::semver::compare(&b.version, &a.version));
+    crate::diag::info(
+        "network",
+        &format!(
+            "拉取 registry 版本列表成功：{} 个版本，latest={}（{}ms）",
+            versions.len(),
+            tags.get("latest").map(String::as_str).unwrap_or("-"),
+            t0.elapsed().as_millis()
+        ),
+    );
 
     Ok(RegistryInfo { tags, versions })
 }
@@ -516,7 +548,18 @@ pub fn note_channel_ms(name: &'static str, ok: bool, ms: Option<u64>) {
         } else {
             st.failures += 1;
             if st.failures >= CHANNEL_FAIL_THRESHOLD {
+                let fresh = st.disable_until.is_none();
                 st.disable_until = Some(Instant::now() + Duration::from_secs(CHANNEL_DISABLE_SECS));
+                if fresh {
+                    crate::diag::warn(
+                        "network",
+                        &format!(
+                            "通道 {name} 连续失败 {} 次，临时停用 {} 分钟（期间请求直接走其它通道）",
+                            st.failures,
+                            CHANNEL_DISABLE_SECS / 60
+                        ),
+                    );
+                }
             }
         }
     });
@@ -757,6 +800,21 @@ pub async fn check_channels(token: Option<&str>) -> Vec<ChannelProbe> {
             Err(e) => eprintln!("通道探测任务失败: {e}"),
         }
     }
+    crate::diag::info(
+        "network",
+        &format!(
+            "通道自检：{}",
+            out.iter()
+                .map(|p| format!(
+                    "{}={}({}ms)",
+                    p.name,
+                    if p.ok { "通" } else { "不通" },
+                    p.ms
+                ))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        ),
+    );
     out
 }
 
@@ -980,7 +1038,9 @@ fn dsh_releases_save_disk(list: &[DshRelease]) {
         Err(_) => return,
     };
     if std::fs::create_dir_all(parent).is_ok() {
-        let _ = std::fs::write(&path, text);
+        if let Err(e) = std::fs::write(&path, text) {
+            crate::diag::debug("network", || format!("dsh 更新日志磁盘缓存写入失败：{e}"));
+        }
     }
 }
 
@@ -993,22 +1053,36 @@ pub async fn fetch_dsh_releases(token: Option<&str>, force: bool) -> Result<Vec<
     if !force {
         if let Ok(g) = DSH_RELEASES.lock() {
             if let Some(list) = g.as_ref() {
+                crate::diag::debug(
+                    "network",
+                    || format!("dsh 更新日志命中内存缓存：{} 条", list.len()),
+                );
                 return Ok(list.clone());
             }
         }
         if let Some(list) = dsh_releases_load_disk() {
+            crate::diag::debug(
+                "network",
+                || format!("dsh 更新日志命中磁盘缓存：{} 条", list.len()),
+            );
             if let Ok(mut g) = DSH_RELEASES.lock() {
                 *g = Some(list.clone());
             }
             return Ok(list);
         }
+        crate::diag::debug("network", || "dsh 更新日志无缓存，将请求 GitHub Release".into());
     }
     let url = format!("https://api.github.com/repos/{DSH_REPO}/releases?per_page=100");
     let (status, json) = api_get_json(&url, token).await?;
     if !(200..300).contains(&status) {
+        crate::diag::warn("network", &format!("拉取 dsh Release 失败：GitHub HTTP {status}"));
         return Err(format!("读取 dsh 发布说明失败：GitHub 返回 HTTP {status}"));
     }
     let list = dsh_releases_from_json(&json)?;
+    crate::diag::info(
+        "network",
+        &format!("拉取 dsh Release 成功：{} 条（force={force}）", list.len()),
+    );
     if let Ok(mut g) = DSH_RELEASES.lock() {
         *g = Some(list.clone());
     }
@@ -1071,7 +1145,19 @@ async fn api_get_json(url: &str, token: Option<&str>) -> Result<(u16, serde_json
     if let Some(etag) = cache_get(&etag_key, Duration::from_secs(7 * 24 * 3600)) {
         req = req.header("If-None-Match", etag);
     }
-    let resp = req.send().await.map_err(|e| format!("请求 GitHub API 失败: {e}"))?;
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::diag::warn(
+                "network",
+                &format!(
+                    "GitHub API 请求失败：{url}（{}）",
+                    short_err(&e.to_string())
+                ),
+            );
+            return Err(format!("请求 GitHub API 失败: {e}"));
+        }
+    };
     let status = resp.status().as_u16();
     let etag = resp
         .headers()
@@ -1080,6 +1166,7 @@ async fn api_get_json(url: &str, token: Option<&str>) -> Result<(u16, serde_json
         .map(String::from);
     note_rl(&resp, token.is_some());
     if status == 304 {
+        crate::diag::debug("network", || format!("GitHub API 304 命中缓存：{url}"));
         if let Some(body) = cache_get(&body_key, Duration::from_secs(7 * 24 * 3600)) {
             let json = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
             return Ok((200, json));
@@ -1087,15 +1174,26 @@ async fn api_get_json(url: &str, token: Option<&str>) -> Result<(u16, serde_json
         return Ok((304, serde_json::Value::Null));
     }
     if status == 403 || status == 429 {
-        return Err(rate_limit_message());
+        let msg = rate_limit_message();
+        crate::diag::warn("network", &format!("GitHub API {status}（{url}）：{msg}"));
+        return Err(msg);
     }
     let text = resp.text().await.unwrap_or_default();
-    note_channel_ms(CH_API, (200..300).contains(&status), Some(t0.elapsed().as_millis() as u64));
+    let ms = t0.elapsed().as_millis() as u64;
+    note_channel_ms(CH_API, (200..300).contains(&status), Some(ms));
     if (200..300).contains(&status) {
         if let Some(et) = &etag {
             cache_put(&etag_key, et);
         }
         cache_put(&body_key, &text);
+        crate::diag::debug("network", || {
+            format!(
+                "GitHub API 成功：{url}（{ms}ms，额度剩余 {:?}）",
+                rate_limit().remaining
+            )
+        });
+    } else {
+        crate::diag::warn("network", &format!("GitHub API 返回 {status}：{url}（{ms}ms）"));
     }
     let json: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
     Ok((status, json))
@@ -1160,9 +1258,24 @@ async fn jsdelivr_tree(
     let client = probe_client();
     let url =
         format!("https://data.jsdelivr.com/v1/packages/gh/{owner}/{repo}@{rev}?structure=flat");
-    let resp = client.get(&url).send().await.ok()?;
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::diag::debug("network", || {
+                format!(
+                    "jsDelivr 文件树请求失败：{owner}/{repo}@{rev}（{}）",
+                    short_err(&e.to_string())
+                )
+            });
+            return None;
+        }
+    };
     if !resp.status().is_success() {
         note_channel(CH_JSDELIVR, false);
+        crate::diag::debug(
+            "network",
+            || format!("jsDelivr 文件树返回 {}：{owner}/{repo}@{rev}", resp.status().as_u16()),
+        );
         return None;
     }
     let json: serde_json::Value = resp.json().await.ok()?;
@@ -1241,22 +1354,47 @@ pub async fn search_packages(
         return Err("搜索词为空".into());
     }
 
-    let resp = http_client()?
+    let resp = match http_client()?
         .get(format!("{base}/-/v1/search"))
         .query(&[("text", query), ("size", "10")])
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| format!("搜索请求失败: {e}"))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            crate::diag::warn(
+                "network",
+                &format!(
+                    "registry 搜索失败：请求异常 {}（{}）",
+                    short_err(&scrub_url(&e.to_string())),
+                    scrub_url(base)
+                ),
+            );
+            return Err(format!("搜索请求失败: {e}"));
+        }
+    };
     let status = resp.status();
     if !status.is_success() {
+        crate::diag::warn(
+            "network",
+            &format!(
+                "registry 搜索失败：HTTP {}（{}，词「{query}」）",
+                status.as_u16(),
+                scrub_url(base)
+            ),
+        );
         return Err(format!("registry 搜索返回 {status}（{}）", scrub_url(base)));
     }
     let pack: serde_json::Value = resp
         .json()
         .await
         .map_err(|e| format!("解析搜索响应失败: {e}"))?;
-    Ok(parse_search_response(&pack))
+    let items = parse_search_response(&pack);
+    crate::diag::debug("network", || {
+        format!("registry 搜索完成：词「{query}」命中 {} 条（{}）", items.len(), scrub_url(base))
+    });
+    Ok(items)
 }
 
 /// 从用户输入解析 GitHub 插件来源：owner/repo、github:owner/repo、
@@ -1430,17 +1568,34 @@ pub async fn npm_latest_version(registry_base: &str, name: &str) -> Result<Optio
     }
     // scope 包名的 / 转义（与 fetch_registry 的 PKG_SCOPE_ENCODED 同一约定）
     let encoded = name.replace('/', "%2F");
-    let resp = http_client()?
+    let resp = match http_client()?
         .get(format!("{base}/{encoded}"))
         .header("Accept", "application/json")
         .send()
         .await
-        .map_err(|e| format!("查询 {name} 版本失败: {e}"))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            crate::diag::warn(
+                "network",
+                &format!(
+                    "查询 {name} 最新版本失败：请求异常 {}",
+                    short_err(&scrub_url(&e.to_string()))
+                ),
+            );
+            return Err(format!("查询 {name} 版本失败: {e}"));
+        }
+    };
     let status = resp.status();
     if status.as_u16() == 404 {
+        crate::diag::debug("network", || format!("registry 查无包 {name}（404）"));
         return Ok(None);
     }
     if !status.is_success() {
+        crate::diag::warn(
+            "network",
+            &format!("查询 {name} 最新版本失败：HTTP {}（{}）", status.as_u16(), scrub_url(base)),
+        );
         return Err(format!("registry 返回 {status}（查询 {name}）"));
     }
     let pack: serde_json::Value = resp
@@ -1543,6 +1698,13 @@ pub async fn discover_refs(owner: &str, repo: &str, token: Option<&str>) -> Remo
         Ok(r) => r,
         Err(e) => {
             note_channel(CH_REF, false);
+            crate::diag::debug(
+                "network",
+                || format!(
+                    "github.com refs 发现失败：{owner}/{repo}（{}）",
+                    short_err(&e.to_string())
+                ),
+            );
             return RemoteRefs::Unknown(format!("访问 github.com 失败: {e}"));
         }
     };
@@ -1550,23 +1712,27 @@ pub async fn discover_refs(owner: &str, repo: &str, token: Option<&str>) -> Remo
     if status == 401 || status == 403 || status == 404 {
         // 能明确答复（要凭据/不存在）说明通道是通的
         note_channel_ms(CH_REF, true, Some(t0.elapsed().as_millis() as u64));
+        crate::diag::debug("network", || format!("github.com 返回 {status}（私有或不存在）：{owner}/{repo}"));
         cache_put(&key, "401");
         return RemoteRefs::NotPublic;
     }
     if !(200..300).contains(&status) {
         note_channel(CH_REF, false);
+        crate::diag::debug("network", || format!("github.com refs 发现返回 {status}：{owner}/{repo}"));
         return RemoteRefs::Unknown(format!("github.com 返回 {status}"));
     }
     let body = match resp.text().await {
         Ok(b) => b,
         Err(e) => {
             note_channel(CH_REF, false);
+            crate::diag::debug("network", || format!("github.com refs 读取失败：{owner}/{repo}（{}）", short_err(&e.to_string())));
             return RemoteRefs::Unknown(format!("读取 refs 失败: {e}"));
         }
     };
     let refs = parse_upload_pack_refs(&body);
     if refs.is_empty() {
         note_channel(CH_REF, false);
+        crate::diag::debug("network", || format!("github.com refs 响应为空：{owner}/{repo}"));
         return RemoteRefs::Unknown("refs 响应为空".into());
     }
     note_channel_ms(CH_REF, true, Some(t0.elapsed().as_millis() as u64));
@@ -1689,6 +1855,13 @@ pub async fn github_head_commit(
     }
 
     // 兜底：git 二进制（6s 上限，见 git_remote_head 的注释）——阻塞子进程，放到 spawn_blocking
+    crate::diag::warn(
+        "network",
+        &format!(
+            "GitHub 提交查询各通道均失败，回退 git 二进制：{owner}/{repo}（{}）",
+            last_err.clone().unwrap_or_else(|| "无通道错误".into())
+        ),
+    );
     let url = format!("https://github.com/{owner}/{repo}.git");
     let git_ref_owned = git_ref.map(|s| s.to_string());
     let head = tauri::async_runtime::spawn_blocking(move || {

@@ -14,6 +14,7 @@ import type {
   ProcLogEvent,
   ProfileInfo,
   ProfileInstance,
+  ProfileVersionInfo,
   ProfileDetail,
   PackageSearchItem,
   DshRelease,
@@ -32,22 +33,40 @@ import type {
   RuntimeFinishedEvent,
   RuntimeProgressEvent,
   Settings,
+  StartResult,
   WebQuickConfig,
   WebQuickConfigInput,
   CredentialFile,
   CredentialRef,
   DeletedProfile,
+  DiagnosticsExport,
   ModelConfigInfo,
   ModelConfigInput,
   RemoteModelInfo,
   SessionStats,
   ShareIdentity,
+  SystemLogContent,
+  SystemLogsInfo,
 } from "./types";
 
 export const api = {
-  exportDiagnostics: () => invoke<string>("export_diagnostics"),
+  /** 生成诊断包：落盘并返回路径 + 全文（前端弹窗展示） */
+  exportDiagnostics: () => invoke<DiagnosticsExport>("export_diagnostics"),
   logUi: (level: "info" | "warn" | "error", message: string) =>
     invoke<void>("log_ui", { level, message }),
+  /** 「系统日志」页：分类文件清单 + 当前生效级别 */
+  listSystemLogs: () => invoke<SystemLogsInfo>("list_system_logs"),
+  /** 读某个分类日志的尾部（滚动出的 .1 与当前文件连续读） */
+  readSystemLog: (category: string, maxBytes?: number) =>
+    invoke<SystemLogContent>("read_system_log", {
+      category,
+      maxBytes: maxBytes ?? null,
+    }),
+  /** 清除系统日志（省略/空数组 = 全部类别），返回释放字节数 */
+  clearSystemLogs: (categories?: string[]) =>
+    invoke<number>("clear_system_logs", {
+      categories: categories && categories.length > 0 ? categories : null,
+    }),
 
   getEnvironment: () => invoke<EnvironmentInfo>("get_environment"),
   getSettings: () => invoke<Settings>("get_settings"),
@@ -69,17 +88,29 @@ export const api = {
     profile?: string | null,
     args?: string | null,
     detached?: boolean,
+    /** 用户已经在风险确认框里认了这次版本变化 */
+    ackVersionChange = false,
   ) =>
-    invoke<ProcInfo>("start_embedded", { version, profile, args, detached }),
+    invoke<StartResult>("start_embedded", {
+      version,
+      profile,
+      args,
+      detached,
+      ackVersionChange,
+    }),
   stopProcess: (id: number) => invoke<boolean>("stop_process", { id }),
   listProcesses: () => invoke<ProcInfo[]>("list_processes"),
   listProfileInstances: () => invoke<ProfileInstance[]>("list_profile_instances"),
+  /** 各 profile 的绑定启动版本（上次真正跑起来的 dsh 版本） */
+  listProfileVersions: () => invoke<ProfileVersionInfo[]>("list_profile_versions"),
   /** 会话统计（聚合全部历史；trend 为最近 rangeDays 天，默认 30；gapMin 为在线空闲阈值） */
   getSessionStats: (rangeDays?: number, gapMin?: number) =>
     invoke<SessionStats>("get_session_stats", {
       rangeDays: rangeDays ?? null,
       gapMin: gapMin ?? null,
     }),
+  /** 清空统计缓存（磁盘 + 内存指纹表）；返回丢弃的指纹条目数，清完后前端重算 */
+  clearSessionStatsCache: () => invoke<number>("clear_session_stats_cache"),
   /** 分享面板署名：本机 git 身份（缓存，取不到时 name/email 为空） */
   getShareIdentity: () => invoke<ShareIdentity>("get_share_identity"),
   stopProfileInstance: (profile: string) =>
@@ -203,11 +234,14 @@ export const api = {
       apiKey: apiKey ?? null,
     }),
   getCredentials: () => invoke<CredentialFile>("get_credentials"),
-  writeCredentialRefs: (refs: CredentialRef[]) =>
-    invoke<void>("write_credential_refs", { refs }),
+  writeCredentialRefs: (refs: CredentialRef[], expectedFingerprint: string | null) =>
+    invoke<void>("write_credential_refs", { refs, expectedFingerprint }),
   listProfiles: () => invoke<ProfileInfo[]>("list_profiles"),
   reveal: (path: string) => invoke<void>("reveal_folder", { path }),
   openUrl: (url: string) => invoke<void>("open_external", { url }),
+  /** 应用内独立窗口打开实例 Web UI；同一地址复用同一窗口，多实例可各开一个 */
+  openWebWindow: (url: string, title?: string) =>
+    invoke<void>("open_web_window", { url, title: title ?? null }),
   installRuntime: () => invoke<string>("install_runtime"),
   checkStarterUpdate: () => invoke<StarterUpdateStatus>("check_starter_update"),
   /** 下载并安装启动器新版本；非 Windows 上成功后进程会直接重启，不返回 */

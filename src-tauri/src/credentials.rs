@@ -47,17 +47,33 @@ pub struct CredentialFile {
     pub version: Option<i64>,
     pub refs: Vec<CredentialRef>,
     pub records: Vec<CredentialRecord>,
+    /// 读取时刻的文件指纹（`size:mtime 秒`，与 sessions.rs 同形态）；文件不存在为 None。
+    /// 保存时原样带回，用于拒绝「读取之后文件被 dsh 等外部程序改过」的静默覆盖。
+    pub fingerprint: Option<String>,
+}
+
+/// 凭据文件指纹：`size:mtime 秒`；读不到元数据/时间戳就是 None（不阻塞展示）。
+fn fingerprint_of(path: &std::path::Path) -> Option<String> {
+    let md = std::fs::metadata(path).ok()?;
+    let mtime = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(format!("{}:{}", md.len(), mtime.as_secs()))
 }
 
 /// 读取凭据文件。文件不存在时返回 exists=false 而非报错（dsh 首次运行后才创建）。
 pub fn read() -> Result<CredentialFile, String> {
     let path = credentials_path();
+    let exists = path.is_file();
     let mut out = CredentialFile {
         path: path.to_string_lossy().into_owned(),
-        exists: path.is_file(),
+        exists,
         version: None,
         refs: Vec::new(),
         records: Vec::new(),
+        fingerprint: if exists { fingerprint_of(&path) } else { None },
     };
     if !out.exists {
         return Ok(out);
@@ -66,8 +82,11 @@ pub fn read() -> Result<CredentialFile, String> {
     if raw.trim().is_empty() {
         return Ok(out);
     }
-    let doc: serde_yaml::Value =
-        serde_yaml::from_str(&raw).map_err(|e| format!("凭据文件解析失败: {e}"))?;
+    let doc: serde_yaml::Value = serde_yaml::from_str(&raw).map_err(|e| {
+        // 只记路径与错误文本：凭据文件里全是活跃 token，内容一个字节都不能进日志
+        crate::diag::warn("profile", &format!("凭据文件解析失败：{}：{e}", path.display()));
+        format!("凭据文件解析失败: {e}")
+    })?;
     let notes = read_ref_notes(&raw);
     out.version = doc.get("version").and_then(|v| v.as_i64());
     if let Some(m) = doc.get("refs").and_then(|v| v.as_mapping()) {
@@ -121,16 +140,22 @@ pub fn read() -> Result<CredentialFile, String> {
 /// 生成结果先整体校验（合法 YAML 且顶层为映射）再**原子写盘**（unix：0600 临时
 /// 文件 + rename，避免截断窗口与半截文件），校验失败时原文件一个字节都不动。
 ///
+/// `expected_fingerprint` 是前端**读取时**拿到的文件指纹（`CredentialFile::fingerprint`）：
+/// 磁盘指纹与之不符说明读后文件被外部（如运行中的 dsh）改过，直接拒绝写入，
+/// 避免后保存者静默覆盖先写入的内容。None = 不做冲突检测（如读时文件还不存在）。
+///
 /// 为什么不再用 serde_yaml 整篇序列化：那会丢光文件里所有注释 —— 而注释正是这里要
 /// 维护的东西（键上方那行注释就是这条凭据的说明）。
-pub fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
+pub fn write_refs(items: &[CredentialRefInput], expected_fingerprint: Option<&str>) -> Result<(), String> {
+    // 日志只允许出现键名/条目数/字节数，绝不出现值
+    let names: Vec<&str> = items.iter().map(|i| i.name.trim()).collect();
     let mut seen = std::collections::BTreeSet::new();
     for it in items {
         let name = it.name.trim();
         if name.is_empty() {
             return Err("凭据名称不能为空".into());
         }
-        if name.len() > 128 {
+        if name.chars().count() > 128 {
             return Err(format!("凭据名称过长: {name}"));
         }
         if name.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -150,6 +175,32 @@ pub fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
     }
 
     let path = credentials_path();
+    if let Some(want) = expected_fingerprint {
+        match fingerprint_of(&path) {
+            Some(cur) if &cur != want => {
+                crate::diag::warn(
+                    "profile",
+                    &format!(
+                        "凭据保存被拦下（外部已改动）：{} 期望指纹 {want}，磁盘为 {cur}",
+                        path.display()
+                    ),
+                );
+                return Err("凭据文件在本页读取之后被其它程序（如运行中的 dsh 实例）修改，本次保存已取消。点「还原」载入最新内容后，再重新编辑保存。".into());
+            }
+            Some(_) => {}
+            // 读时文件还在、写前不见了（被删或被换成不可读）：同样不能贸然覆盖式写入
+            None if path.exists() => {
+                return Err("凭据文件状态异常（无法读取文件信息），本次保存已取消。请检查文件权限后重试。".into());
+            }
+            None => {
+                crate::diag::warn(
+                    "profile",
+                    &format!("凭据保存被拦下（文件已被删除）：{}", path.display()),
+                );
+                return Err("凭据文件在本页读取之后被其它程序删除，本次保存已取消。点「还原」确认最新状态后再编辑。".into());
+            }
+        }
+    }
     // 只有「文件不存在」才当作空文档从头写；权限 / IO 等其它读取失败必须拒绝写入，
     // 否则会用新内容覆盖掉磁盘上已经存在的凭据（静默丢数据）。
     let raw = match std::fs::read_to_string(&path) {
@@ -212,6 +263,16 @@ pub fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
     }
     #[cfg(not(unix))]
     std::fs::write(&path, out).map_err(|e| format!("写入失败: {e}"))?;
+    crate::diag::info(
+        "profile",
+        &format!(
+            "凭据已保存：{} 共 {} 条（{} 字节）refs=[{}]",
+            path.display(),
+            items.len(),
+            out.len(),
+            names.join(", ")
+        ),
+    );
     Ok(())
 }
 
@@ -399,10 +460,18 @@ fn regenerate_refs_block(lines: &[&str], items: &[CredentialRefInput]) -> Result
     let trailing = std::mem::take(&mut pending);
 
     let note_of = |it: &CredentialRefInput| -> Option<String> {
-        it.note
-            .as_deref()
-            .map(|n| n.trim().trim_start_matches('#').trim().replace(['\n', '\r'], " "))
-            .filter(|n| !n.is_empty())
+        it.note.as_deref().map(|n| {
+            // 控制字符（\r\n\t 及其它）一律压成空格再折叠空白：注释在文件里必须是一行，
+            // 与其让非法字符走到「生成的内容不是合法 YAML」这条用户看不懂的内部错误，
+            // 不如写入前就地净化（与前端 normalizeNote 行为一致）。
+            let spaced: String = n
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+        })
+        .map(|n| n.trim_start_matches('#').trim().to_string())
+        .filter(|n| !n.is_empty())
     };
 
     let mut out = String::new();
@@ -572,6 +641,11 @@ mod tests {
                 note: None,
             })
             .collect()
+    }
+
+    /// 既有测试不关心指纹冲突：同名包装固定传 None（遮蔽 `use super::*` 的同名函数）
+    fn write_refs(items: &[CredentialRefInput]) -> Result<(), String> {
+        super::write_refs(items, None)
     }
 
     #[test]
@@ -754,6 +828,83 @@ mod tests {
         let info = read().unwrap();
         assert_eq!(info.refs.len(), 2);
         assert_eq!(info.refs.iter().find(|r| r.name == "A").unwrap().value, "y");
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// 外部修改冲突：指纹与读取时不符 → 拒绝写入、原文件一字不动、不产生备份；
+    /// 指纹一致正常保存；expected 为 None 则不做检测。
+    #[test]
+    fn write_rejects_stale_fingerprint() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp_home("conflict");
+        std::env::set_var("DSH_HOME", &tmp);
+        let dir = credentials_path();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::write(&dir, "refs:\n  AAA: keep\n").unwrap();
+
+        let fp = read().unwrap().fingerprint.expect("文件存在时应有指纹");
+        // 模拟 dsh 外部修改（故意改变长度，避免 mtime 秒级粒度造成偶发）
+        std::fs::write(&dir, "refs:\n  AAA: from-dsh\n").unwrap();
+        let err = super::write_refs(&refs_of(&[("AAA", "from-starter")]), Some(&fp)).unwrap_err();
+        assert!(err.contains("本次保存已取消"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&dir).unwrap(),
+            "refs:\n  AAA: from-dsh\n",
+            "冲突时不能覆盖外部修改"
+        );
+        assert!(
+            !dir.with_file_name(".credentials.starter-bak").exists(),
+            "冲突时不应产生备份"
+        );
+
+        // 拿最新指纹后可正常保存
+        let fp2 = read().unwrap().fingerprint.unwrap();
+        super::write_refs(&refs_of(&[("AAA", "ok")]), Some(&fp2)).unwrap();
+        assert_eq!(read().unwrap().refs[0].value, "ok");
+
+        // 文件被删同样拒绝
+        let fp3 = read().unwrap().fingerprint.unwrap();
+        std::fs::remove_file(&dir).unwrap();
+        let err = super::write_refs(&refs_of(&[("AAA", "x")]), Some(&fp3)).unwrap_err();
+        assert!(err.contains("删除"), "{err}");
+
+        // None = 不检测（读时文件还不存在的整表新建也走这里）
+        super::write_refs(&refs_of(&[("BBB", "b")]), None).unwrap();
+        assert!(read().unwrap().refs.iter().any(|r| r.name == "BBB"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// 注释含制表 / 回车换行 / 其它控制字符：写入前净化为一行，而不是落盘后
+    /// 被 YAML 终检拦下报「内部错误」
+    #[test]
+    fn write_sanitizes_note_control_chars() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp_home("note-sanitize");
+        std::env::set_var("DSH_HOME", &tmp);
+        let dir = credentials_path();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+
+        super::write_refs(
+            &[CredentialRefInput {
+                name: "A".into(),
+                value: "v".into(),
+                note: Some("  第一行\t带制表\r\n还有换行\u{7}和控制符  ".into()),
+            }],
+            None,
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&dir).unwrap();
+        serde_yaml::from_str::<serde_yaml::Value>(&raw).unwrap();
+        assert!(raw.contains("  # 第一行 带制表 还有换行 和控制符\n"), "{raw}");
+        let info = read().unwrap();
+        assert_eq!(
+            info.refs[0].note.as_deref(),
+            Some("第一行 带制表 还有换行 和控制符")
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");

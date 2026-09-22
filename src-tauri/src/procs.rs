@@ -418,9 +418,8 @@ fn wait_exit(app: AppHandle, state: ProcState, id: u32) {
 /// 停止指定进程（SIGKILL）；返回是否存在。停止后会广播 stopped 退出事件。
 pub fn stop(app: &AppHandle, state: &ProcState, id: u32) -> bool {
     // 关键：摘下句柄后就释放 state.procs 锁，kill/wait 与 emit 都必须在锁外做。
-    // `app.emit` 是**同步**的：它会在当前线程直接回调 Rust 监听器
-    // （tray::refresh → profile_instances），而后者会再次获取同一把 std::sync::Mutex
-    // （不可重入）——持锁 emit 必然自死锁，界面随即无响应。
+    // `app.emit` 是**同步**的：它会在当前线程直接回调 Rust 监听器，而监听器若再获取
+    // 同一把 std::sync::Mutex（不可重入）——持锁 emit 必然自死锁，界面随即无响应。
     let (version, profile, child) = {
         let mut guard = state.procs.lock().unwrap();
         let Some(handle) = guard.remove(&id) else {

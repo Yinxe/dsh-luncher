@@ -15,7 +15,6 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { toast } from "sonner";
 import { api } from "../api";
 import type { ChannelProbe, EnvironmentInfo, GhAccel, GitHubRateLimit, Settings } from "../types";
 
@@ -453,43 +452,9 @@ export default function SettingsDrawer({ open, initial, env, onSave, onClose, on
               <FieldDescription>各版本安装在 versions/ 子目录下</FieldDescription>
             </Field>
             <Field>
-              <FieldLabel>日志目录</FieldLabel>
-              <div className="flex items-center gap-2">
-                <span
-                  className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted-foreground"
-                  title={env?.logsDir}
-                >
-                  {env?.logsDir ?? "…"}
-                </span>
-                <Button size="sm" variant="outline" onClick={() => env && onReveal(env.logsDir)}>
-                  <FolderOpen /> 打开
-                </Button>
-              </div>
+              <FieldLabel>系统日志</FieldLabel>
               <FieldDescription>
-                按子系统分类：app / instance / install / runtime / plugin / profile / network / ui /
-                panic；遇到问题把这里的文件发来即可定位
-              </FieldDescription>
-              <div className="pt-1">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={async () => {
-                    try {
-                      const path = await api.exportDiagnostics();
-                      toast.success("诊断包已生成", {
-                        description: `${path.split(/[\\/]/).pop()} —— 已帮你打开日志目录`,
-                      });
-                      onReveal(env?.logsDir ?? path);
-                    } catch (e) {
-                      toast.error(`生成诊断包失败: ${e}`);
-                    }
-                  }}
-                >
-                  <Activity /> 生成诊断包
-                </Button>
-              </div>
-              <FieldDescription>
-                一键汇总环境、设置（**凭据已脱敏**）与全部日志，报 bug 时发这一个 txt 就够
+                查看日志、切换日志级别、打开日志目录与生成诊断包，都已挪到侧栏「系统日志」页面
               </FieldDescription>
             </Field>
           </Section>

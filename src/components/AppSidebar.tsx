@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import {
-  BarChart3, Bot, Copy, ExternalLink, FileCog, Home, KeyRound, Package, Puzzle, Rocket, ScrollText, X,
+  BarChart3, Bot, Command, Copy, Download, ExternalLink, FileCog, Gauge, Home, KeyRound, MessageSquareText, Package, Puzzle, RefreshCw, Rocket, ScrollText, Terminal, X,
 } from "lucide-react";
 
 import {
@@ -10,6 +10,9 @@ import {
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Popover, PopoverContent, PopoverTrigger,
+} from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
 import { api } from "../api";
 import type { EnvironmentInfo, Settings as SettingsT, View } from "../types";
@@ -18,6 +21,10 @@ import type { EnvironmentInfo, Settings as SettingsT, View } from "../types";
  *  侧栏底部顺带给出这个入口，省得用户去设置里翻仓库地址） */
 const REPO_URL = "https://github.com/Yinxe/dsh-starter";
 const CHANGELOG_URL = `${REPO_URL}/blob/main/CHANGELOG.md`;
+/** 下载页（GitHub Pages）：各平台安装包直链的产品页 */
+const SITE_URL = "https://yinxe.github.io/dsh-starter/";
+/** 用户 QQ 群：反馈问题与交流（侧栏仓库卡里一键复制群号） */
+const QQ_GROUP = "1067778060";
 
 interface Props {
   view: View;
@@ -28,8 +35,20 @@ interface Props {
   runningInstanceCount: number;
   /** 可升级的版本数 */
   upgradableCount: number;
+  /** 实例终端抽屉是否打开 */
+  terminalOpen: boolean;
+  /** 打开/收起实例终端抽屉 */
+  onToggleTerminal: () => void;
+  /** 检查启动器新版本（原顶栏按钮，收进仓库卡） */
+  onCheckUpdate: () => void;
+  /** 打开全局命令面板（面板本体挂在 App.tsx，⌘K / Ctrl+K 同效） */
+  onOpenPalette: () => void;
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
 }
+
+/** 命令面板快捷键的展示文案（仅显示用，监听在 App.tsx 同时接受 ⌘K 与 Ctrl+K） */
+const PALETTE_KEY =
+  typeof navigator !== "undefined" && /mac/i.test(navigator.platform || navigator.userAgent) ? "⌘K" : "Ctrl+K";
 
 /** 侧栏底部的一行状态：展开态用「灯 + 文字」，收起态只剩灯（tooltip 兜底） */
 function StatusDot({ tone, label, title }: { tone: "ok" | "warn" | "off"; label: string; title?: string }) {
@@ -111,7 +130,8 @@ function GitHubMark({ className }: { className?: string }) {
  * 三档切换由 hooks/use-layout.ts 控制 open，这里只负责内容编排。
  */
 export default function AppSidebar({
-  view, onNavigate, env, settings, runningInstanceCount, upgradableCount, onToast,
+  view, onNavigate, env, settings, runningInstanceCount, upgradableCount,
+  terminalOpen, onToggleTerminal, onCheckUpdate, onOpenPalette, onToast,
 }: Props) {
   const { isMobile, setOpenMobile } = useSidebar();
 
@@ -144,6 +164,7 @@ export default function AppSidebar({
     ["config", "配置文件", FileCog, null, null],
     ["credentials", "凭据管理", KeyRound, null, null],
     ["stats", "统计", BarChart3, runningInstanceCount > 0 ? runningInstanceCount : null, "success"],
+    ["logs", "系统日志", ScrollText, null, null],
   ];
 
   const navigate = (key: View) => {
@@ -151,6 +172,92 @@ export default function AppSidebar({
     // 抽屉态：选中即收起，避免遮住刚打开的内容
     if (isMobile) setOpenMobile(false);
   };
+
+  /**
+   * 「运行状态」详情：环境状态灯 + 实例终端入口 + 目录与源路径。
+   * 展开态与收起态共用同一份内容，点按钮后在侧栏旁边以 Popover 展示，
+   * 不再常驻一张大卡片占掉侧栏底部空间。
+   */
+  const envDetails = (
+    <>
+      <div className="eyebrow">运行状态</div>
+      <div className="space-y-0.5 text-[11.5px]">
+        <StatusDot
+          tone={env.node ? "ok" : "off"}
+          label={env.node ? `Node v${env.node}` : "Node 未装"}
+          title={env.nodePath ?? undefined}
+        />
+        <StatusDot
+          tone={env.npm ? "ok" : env.npmPath ? "warn" : "off"}
+          label={env.npm ? `npm ${env.npm}` : env.npmPath ? "npm 不可用" : "npm 未装"}
+          title={
+            env.npm
+              ? (env.npmPath ?? undefined)
+              : env.npmPath
+                ? `已解析到 ${env.npmPath}，但执行失败（不是可用的 npm？）。详见「系统日志」页的 app 分类`
+                : "PATH 中没有找到 npm；可在设置里指定 Node 路径，或安装内置 Node 运行时"
+          }
+        />
+        <StatusDot
+          tone={settings.activeVersion ? "ok" : "warn"}
+          label={settings.activeVersion || "版本未选"}
+          title={settings.activeVersion ? "当前 dsh 版本" : "还没选版本：到「版本与安装」安装并选用一个"}
+        />
+        <StatusDot
+          tone={runningInstanceCount > 0 ? "ok" : "off"}
+          label={`${runningInstanceCount} 个实例运行中 · ${env.os}/${env.arch}`}
+        />
+        <Button
+          size="sm"
+          variant={terminalOpen ? "secondary" : "outline"}
+          className="mt-1.5 h-6 w-full gap-1 text-[10.5px]"
+          title="打开/收起实例终端"
+          onClick={onToggleTerminal}
+        >
+          <Terminal className="size-3" /> 实例终端
+          {runningInstanceCount > 0 && (
+            <span className="ml-0.5 rounded-full bg-emerald-500/15 px-1 font-mono text-[10px] text-emerald-600 dark:text-emerald-400">
+              {runningInstanceCount}
+            </span>
+          )}
+        </Button>
+      </div>
+
+      <Separator className="my-0.5 bg-sidebar-border" />
+
+      <div className="eyebrow">目录与源</div>
+      <div className="space-y-0.5">
+        <InfoRow
+          label="npm 源"
+          value={shortRegistry(env.registry)}
+          title={env.registry}
+          onCopy={() => copyPath(env.registry, "registry 地址")}
+        />
+        <InfoRow
+          label="启动器"
+          value={tildePath(env.dshHome, env.dshHome)}
+          title={env.dshHome}
+          onCopy={() => copyPath(env.dshHome, "启动器数据目录")}
+        />
+        <InfoRow
+          label="版本"
+          value={tildePath(env.versionsDir, env.dshHome)}
+          title={env.versionsDir}
+          onCopy={() => copyPath(env.versionsDir, "版本目录")}
+        />
+        <InfoRow
+          label="dsh"
+          value={tildePath(env.dshNativeHome, env.dshHome)}
+          title={env.dshNativeHome}
+          onCopy={() => copyPath(env.dshNativeHome, "dsh 数据目录")}
+        />
+      </div>
+
+      <p className="text-[10px] leading-relaxed text-muted-foreground">
+        退出启动器只结束子进程实例，独立进程实例继续运行；关闭窗口最小化到托盘
+      </p>
+    </>
+  );
 
   return (
     <Sidebar collapsible="icon" className="border-sidebar-border">
@@ -221,75 +328,60 @@ export default function AppSidebar({
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+
+        {/* 命令面板入口：汇总全部页面跳转与高频操作，键盘 ⌘K / Ctrl+K 同效 */}
+        <SidebarGroup className="pt-0">
+          <SidebarGroupContent>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  tooltip="命令面板"
+                  className="h-8 gap-2 rounded-lg border border-sidebar-border bg-sidebar-accent/40 text-muted-foreground hover:text-foreground"
+                  onClick={onOpenPalette}
+                >
+                  <Command />
+                  <span>命令面板</span>
+                  <kbd className="ml-auto rounded border border-border bg-muted px-1 font-mono text-[10px] leading-4 text-muted-foreground group-data-[collapsible=icon]:hidden">
+                    {PALETTE_KEY}
+                  </kbd>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
       </SidebarContent>
 
       <SidebarFooter className="gap-2 border-t border-sidebar-border p-2">
-        {/* 展开态：环境卡片 + 项目仓库卡片。
-            这里以前只是三行「灯 + 文本 + 两行裸路径」，而主栏另有一条底栏显示
-            「官方源 / 数据目录 / 托盘提示」—— 同一批数据放在两处、两处都不全。
-            现在主栏底栏撤掉，全部收进这两张卡片：状态一行一灯、路径一列对齐、
-            值可截断但能悬停看全文 / 一键复制，仓库入口固定在卡片底部。 */}
+        {/* 展开态：运行状态收成一个按钮，点击后在侧栏旁弹出详情 Popover；
+            项目仓库卡片保持常驻。 */}
         <div className="space-y-2 group-data-[collapsible=icon]:hidden">
-          <Card size="sm" className="gap-0 border-sidebar-border bg-sidebar-accent/40 py-2 shadow-none ring-sidebar-border">
-            <div className="eyebrow px-2.5">运行状态</div>
-            <div className="mt-1.5 space-y-0.5 px-2.5 text-[11.5px]">
-              <StatusDot
-                tone={env.node ? "ok" : "off"}
-                label={env.node ? `Node v${env.node}` : "Node 未装"}
-                title={env.nodePath ?? undefined}
-              />
-              <StatusDot
-                tone={settings.activeVersion ? "ok" : "warn"}
-                label={settings.activeVersion || "版本未选"}
-                title={settings.activeVersion ? "当前 dsh 版本" : "还没选版本：到「版本与安装」安装并选用一个"}
-              />
-              <StatusDot
-                tone={runningInstanceCount > 0 ? "ok" : "off"}
-                label={`${runningInstanceCount} 个实例运行中`}
-              />
-            </div>
-
-            <Separator className="my-2 bg-sidebar-border" />
-
-            <div className="eyebrow px-2.5">目录与源</div>
-            <div className="mt-1.5 space-y-0.5 px-2.5">
-              <InfoRow
-                label="npm 源"
-                value={shortRegistry(env.registry)}
-                title={env.registry}
-                onCopy={() => copyPath(env.registry, "registry 地址")}
-              />
-              <InfoRow
-                label="启动器"
-                value={tildePath(env.dshHome, env.dshHome)}
-                title={env.dshHome}
-                onCopy={() => copyPath(env.dshHome, "启动器数据目录")}
-              />
-              <InfoRow
-                label="版本"
-                value={tildePath(env.versionsDir, env.dshHome)}
-                title={env.versionsDir}
-                onCopy={() => copyPath(env.versionsDir, "版本目录")}
-              />
-              <InfoRow
-                label="dsh"
-                value={tildePath(env.dshNativeHome, env.dshHome)}
-                title={env.dshNativeHome}
-                onCopy={() => copyPath(env.dshNativeHome, "dsh 数据目录")}
-              />
-            </div>
-
-            <p className="mt-2 px-2.5 text-[10px] leading-relaxed text-muted-foreground">
-              退出启动器会结束所有内嵌 dsh 进程；关闭窗口最小化到托盘
-            </p>
-          </Card>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 w-full gap-1.5 border-sidebar-border bg-sidebar-accent/40 text-[10.5px] font-normal shadow-none"
+                title="查看运行状态与环境详情"
+              >
+                <Gauge className="size-3" /> 运行状态
+                {runningInstanceCount > 0 && (
+                  <span className="ml-auto rounded-full bg-emerald-500/15 px-1 font-mono text-[10px] text-emerald-600 dark:text-emerald-400">
+                    {runningInstanceCount}
+                  </span>
+                )}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent side="right" align="start" className="w-72">
+              {envDetails}
+            </PopoverContent>
+          </Popover>
 
           <Card size="sm" className="gap-0 border-sidebar-border bg-sidebar-accent/40 py-2 shadow-none ring-sidebar-border">
             <div className="flex items-center gap-2 px-2.5">
               <GitHubMark className="size-3.5 shrink-0 text-muted-foreground" />
               <div className="min-w-0 flex-1">
                 <div className="truncate font-mono text-[11px] font-semibold">Yinxe/dsh-starter</div>
-                <div className="truncate text-[10px] text-muted-foreground">源码 · 问题反馈 · 更新日志</div>
+                <div className="truncate text-[10px] text-muted-foreground">源码 · 问题反馈 · 更新日志 · 下载页</div>
               </div>
             </div>
             <div className="mt-2 grid grid-cols-2 gap-1.5 px-2.5">
@@ -311,24 +403,81 @@ export default function AppSidebar({
               >
                 <ScrollText className="size-3" /> 更新日志
               </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 gap-1 px-1.5 text-[10.5px]"
+                title="检查 DSH Starter 新版本"
+                onClick={onCheckUpdate}
+              >
+                <RefreshCw className="size-3" /> 检查更新
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 gap-1 px-1.5 text-[10.5px]"
+                title={SITE_URL}
+                onClick={() => openUrl(SITE_URL, "下载页")}
+              >
+                <Download className="size-3" /> 打开下载页
+              </Button>
+            </div>
+            {/* QQ 群没有可跳转的加群链接（客户端内搜索/扫码为准），点击复制群号最实用 */}
+            <div className="mt-1.5 px-2.5">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 w-full gap-1 px-1.5 text-[10.5px]"
+                title={`复制 QQ 群号，在 QQ 里搜群号 ${QQ_GROUP} 加群`}
+                onClick={() => copyPath(QQ_GROUP, "QQ 群号")}
+              >
+                <MessageSquareText className="size-3" /> QQ 群 {QQ_GROUP}
+              </Button>
             </div>
           </Card>
         </div>
 
-        {/* 收起态：三颗状态灯 + 仓库入口（tooltip 兜底） */}
+        {/* 收起态：状态灯收成一个按钮（保留灯做概览），点击同样弹出详情 Popover；
+            实例终端 / 仓库入口保持独立按钮（tooltip 兜底） */}
         <div className="hidden flex-col items-center gap-2 py-1 group-data-[collapsible=icon]:flex">
-          <span
-            className={`led ${env.node ? "bg-emerald-500" : "bg-red-500"}`}
-            title={env.node ? `Node v${env.node}` : "Node 未装"}
-          />
-          <span
-            className={`led ${settings.activeVersion ? "bg-emerald-500" : "bg-amber-500"}`}
-            title={settings.activeVersion || "版本未选"}
-          />
-          <span
-            className={`led ${runningInstanceCount > 0 ? "bg-emerald-500" : "bg-muted-foreground/40"}`}
-            title={`${runningInstanceCount} 个实例运行中`}
-          />
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="h-auto flex-col gap-1.5 py-1.5"
+                title="查看运行状态与环境详情"
+              >
+                <span
+                  className={`led ${env.node ? "bg-emerald-500" : "bg-red-500"}`}
+                  title={env.node ? `Node v${env.node}` : "Node 未装"}
+                />
+                <span
+                  className={`led ${env.npm ? "bg-emerald-500" : env.npmPath ? "bg-amber-500" : "bg-red-500"}`}
+                  title={env.npm ? `npm ${env.npm}` : env.npmPath ? "npm 不可用" : "npm 未装"}
+                />
+                <span
+                  className={`led ${settings.activeVersion ? "bg-emerald-500" : "bg-amber-500"}`}
+                  title={settings.activeVersion || "版本未选"}
+                />
+                <span
+                  className={`led ${runningInstanceCount > 0 ? "bg-emerald-500" : "bg-muted-foreground/40"}`}
+                  title={`${runningInstanceCount} 个实例运行中`}
+                />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent side="right" align="start" className="w-72">
+              {envDetails}
+            </PopoverContent>
+          </Popover>
+          <Button
+            variant={terminalOpen ? "secondary" : "ghost"}
+            size="icon-sm"
+            title="打开/收起实例终端"
+            onClick={onToggleTerminal}
+          >
+            <Terminal className="size-3.5" />
+          </Button>
           <Button
             variant="ghost"
             size="icon-sm"
@@ -337,6 +486,15 @@ export default function AppSidebar({
             onClick={() => openUrl(REPO_URL, "项目仓库")}
           >
             <GitHubMark className="size-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="mt-0.5"
+            title={`QQ 群 ${QQ_GROUP}（点击复制群号）`}
+            onClick={() => copyPath(QQ_GROUP, "QQ 群号")}
+          >
+            <MessageSquareText className="size-3.5" />
           </Button>
         </div>
       </SidebarFooter>

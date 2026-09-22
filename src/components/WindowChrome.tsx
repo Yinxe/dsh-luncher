@@ -90,12 +90,12 @@ export default function WindowChrome({ children }: { children: ReactNode }) {
   return (
     <div className="app-frame" data-maximized={maximized} data-focused={focused}>
       <div className="window-titlebar" data-tauri-drag-region="deep">
-        {/* 品牌标识跟侧栏头部刻意区别开：这里是「窗口标签」，字号更小、色调更弱 */}
-        <div className="titlebar-brand flex min-w-0 items-center gap-2">
-          <img src="/dsh-logo.svg" alt="DSH" className="h-4 w-4 shrink-0" draggable={false} />
-          <span className="truncate text-[12px] font-semibold tracking-tight">DSH Starter</span>
-        </div>
         <div className="min-w-2 flex-1" />
+        {/* 窗口标签：居中、不带 logo（品牌与版本信息在侧栏头部，这里只做窗口标识）。
+            pointer-events-none 让鼠标按下时命中的是标题栏本身，拖动照常生效 */}
+        <span className="titlebar-brand pointer-events-none absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-center whitespace-nowrap text-[12px] font-semibold tracking-tight">
+          DSH Starter
+        </span>
         {!IS_MAC && (
           <div className="flex h-full shrink-0 items-stretch">
             <Button

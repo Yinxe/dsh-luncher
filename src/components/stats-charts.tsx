@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Bar,
   BarChart,
@@ -8,6 +8,7 @@ import {
   Line,
   Pie,
   PieChart,
+  Sector,
   XAxis,
   YAxis,
 } from "recharts";
@@ -242,34 +243,62 @@ export function OnlineDayChart({
   );
 }
 
-function DonutTip({ active, payload }: { active?: boolean; payload?: Array<{ payload?: { name: string; value: number; pct: number } }> }) {
-  if (!active || !payload || payload.length === 0) return null;
-  const d = payload[0].payload;
-  if (!d) return null;
-  return (
-    <TipBox
-      title={<span className="font-mono">{d.name}</span>}
-      rows={[{ k: "Token", v: fmtTok(d.value) }, { k: "占比", v: `${d.pct.toFixed(1)}%` }]}
-    />
-  );
-}
-
 interface ModelTip {
   m: ModelUsage;
   x: number;
   y: number;
 }
 
-/** 模型用量分布：环形图（中心=累计 Token）+ 响应式卡片网格，悬浮卡片看用量构成 */
+/** "provider/model" → provider / model（无前缀时 provider 显示为 —） */
+const provOf = (model: string) => {
+  const i = model.indexOf("/");
+  return i > 0 ? model.slice(0, i) : "—";
+};
+const shortOf = (model: string) => {
+  const i = model.indexOf("/");
+  return i > 0 ? model.slice(i + 1) : model;
+};
+
+/** 环图切片（top6 + 其他）；full 保留完整模型 id 给 tooltip 的 title */
+interface DonutDatum {
+  name: string;
+  full: string;
+  value: number;
+  color: string;
+  pct: number;
+}
+
+/**
+ * 模型用量分布：环形图（中心=累计 Token）+ 响应式卡片网格，悬浮卡片看用量构成。
+ * 环图悬浮用跟随鼠标的 FloatTip：recharts 自带 Tooltip 会被 150px 的容器夹住位置、
+ * 压在中心数字上，既不动也读不清。
+ */
 export function ModelUsageBoard({ models, disableAnimation }: { models: ModelUsage[]; disableAnimation?: boolean }) {
   const [tip, setTip] = useState<ModelTip | null>(null);
+  const [dtip, setDtip] = useState<{ d: DonutDatum; x: number; y: number } | null>(null);
+  // mousemove 每个事件都 setState 会让整块面板（含卡片网格与全部 Sector）逐像素重渲染；限流到 ~20fps
+  const dtipTs = useRef(0);
   const total = models.reduce((a, m) => a + m.tokens, 0);
+  /** 同名模型常来自不同供应商（列表里会重复出现），重名时给显示名补上供应商标识 */
+  const labelOf = useMemo(() => {
+    const cnt = new Map<string, number>();
+    for (const m of models) {
+      const s = shortOf(m.model);
+      cnt.set(s, (cnt.get(s) ?? 0) + 1);
+    }
+    return (model: string) => {
+      const s = shortOf(model);
+      return (cnt.get(s) ?? 0) > 1 ? `${s} · ${provOf(model)}` : s;
+    };
+  }, [models]);
   if (models.length === 0) return <div className="py-8 text-center text-sm text-muted-foreground">还没有任何模型用量记录</div>;
   const top = models.slice(0, SERIES_COLORS.length);
   const otherTokens = models.slice(top.length).reduce((a, m) => a + m.tokens, 0);
-  const pieData = [
-    ...top.map((m, i) => ({ name: m.model, value: m.tokens, color: SERIES_COLORS[i], pct: m.share * 100 })),
-    ...(otherTokens > 0 ? [{ name: "其他", value: otherTokens, color: OTHER_COLOR, pct: (otherTokens / Math.max(1, total)) * 100 }] : []),
+  const pieData: DonutDatum[] = [
+    ...top.map((m, i) => ({ name: labelOf(m.model), full: m.model, value: m.tokens, color: SERIES_COLORS[i], pct: m.share * 100 })),
+    ...(otherTokens > 0
+      ? [{ name: "其他", full: `其余 ${models.length - top.length} 个模型合计`, value: otherTokens, color: OTHER_COLOR, pct: (otherTokens / Math.max(1, total)) * 100 }]
+      : []),
   ];
   const colorOf = (i: number) => (i < SERIES_COLORS.length ? SERIES_COLORS[i] : OTHER_COLOR);
   return (
@@ -277,18 +306,39 @@ export function ModelUsageBoard({ models, disableAnimation }: { models: ModelUsa
       <div className="relative mx-auto w-[150px] shrink-0 sm:mx-0">
         <ChartContainer config={{}} className="aspect-auto w-full" style={{ height: 150 }}>
           <PieChart>
-            <ChartTooltip content={<DonutTip />} />
             <Pie
               data={pieData}
               dataKey="value"
               nameKey="name"
               innerRadius="64%"
-              outerRadius="94%"
+              outerRadius="88%"
               paddingAngle={pieData.length > 1 ? 2 : 0}
               stroke="var(--card)"
               startAngle={90}
               endAngle={-270}
               isAnimationActive={!disableAnimation}
+              // 悬浮段外扩 4px：环图唯一的即时触感反馈（v3 用 shape + isActive，activeShape 已废弃）
+              shape={(p) => (
+                <Sector
+                  cx={p.cx}
+                  cy={p.cy}
+                  innerRadius={p.innerRadius}
+                  outerRadius={p.outerRadius + (p.isActive ? 4 : 0)}
+                  startAngle={p.startAngle}
+                  endAngle={p.endAngle}
+                  cornerRadius={p.cornerRadius}
+                  fill={p.fill ?? p.payload?.color}
+                  stroke="var(--card)"
+                  strokeWidth={1}
+                />
+              )}
+              onMouseMove={(_d, i, e) => {
+                const now = performance.now();
+                if (now - dtipTs.current < 50) return;
+                dtipTs.current = now;
+                setDtip({ d: pieData[i], x: e.clientX, y: e.clientY });
+              }}
+              onMouseLeave={() => setDtip(null)}
             >
               {pieData.map((d, i) => (
                 <Cell key={i} fill={d.color} />
@@ -306,9 +356,6 @@ export function ModelUsageBoard({ models, disableAnimation }: { models: ModelUsa
         onMouseLeave={() => setTip(null)}
       >
         {models.map((m, i) => {
-          const slash = m.model.indexOf("/");
-          const provider = slash > 0 ? m.model.slice(0, slash) : "—";
-          const short = slash > 0 ? m.model.slice(slash + 1) : m.model;
           const c = colorOf(i);
           return (
             <div
@@ -321,7 +368,7 @@ export function ModelUsageBoard({ models, disableAnimation }: { models: ModelUsa
             >
               <div className="flex items-center gap-1.5 text-xs">
                 <span className="h-2 w-2 shrink-0 rounded-[3px]" style={{ background: c }} />
-                <span className="min-w-0 truncate font-medium" title={m.model}>{short}</span>
+                <span className="min-w-0 truncate font-medium" title={m.model}>{labelOf(m.model)}</span>
                 <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
                   {fmtTok(m.tokens)} · {(m.share * 100).toFixed(1)}%
                 </span>
@@ -329,14 +376,35 @@ export function ModelUsageBoard({ models, disableAnimation }: { models: ModelUsa
               <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted">
                 <div className="h-full rounded-full" style={{ width: `${Math.max(1.5, m.share * 100)}%`, background: c }} />
               </div>
-              <div className="mt-1 truncate text-[10px] text-muted-foreground" title={`${provider} · ${m.calls} 次请求`}>
-                {provider} · 输入 {fmtTok(m.input)} · 输出 {fmtTok(m.output)} · 缓存 {fmtTok(m.cacheRead + m.cacheWrite)} ·{" "}
+              <div className="mt-1 truncate text-[10px] text-muted-foreground" title={`${provOf(m.model)} · ${m.calls} 次请求`}>
+                {provOf(m.model)} · 输入 {fmtTok(m.input)} · 输出 {fmtTok(m.output)} · 缓存 {fmtTok(m.cacheRead + m.cacheWrite)} ·{" "}
                 {fmtNum(m.calls)} 次
               </div>
             </div>
           );
         })}
       </div>
+      {dtip && (
+        <FloatTip
+          x={Math.min(dtip.x + 14, Math.max(8, window.innerWidth - 268))}
+          y={Math.min(dtip.y + 12, Math.max(8, window.innerHeight - 104))}
+        >
+          <div className="flex items-center gap-1.5 font-medium">
+            <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: dtip.d.color }} />
+            <span className="min-w-0 truncate" title={dtip.d.full}>
+              {dtip.d.name}
+            </span>
+          </div>
+          <div className="mt-1 flex items-baseline justify-between gap-4">
+            <span className="text-muted-foreground">Token</span>
+            <span className="font-mono tabular-nums">{fmtTok(dtip.d.value)}</span>
+          </div>
+          <div className="flex items-baseline justify-between gap-4">
+            <span className="text-muted-foreground">占比</span>
+            <span className="font-mono tabular-nums">{dtip.d.pct.toFixed(1)}%</span>
+          </div>
+        </FloatTip>
+      )}
       {tip && (
         <FloatTip x={tip.x} y={tip.y}>
           <div className="truncate font-medium" title={tip.m.model}>

@@ -31,9 +31,9 @@ pub fn profiles_dir() -> PathBuf {
 pub enum ProfileTarget {
     /// Web 应用：bundles 含 @deepseek-ai/dsh-web-app，启动方式 = 打开浏览器
     Web,
-    /// 桌面应用外壳：bundles 含 desktop 插件，启动方式预留
+    /// 桌面应用外壳：package.json 的 name 为桌面运行时包名，或 bundles 含 desktop 插件；启动方式预留
     Desktop,
-    /// 未识别（无 package.json 或 bundles 中无已知 Target 插件）
+    /// 未识别（无 package.json 或 name/bundles 中无已知 Target）
     Unknown,
 }
 
@@ -43,10 +43,17 @@ const WEB_APP_BUNDLE: &str = "@deepseek-ai/dsh-web-app";
 /// 桌面外壳 bundle 的完整包名（预留：官方定名后在此增补）
 const DESKTOP_APP_BUNDLES: &[&str] = &["@deepseek-ai/dsh-desktop-app"];
 
-/// package.json 中 dsh.profile.bundles 的类型化结构，
+/// 桌面运行时 profile 的 package.json name。官方 desktop profile 的 bundles 里同样带
+/// `@deepseek-ai/dsh-web-app`（桌面外壳内嵌 Web 应用），只按 bundles 会被误判成 Web，
+/// 因此这个精确包名要先于 bundles 判定。
+const DESKTOP_RUNTIME_PACKAGES: &[&str] = &["@deepseek-ai/dsh-desktop-runtime"];
+
+/// package.json 中 Target 识别用到的字段（dsh.profile.bundles 与顶层 name），
 /// 交给 serde_json 严格反序列化，不做任何文本层面的模糊匹配
 #[derive(Deserialize, Default)]
 struct ProfilePackageJson {
+    #[serde(default)]
+    name: String,
     #[serde(default)]
     dsh: DshSection,
 }
@@ -81,25 +88,28 @@ pub struct ProfileInfo {
     /// dir = profiles/ 下的子目录；file = yaml/json 配置文件（名字去掉扩展名）
     pub kind: String,
     pub path: String,
-    /// 由 package.json 的 dsh.profile.bundles 识别出的运行 Target
+    /// 由 package.json 的 name 与 dsh.profile.bundles 识别出的运行 Target
     pub target: ProfileTarget,
     /// dsh 内置保留 profile（不可改名/删除）
     pub reserved: bool,
 }
 
-/// 读 profile 的 dsh.profile.bundles 列表（缺文件/解析失败返回空）
-fn read_bundles(dir: &Path) -> Vec<String> {
+/// 读 profile 的 package.json 中 Target 识别所需字段（缺文件/解析失败返回默认值）
+fn read_profile_package(dir: &Path) -> ProfilePackageJson {
     let Ok(txt) = std::fs::read_to_string(dir.join("package.json")) else {
-        return Vec::new();
+        return ProfilePackageJson::default();
     };
-    serde_json::from_str::<ProfilePackageJson>(&txt)
-        .map(|pkg| pkg.dsh.profile.bundles)
-        .unwrap_or_default()
+    serde_json::from_str::<ProfilePackageJson>(&txt).unwrap_or_default()
 }
 
-/// 按 bundles 识别 Target：完整包名精确匹配（@deepseek-ai/dsh-web-app ⇒ Web）
+/// 识别 Target：先看 package.json 的 name（桌面运行时内嵌 web-app，必须优先判），
+/// 再看 bundles 里的完整包名（@deepseek-ai/dsh-web-app ⇒ Web）
 fn detect_target(dir: &Path) -> ProfileTarget {
-    let bundles = read_bundles(dir);
+    let pkg = read_profile_package(dir);
+    if DESKTOP_RUNTIME_PACKAGES.contains(&pkg.name.as_str()) {
+        return ProfileTarget::Desktop;
+    }
+    let bundles = &pkg.dsh.profile.bundles;
     if bundles.iter().any(|b| b == WEB_APP_BUNDLE) {
         return ProfileTarget::Web;
     }
@@ -282,11 +292,32 @@ mod tests {
         .unwrap();
         assert_eq!(detect_target(&tmp), ProfileTarget::Unknown);
 
+        // name 为桌面运行时包名 ⇒ Desktop，即使 bundles 里带着 dsh-web-app
+        // （官方 desktop profile 就是这种形态：桌面外壳内嵌 Web 应用）
+        std::fs::write(
+            tmp.join("package.json"),
+            r#"{"name":"@deepseek-ai/dsh-desktop-runtime","dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_target(&tmp), ProfileTarget::Desktop);
+
+        // name 近似（缺 scope / 多后缀）不算桌面运行时，仍按 bundles 判成 Web
+        for near in ["dsh-desktop-runtime", "@deepseek-ai/dsh-desktop-runtime-x"] {
+            let json = r#"{"name":"__NAME__","dsh":{"profile":{"bundles":["@deepseek-ai/dsh-web-app"]}}}"#
+                .replace("__NAME__", near);
+            std::fs::write(tmp.join("package.json"), json).unwrap();
+            assert_eq!(detect_target(&tmp), ProfileTarget::Web, "near name={near}");
+        }
+
+        // 只有 name、没有 dsh 段 ⇒ 不崩，按 Unknown
+        std::fs::write(tmp.join("package.json"), r#"{"name":"some-app"}"#).unwrap();
+        assert_eq!(detect_target(&tmp), ProfileTarget::Unknown);
+
         std::fs::remove_dir_all(&tmp).ok();
     }
 
     /// 真实数据冒烟验证：逐个扫描 ~/.dsh/profiles，打印识别结果；
-    /// 若存在 profiles/web，则必须识别为 Web。
+    /// 若存在 profiles/web / profiles/desktop，则必须分别识别为 Web / Desktop。
     #[test]
     fn real_home_profiles_targets() {
         let Some(home) = std::env::var_os("HOME") else {
@@ -303,6 +334,10 @@ mod tests {
         let web = profiles.iter().find(|p| p.name == "web");
         if let Some(web) = web {
             assert_eq!(web.target, ProfileTarget::Web);
+        }
+        let desktop = profiles.iter().find(|p| p.name == "desktop");
+        if let Some(desktop) = desktop {
+            assert_eq!(desktop.target, ProfileTarget::Desktop);
         }
     }
 }

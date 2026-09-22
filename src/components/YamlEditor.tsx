@@ -1,31 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { yaml } from "@codemirror/lang-yaml";
-import { linter, type Diagnostic } from "@codemirror/lint";
-import { parseDocument } from "yaml";
+import { linter } from "@codemirror/lint";
 import { useTheme } from "@/lib/theme";
+import { validateYaml, type YamlIssue } from "@/lib/yaml-validate";
 
-/** YAML 语法实时校验（专业配置编辑器：错误行内标红） */
+/**
+ * YAML 语法实时校验（与保存闸门共用 validateYaml，口径一致）：
+ * 解析错误按 yaml 包给的行列定位；tab 缩进按字符扫描定位。
+ */
 function yamlLinter() {
-  return linter((view) => {
-    const diagnostics: Diagnostic[] = [];
-    const text = view.state.doc.toString();
-    if (!text.trim()) return diagnostics;
-    const doc = parseDocument(text);
-    for (const error of doc.errors) {
-      const pos = Array.isArray(error.pos) ? error.pos : [0, 0];
-      const from = Math.max(0, Math.min(pos[0], text.length));
-      const to = Math.max(from + 1, Math.min(pos[1] || from + 1, text.length));
-      diagnostics.push({
-        from,
-        to,
-        severity: "error",
-        message: error.message,
-        source: "yaml",
+  return linter(
+    (view) => {
+      const text = view.state.doc.toString();
+      const issues: YamlIssue[] = validateYaml(text);
+      const len = text.length;
+      const tabCol: number[] = [];
+      for (const m of text.matchAll(/^ *\t/gm)) tabCol.push(m.index + m[0].length - 1);
+      let tabSeen = 0;
+      return issues.map((it) => {
+        let from: number;
+        let to: number;
+        if (it.message.startsWith("使用了 Tab")) {
+          from = tabCol[tabSeen++] ?? 0;
+          to = from + 1;
+        } else {
+          const line = Math.max(1, Math.min(it.line, view.state.doc.lines));
+          from = Math.max(0, Math.min(view.state.doc.line(line).from + it.column - 1, len));
+          to = Math.max(from + 1, Math.min(from + 8, len));
+        }
+        return { from, to, severity: "error" as const, message: `第 ${it.line} 行：${it.message}`, source: "yaml" };
       });
-    }
-    return diagnostics;
-  });
+    },
+  );
 }
 
 interface Props {

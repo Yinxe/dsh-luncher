@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Puzzle, RefreshCw, Settings as SettingsIcon,
-  ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon, Terminal,
+  ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon,
   TriangleAlert, ChevronDown, CopyPlus, Info, RotateCw, FileText, ScrollText,
-  Pencil, Trash2, ShieldPlus, MoreHorizontal, Rocket, Wand2,
+  Pencil, Trash2, ShieldPlus, Rocket, Wand2,
+  Home, Package, Bot, FileCog, KeyRound, BarChart3, Terminal, Monitor, Download,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
@@ -15,10 +16,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Toaster } from "@/components/ui/sonner";
 import { cmpVer } from "@/lib/version";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
-  DropdownMenuSeparator, DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { useSidebarOpen } from "@/hooks/use-layout";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -38,6 +35,7 @@ import ConfigView from "./components/ConfigView";
 import ModelConfigView from "./components/ModelConfigView";
 import CredentialsView from "./components/CredentialsView";
 import StatsView from "./components/StatsView";
+import LogsView from "./components/LogsView";
 import PluginsView from "./components/PluginsView";
 import QuickActionsView from "./components/QuickActionsView";
 import ProcessSidePanel from "./components/ProcessSidePanel";
@@ -46,10 +44,11 @@ import SettingsDrawer from "./components/SettingsDrawer";
 import UpdateBanner from "./components/UpdateBanner";
 import AppSidebar from "./components/AppSidebar";
 import DshChangelogDialog from "./components/DshChangelogDialog";
+import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import type {
   EnvironmentInfo, InstalledVersion, StarterUpdateStatus, ProcEntry,
   ProcExitEvent, ProcLogEvent, ProfileInfo, ProfileInstance, ProfileTarget,
-  RegistryInfo, Settings as SettingsT, View,
+  RegistryInfo, Settings as SettingsT, View, VersionChange, ProfileVersionInfo,
 } from "./types";
 
 /** 恢复模式 profile 名（与后端 profile_cfg::RECOVERY_PROFILE 保持一致） */
@@ -57,7 +56,7 @@ const RECOVERY_PROFILE = "web-Recovery";
 
 /**
  * 各 Target 的标签展示与启动支持状态；新增 Target（如 CLI）在此扩展。
- * Target 由后端按 profile 的 package.json dsh.profile.bundles 识别。
+ * Target 由后端按 profile 的 package.json name（桌面运行时）与 dsh.profile.bundles 识别。
  */
 const TARGET_META: Record<
   ProfileTarget,
@@ -78,7 +77,7 @@ const TARGET_META: Record<
   unknown: {
     label: "未识别",
     variant: "outline",
-    desc: "未识别 Target（bundles 中无已知 Target 插件）",
+    desc: "未识别 Target（package.json 的 name 与 bundles 中无已知 Target）",
     launchable: false,
   },
 };
@@ -104,6 +103,11 @@ export default function App() {
   const runtimeBusy = useRef(false);
   const [instances, setInstances] = useState<ProfileInstance[]>([]);
   const [view, setView] = useState<View>("quick");
+  /** 凭据页首次访问后保持挂载（keep-alive）：切页不丢未保存的编辑（见视图区底部） */
+  const [credSeen, setCredSeen] = useState(false);
+  useEffect(() => {
+    if (view === "credentials") setCredSeen(true);
+  }, [view]);
   const [verScope, setVerScope] = useState<"all" | "installed">("all");
   /** 更新日志对话框当前定位的 dsh 版本（null = 关闭） */
   const [notesVersion, setNotesVersion] = useState<string | null>(null);
@@ -118,6 +122,10 @@ export default function App() {
    *  只靠 state 判断会放第二次请求过去 */
   const startingProfilesRef = useRef<Set<string>>(new Set());
   const restartingRef = useRef(false);
+  /** 各 profile 的绑定启动版本（上次真正把它跑起来的 dsh 版本）：profile → version */
+  const [boundVersions, setBoundVersions] = useState<Record<string, string>>({});
+  /** 被版本变化闸门拦下的启动，等待用户在确认框里取舍；null = 关闭 */
+  const [versionWarn, setVersionWarn] = useState<VersionChange | null>(null);
   /** 复制实例对话框的源 profile；null = 关闭 */
   const [copySource, setCopySource] = useState<string | null>(null);
   /** 重命名对话框的目标 profile；null = 关闭 */
@@ -131,6 +139,8 @@ export default function App() {
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   /** 插件管理页的预选 profile（从 Profile 实例卡片跳转时种子化；导航进入时清空走默认） */
   const [pluginsSeed, setPluginsSeed] = useState<string | null>(null);
+  /** 命令面板（⌘K / Ctrl+K）是否打开 */
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   const procsRef = useRef<Record<number, ProcEntry>>({});
   procsRef.current = procs;
@@ -139,7 +149,7 @@ export default function App() {
   const instancesRef = useRef<ProfileInstance[]>([]);
   instancesRef.current = instances;
 
-  const { resolved, setTheme } = useTheme();
+  const { theme, resolved, setTheme } = useTheme();
 
   /** 侧栏开合：默认跟随窗口档位（宽展开 / 窄收成图标栏 / 超窄走抽屉），手动可覆盖 */
   const [sidebarOpen, setSidebarOpen] = useSidebarOpen();
@@ -172,7 +182,16 @@ export default function App() {
   }, []);
 
   const refreshInstances = useCallback(async () => {
-    try { setInstances(await api.listProfileInstances()); } catch { /* ignore */ }
+    try {
+      // 绑定版本跟着实例一起刷：新起的实例活过后端才会落库，行内小字随轮询自然跟上。
+      // 版本清单失败不能连累实例列表刷新（否则 3s 轮询整体卡死且无提示）
+      const [list, versions] = await Promise.all([
+        api.listProfileInstances(),
+        api.listProfileVersions().catch(() => [] as ProfileVersionInfo[]),
+      ]);
+      setInstances(list);
+      setBoundVersions(Object.fromEntries(versions.map((v) => [v.profile, v.version])));
+    } catch { /* ignore */ }
   }, []);
 
   // ── 首次初始化（dsh 还没生成 $DSH_HOME 时） ────────────────
@@ -461,6 +480,50 @@ export default function App() {
     }
   }, [addToast]);
 
+  const doSetWebOpenMode = useCallback(async (v: "window" | "browser") => {
+    const s = settingsRef.current;
+    if (!s || s.webOpenMode === v) return;
+    const next = { ...s, webOpenMode: v };
+    setSettings(next);
+    try {
+      await api.saveSettings(next);
+      addToast("ok", v === "window" ? "界面已改为在应用内独立窗口打开" : "界面已改为在系统默认浏览器打开");
+    } catch (e) {
+      setSettings(s);
+      addToast("err", `切换失败: ${e}`);
+    }
+  }, [addToast]);
+
+  /** 日志级别：保存后后端运行期立即生效；DSH_STARTER_LOG 环境变量存在时以环境变量为准 */
+  const doSetLogLevel = useCallback(async (v: string) => {
+    const s = settingsRef.current;
+    if (!s || s.logLevel === v) return;
+    const next = { ...s, logLevel: v };
+    setSettings(next);
+    try {
+      await api.saveSettings(next);
+      const e = await api.getEnvironment();
+      setEnv(e);
+      addToast(
+        "ok",
+        e.logLevelPinned
+          ? `级别「${v}」已保存，但被 DSH_STARTER_LOG 环境变量覆盖，实际仍是 ${e.logLevel}`
+          : `日志级别已切换为 ${v}，立即生效（无需重启）`,
+      );
+    } catch (err) {
+      setSettings(s);
+      addToast("err", `切换日志级别失败: ${err}`);
+    }
+  }, [addToast]);
+
+  /** 按设置「打开方式」打开实例 Web UI：应用内独立窗口（同地址复用）或系统默认浏览器 */
+  const openDshWeb = useCallback((url: string, title?: string) => {
+    const p = settingsRef.current?.webOpenMode === "browser"
+      ? api.openUrl(url)
+      : api.openWebWindow(url, title);
+    p.catch((e) => addToast("err", String(e)));
+  }, [addToast]);
+
   const doSetActiveVersion = useCallback(async (v: string) => {
     const s = settingsRef.current;
     if (!s || s.activeVersion === v) return;
@@ -568,7 +631,11 @@ export default function App() {
     } catch (err) { addToast("err", `保存设置失败: ${err}`); }
   }, [addToast]);
 
-  const doStartProfile = useCallback(async (profile: string) => {
+  /**
+   * 启动一个 profile。`ackVersionChange=true` 表示用户已经在风险确认框里
+   * 认了「dsh 版本和上次不一样」这件事，后端才会真正拉起实例。
+   */
+  const doStartProfile = useCallback(async (profile: string, ackVersionChange = false) => {
     // 连点/重复触发守卫：同一 profile 的启动请求还在途时直接忽略。
     // 后端 ensure_profile_free 依赖进程枚举（外部实例还有扫描/缓存延迟），
     // 挡不住同一瞬间挤进来的两次请求 —— 那样会起两个 dsh 抢同一个 web 端口。
@@ -577,7 +644,17 @@ export default function App() {
     setStartingProfile(profile);
     const detached = settingsRef.current?.launchMode === "detached";
     try {
-      const info = await api.startEmbedded(null, profile, undefined, detached);
+      const res = await api.startEmbedded(null, profile, undefined, detached, ackVersionChange);
+      // 版本变化闸门：这次没启动，把风险摆给用户，确认后再带 ack 重来一遍
+      if (res.versionChange) {
+        setVersionWarn(res.versionChange);
+        return;
+      }
+      const info = res.proc;
+      if (!info) {
+        addToast("err", `启动失败：profile「${profile}」没有返回实例信息，请重试`);
+        return;
+      }
       if (detached) {
         // 独立进程没有日志管道：先刷新实例列表把它带进「实例终端」，再选中并展开，
         // 否则用户启动完看不到任何反馈（只能去 Profile 实例页找）
@@ -743,14 +820,14 @@ export default function App() {
   // Profile 实例阶段：stopped → starting → ready（出现 URL）/ failed
   const instanceRows = useMemo(() => {
     type Phase = "stopped" | "starting" | "ready" | "failed" | "external";
-    type Row = { key: string; profile: string; phase: Phase; pid: number | null; source: string | null; version: string | null; webUrl: string | null; code: number | null; target: ProfileTarget; port: number | null; logFile: string | null; reserved: boolean };
+    type Row = { key: string; profile: string; phase: Phase; pid: number | null; source: string | null; version: string | null; boundVersion: string | null; webUrl: string | null; code: number | null; target: ProfileTarget; port: number | null; logFile: string | null; reserved: boolean };
     // 行主键：有 profile 名就用名字；没有 profile（终端 `dsh web` 没带 --profile）就用
     // PID/端口，否则多个无名实例会互相覆盖，界面上只剩一个
     const keyOf = (profile: string, pid: number | null, port: number | null) =>
       profile || (pid != null ? `pid:${pid}` : port != null ? `port:${port}` : "unknown");
     const map = new Map<string, Row>();
     for (const p of profiles) {
-      map.set(p.name, { key: p.name, profile: p.name, phase: "stopped", pid: null, source: null, version: null, webUrl: null, code: null, target: p.target, port: null, logFile: null, reserved: p.reserved });
+      map.set(p.name, { key: p.name, profile: p.name, phase: "stopped", pid: null, source: null, version: null, boundVersion: boundVersions[p.name] ?? null, webUrl: null, code: null, target: p.target, port: null, logFile: null, reserved: p.reserved });
     }
     for (const i of instances) {
       const key = keyOf(i.profile, i.pid, i.port);
@@ -762,6 +839,7 @@ export default function App() {
         pid: i.pid,
         source: i.source,
         version: i.version,
+        boundVersion: known?.boundVersion ?? boundVersions[i.profile] ?? null,
         webUrl: i.webUrl ?? null,
         code: null,
         target: known?.target ?? "unknown",
@@ -780,17 +858,90 @@ export default function App() {
       const phase: Phase = p.exited
         ? p.code == null || p.code === 0 ? "stopped" : "failed"
         : p.webUrl ? "ready" : "starting";
-      map.set(key, { key, profile: p.profile, phase, pid: p.id, source: "embedded", version: p.version, webUrl: p.webUrl, code: p.code, target: map.get(key)?.target ?? "unknown", port: null, logFile: null, reserved: map.get(key)?.reserved ?? false });
+      map.set(key, { key, profile: p.profile, phase, pid: p.id, source: "embedded", version: p.version, boundVersion: map.get(key)?.boundVersion ?? boundVersions[p.profile] ?? null, webUrl: p.webUrl, code: p.code, target: map.get(key)?.target ?? "unknown", port: null, logFile: null, reserved: map.get(key)?.reserved ?? false });
     }
     const label = (r: Row) => r.profile || `:${r.port ?? "?"}`;
     return [...map.values()].sort((a, b) => label(a).localeCompare(label(b)));
-  }, [profiles, instances, procs]);
+  }, [profiles, instances, procs, boundVersions]);
 
   /** 恢复模式 profile 是否已存在（存在就不再显示创建入口） */
   const recoveryExists = useMemo(
     () => profiles.some((p) => p.name === RECOVERY_PROFILE),
     [profiles]
   );
+
+  // ── 命令面板（⌘K / Ctrl+K） ─────────────────
+  /** 统一导航：侧栏与命令面板共用（进插件页清掉 Profile 卡片带过来的预选） */
+  const navigate = useCallback((v: View) => {
+    if (v === "plugins") setPluginsSeed(null);
+    setView(v);
+  }, []);
+
+  // 开合快捷键监听（模式同侧栏 Ctrl+B，见 ui/sidebar.tsx）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return; // 按住不放会按连发速率反复开合面板
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const paletteCommands = useMemo<PaletteCommand[]>(() => {
+    const web = liveWebProcs[0];
+    const cmds: PaletteCommand[] = [
+      { id: "nav-quick", group: "导航", label: "首页", icon: Home, keywords: "快捷操作", run: () => navigate("quick") },
+      { id: "nav-versions", group: "导航", label: "版本与安装", icon: Package, keywords: "dsh 版本", run: () => navigate("versions") },
+      { id: "nav-profiles", group: "导航", label: "Profile 实例", icon: Rocket, keywords: "实例", run: () => navigate("profiles") },
+      { id: "nav-plugins", group: "导航", label: "插件管理", icon: Puzzle, keywords: "插件", run: () => navigate("plugins") },
+      { id: "nav-models", group: "导航", label: "模型配置", icon: Bot, keywords: "模型", run: () => navigate("models") },
+      { id: "nav-config", group: "导航", label: "配置文件", icon: FileCog, keywords: "yaml 配置", run: () => navigate("config") },
+      { id: "nav-credentials", group: "导航", label: "凭据管理", icon: KeyRound, keywords: "key token", run: () => navigate("credentials") },
+      { id: "nav-stats", group: "导航", label: "统计", icon: BarChart3, keywords: "token 用量", run: () => navigate("stats") },
+      { id: "nav-logs", group: "导航", label: "系统日志", icon: ScrollText, keywords: "log 排查 诊断 级别", run: () => navigate("logs") },
+      {
+        id: "open-web", group: "操作", label: "打开 DSH 主界面", icon: ExternalLink,
+        hint: web?.webUrl ?? "无运行实例", disabled: !web?.webUrl, keywords: "ui web",
+        run: () => web?.webUrl && openDshWeb(web.webUrl),
+      },
+    ];
+    for (const p of profiles) {
+      const inst = instances.find((i) => i.profile === p.name && i.running);
+      const busy = startingProfile === p.name || restartingProfile != null;
+      if (inst) {
+        cmds.push(
+          { id: `restart-${p.name}`, group: "操作", label: `重启 ${p.name}`, icon: RotateCw, hint: "运行中", disabled: busy, keywords: "profile", run: () => void doRestartProfile(p.name) },
+          { id: `stop-${p.name}`, group: "操作", label: `停止 ${p.name}`, icon: Square, hint: "运行中", disabled: busy, keywords: "profile", run: () => void doStopInstance({ profile: p.name, pid: inst.pid }) },
+        );
+      } else {
+        cmds.push(
+          { id: `start-${p.name}`, group: "操作", label: `启动 ${p.name}`, icon: Play, disabled: busy, keywords: "profile 运行", run: () => void doStartProfile(p.name) },
+        );
+      }
+    }
+    cmds.push(
+      { id: "refresh-instances", group: "操作", label: "刷新实例列表", icon: RefreshCw, keywords: "实例", run: () => void refreshInstances() },
+      { id: "refresh-profiles", group: "操作", label: "重扫 Profile 目录", icon: RefreshCw, keywords: "profile 扫描", run: () => void refreshProfiles() },
+      { id: "refresh-remote", group: "操作", label: "刷新 dsh 版本清单", icon: Package, keywords: "远端 registry", run: () => void refreshRemote() },
+      { id: "check-update", group: "操作", label: "检查启动器更新", icon: Download, keywords: "升级 新版本", run: () => void doCheckUpdate() },
+      {
+        id: "toggle-terminal", group: "操作", label: drawerOpen ? "收起实例终端" : "打开实例终端", icon: Terminal,
+        keywords: "日志 抽屉", run: () => setDrawerOpen((v) => !v),
+      },
+      { id: "open-settings", group: "操作", label: "打开设置", icon: SettingsIcon, keywords: "偏好", run: () => setShowSettings(true) },
+      { id: "theme-dark", group: "外观", label: "深色模式", icon: Moon, hint: theme === "dark" ? "当前" : undefined, run: () => setTheme("dark") },
+      { id: "theme-light", group: "外观", label: "浅色模式", icon: Sun, hint: theme === "light" ? "当前" : undefined, run: () => setTheme("light") },
+      { id: "theme-system", group: "外观", label: "跟随系统", icon: Monitor, hint: theme === "system" ? "当前" : undefined, run: () => setTheme("system") },
+    );
+    return cmds;
+  }, [
+    liveWebProcs, profiles, instances, startingProfile, restartingProfile, drawerOpen, theme,
+    navigate, openDshWeb, doStartProfile, doRestartProfile, doStopInstance,
+    refreshInstances, refreshProfiles, refreshRemote, doCheckUpdate, setTheme,
+  ]);
 
   if (!settings || !env) {
     return (
@@ -808,56 +959,33 @@ export default function App() {
     >
       <AppSidebar
         view={view}
-        onNavigate={(v) => {
-          // 从侧栏进入插件页：清掉 Profile 卡片带过来的预选，走默认 profile
-          if (v === "plugins") setPluginsSeed(null);
-          setView(v);
-        }}
+        onNavigate={navigate}
+        onOpenPalette={() => setPaletteOpen(true)}
         env={env}
         settings={settings}
         runningInstanceCount={runningInstanceCount}
         upgradableCount={upgradableCount}
+        terminalOpen={drawerOpen}
+        onToggleTerminal={() => setDrawerOpen((v) => !v)}
+        onCheckUpdate={doCheckUpdate}
         onToast={addToast}
       />
 
       {/* 内容侧：顶栏 / 视图放在 SidebarInset 内，随侧栏收放一起让位。
-          这里不再有状态栏：环境数据与项目仓库入口都收在侧栏底部的卡片里（见 AppSidebar）。 */}
+          顶栏只留「折叠侧栏 + 拖拽区 + 高频动作」：环境状态、实例终端、检查更新
+          与仓库/下载页入口都收在侧栏底部的卡片里（见 AppSidebar）。 */}
       <SidebarInset className="min-w-0 overflow-hidden bg-transparent">
-        {/* 顶栏（低优先级项按断点逐级收起，超窄窗口统一进「更多」菜单） */}
         <header className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background/80 px-2 lg:gap-2 lg:px-4">
           <SidebarTrigger title="折叠 / 展开侧栏（Ctrl+B）" />
           {/* 抽屉态（< md）侧栏不可见，顶栏补上品牌标识 */}
           <img src="/dsh-logo.svg" alt="DSH" className="h-6 w-6 shrink-0 md:hidden" draggable={false} />
-          <span className="eyebrow mr-1 hidden xl:inline">Environment</span>
-          <Badge variant="outline" title={env.nodePath ?? ""} className="font-mono">
-            <span className={`led ${env.node ? "bg-emerald-500 text-emerald-500 led-glow" : "bg-red-500"}`} />
-            <span className="hidden sm:inline">node&nbsp;</span>
-            {env.node ? `v${env.node}` : "未装"}
-          </Badge>
-          <Badge
-            variant="outline"
-            title={
-              env.npm
-                ? (env.npmPath ?? "")
-                : env.npmPath
-                  // 解析到了文件却跑不起来（如 Windows 上解析到 git-bash 用的 npm 脚本）：
-                  // 这类问题的关键信息就是「解析到了哪个路径」，必须能直接在界面上看到
-                  ? `已解析到 ${env.npmPath}，但执行失败（不是可用的 npm？）。详见 设置 → 打开日志目录 里的 app.log`
-                  : "PATH 中没有找到 npm；可在设置里指定 Node 路径，或安装内置 Node 运行时"
-            }
-            className="hidden font-mono lg:inline-flex"
-          >
-            <span className={`led ${env.npm ? "bg-emerald-500" : env.npmPath ? "bg-amber-500" : "bg-red-500"}`} />
-            npm {env.npm ?? (env.npmPath ? "不可用" : "未装")}
-          </Badge>
-          <Badge variant="outline" className="hidden font-mono xl:inline-flex">{env.os}/{env.arch}</Badge>
           {/* 顶栏空白处也能拖窗口（data-tauri-drag-region 只管自己那一层，
               按钮之类的可点元素不受影响） */}
           <div className="flex-1" data-tauri-drag-region />
           {liveWebProcs.length > 0 && (
             <Button
               size="sm"
-              onClick={() => liveWebProcs[0].webUrl && api.openUrl(liveWebProcs[0].webUrl).catch((e) => addToast("err", String(e)))}
+              onClick={() => liveWebProcs[0].webUrl && openDshWeb(liveWebProcs[0].webUrl)}
               title={liveWebProcs.length === 1
                 ? `打开 dsh 主界面：${liveWebProcs[0].webUrl}`
                 : `${liveWebProcs.length} 个实例运行中，点击打开最新一个`}
@@ -865,20 +993,6 @@ export default function App() {
               <ExternalLink /> <span className="hidden lg:inline">打开 DSH 界面</span>
             </Button>
           )}
-          <Button variant="outline" size="sm" className="hidden md:inline-flex" onClick={doCheckUpdate}>
-            检查更新
-          </Button>
-          <Button
-            variant={drawerOpen ? "secondary" : "outline"}
-            size="sm"
-            onClick={() => setDrawerOpen((v) => !v)}
-            title="打开/收起实例终端"
-          >
-            <Terminal /> <span className="hidden lg:inline">实例终端</span>
-            {runningInstanceCount > 0 && (
-              <Badge variant="success" className="ml-0.5">{runningInstanceCount}</Badge>
-            )}
-          </Button>
           <Button variant="ghost" size="icon" title="设置" onClick={() => setShowSettings(true)}>
             <SettingsIcon className="h-4 w-4" />
           </Button>
@@ -894,37 +1008,6 @@ export default function App() {
               <Moon className="h-4 w-4 animate-in fade-in zoom-in-50 duration-150" />
             )}
           </Button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="md:hidden" title="更多操作与环境信息">
-                <MoreHorizontal className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuLabel>操作</DropdownMenuLabel>
-              {liveWebProcs.length > 0 && (
-                <DropdownMenuItem
-                  onSelect={() => {
-                    const u = liveWebProcs[0].webUrl;
-                    if (u) api.openUrl(u).catch((e) => addToast("err", String(e)));
-                  }}
-                >
-                  <ExternalLink /> 打开 DSH 界面
-                </DropdownMenuItem>
-              )}
-              <DropdownMenuItem onSelect={() => { doCheckUpdate(); }}>
-                <RefreshCw /> 检查更新
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>环境</DropdownMenuLabel>
-              <DropdownMenuItem disabled className="font-mono text-[11.5px]">
-                node {env.node ? `v${env.node}` : "未装"}
-              </DropdownMenuItem>
-              <DropdownMenuItem disabled className="font-mono text-[11.5px]">
-                npm {env.npm ?? "未装"} · {env.os}/{env.arch}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
         </header>
 
         {/* 更新 / 运行时横幅 */}
@@ -995,7 +1078,7 @@ export default function App() {
               onStart={(p) => void doStartProfile(p)}
               onStop={(row) => void doStopInstance(row)}
               onRestart={(p) => void doRestartProfile(p)}
-              onOpenWeb={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
+              onOpenWeb={(u) => openDshWeb(u)}
               onNavigate={(v) => {
                 // 与侧栏一致：进入插件页清掉 Profile 卡片带过来的预选
                 if (v === "plugins") setPluginsSeed(null);
@@ -1344,16 +1427,35 @@ export default function App() {
                     : "子进程模式：日志回传「实例终端」，启动器退出时结束所有 DSH"}
                 </span>
               </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">打开方式</span>
+                <Tabs
+                  value={settings.webOpenMode === "browser" ? "browser" : "window"}
+                  onValueChange={(v) => doSetWebOpenMode(v as "window" | "browser")}
+                >
+                  <TabsList>
+                    <TabsTrigger value="window" className="text-xs">独立窗口</TabsTrigger>
+                    <TabsTrigger value="browser" className="text-xs">系统默认浏览器</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+                <span className="text-[11px] text-muted-foreground">
+                  {settings.webOpenMode === "browser"
+                    ? "点「打开」跳系统默认浏览器"
+                    : "在应用内独立窗口打开 DSH 界面（无浏览器地址栏）；同一地址复用一个窗口，多个实例可各开一个"}
+                </span>
+              </div>
               <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
                 <span className="text-foreground">Target 标签</span>
                 {" "}按各 profile 的 <span className="font-mono">package.json</span> 中
+                <span className="font-mono"> name </span>与
                 <span className="font-mono"> dsh.profile.bundles </span>
                 识别运行形态：
                 <Badge variant="info">Web</Badge>
                 含 <span className="font-mono"> @deepseek-ai/dsh-web-app </span>
-                插件，启动后从日志识别地址并打开浏览器（当前唯一支持的启动方式）；
+                插件，启动后从日志识别地址，按上方「打开方式」在独立窗口或浏览器打开界面；
                 <Badge variant="secondary">Desktop</Badge>
-                为桌面应用外壳；
+                为桌面应用外壳（name 为
+                <span className="font-mono"> @deepseek-ai/dsh-desktop-runtime </span>）；
                 <Badge variant="outline">未识别</Badge>
                 暂无可用的启动方式。新 Target 的启动方式将在后续版本扩展。
                 若插件导致启动异常，到「插件管理」页停用可疑插件后重启实例。
@@ -1414,12 +1516,15 @@ export default function App() {
                               {row.pid ? ` · PID ${row.pid}` : ""}
                               {row.port != null ? ` · :${row.port}` : ""}
                               {row.version ? ` · ${row.version}` : ""}
+                              {/* 没在跑的行：把它上次真正跑起来的版本亮出来，
+                                  也正是这条记录决定换版本启动时要不要先确认风险 */}
+                              {!row.version && row.boundVersion ? ` · 上次 dsh ${row.boundVersion}` : ""}
                             </div>
                           </div>
                           {canOpen && (
                             <Button
                               size="sm"
-                              onClick={() => row.webUrl && api.openUrl(row.webUrl).catch((e) => addToast("err", String(e)))}
+                              onClick={() => row.webUrl && openDshWeb(row.webUrl, `DSH · ${row.profile}`)}
                             >
                               <ExternalLink /> 打开
                             </Button>
@@ -1472,6 +1577,8 @@ export default function App() {
                                 ? "请先在「版本与安装」页安装 dsh"
                                 : !canStart
                                 ? `${targetMeta.desc}——当前仅支持启动 Web 类型 profile`
+                                : row.boundVersion && row.boundVersion !== settings.activeVersion
+                                ? `上次用 dsh ${row.boundVersion} 跑起来，本次将用 ${settings.activeVersion}；版本变化可能导致该 profile 起不来，会先让你确认风险`
                                 : row.phase === "failed"
                                 ? "重新启动该 profile"
                                 : `基于当前版本（${settings.activeVersion}）启动 ${row.profile}`}
@@ -1582,8 +1689,22 @@ export default function App() {
           )}
           {view === "models" && <ModelConfigView onToast={addToast} />}
           {view === "config" && <ConfigView onToast={addToast} />}
-          {view === "credentials" && <CredentialsView onToast={addToast} />}
           {view === "stats" && <StatsView onToast={addToast} appVersion={env?.appVersion ?? ""} />}
+          {view === "logs" && (
+            <LogsView
+              onToast={addToast}
+              settings={settings}
+              onSaveLogLevel={doSetLogLevel}
+              onReveal={revealPath}
+            />
+          )}
+          {/* 凭据页 keep-alive：首次访问后保持挂载，切页只隐藏 —— 未保存草稿、
+              搜索词与弹窗状态都保留；放最后避免隐藏节点影响 space-y 间距 */}
+          {(credSeen || view === "credentials") && (
+            <div className={view === "credentials" ? "" : "hidden"}>
+              <CredentialsView onToast={addToast} active={view === "credentials"} />
+            </div>
+          )}
         </div>
 
         {/* dsh 更新日志：版本表里的「更新日志」按钮与工具栏按钮都从这里打开 */}
@@ -1594,6 +1715,9 @@ export default function App() {
           onClose={() => setNotesVersion(null)}
           onOpenUrl={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
         />
+
+        {/* 全局命令面板（⌘K / Ctrl+K，侧栏也有入口按钮） */}
+        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />
       </SidebarInset>
 
       <ProcessSidePanel
@@ -1605,7 +1729,7 @@ export default function App() {
         onStop={doStopProc}
         onReadLog={readInstanceLog}
         onReveal={revealPath}
-        onOpenWeb={(u) => api.openUrl(u).catch((e) => addToast("err", String(e)))}
+        onOpenWeb={(u) => openDshWeb(u)}
         onExport={() => {
           const p = activeProc != null ? procsRef.current[activeProc] : null;
           if (!p) return;
@@ -1679,6 +1803,63 @@ export default function App() {
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction variant="destructive" onClick={confirmDeleteProfile}>
               删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 版本变化风险确认：这个 profile 上次是用另一个 dsh 版本跑起来的，
+          换版本（尤其降级）可能让插件加载失败、profile 起不来，必须先让用户认这个风险 */}
+      <AlertDialog
+        open={versionWarn != null}
+        onOpenChange={(o) => { if (!o) setVersionWarn(null); }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex flex-wrap items-center gap-2">
+              换版本启动 profile「{versionWarn?.profile}」？
+              <Badge variant={versionWarn?.direction === "downgrade" ? "destructive" : "warning"}>
+                {versionWarn?.direction === "downgrade" ? "降级" : "升级"}
+              </Badge>
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              <span className="block space-y-1.5">
+                <span className="flex flex-wrap items-center gap-x-2">
+                  <span>上次成功启动</span>
+                  <span className="font-mono text-foreground">dsh {versionWarn?.fromVersion ?? "-"}</span>
+                </span>
+                <span className="flex flex-wrap items-center gap-x-2">
+                  <span>本次将启动</span>
+                  <span className="font-mono text-foreground">dsh {versionWarn?.toVersion ?? "-"}</span>
+                </span>
+              </span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <Alert variant="destructive">
+            <TriangleAlert />
+            <AlertTitle>可能导致 profile 无法启动</AlertTitle>
+            <AlertDescription>
+              dsh 版本变化后，这个 profile 里的插件可能版本不兼容、配置格式对不上，
+              表现为启动报错、界面打不开，甚至读写到一半的数据异常。
+              <span className="text-foreground">降级比升级更危险</span>
+              ：新版本写过的配置，旧版本可能读不了。
+              建议先停止该 profile 之外的其它实例、必要时到「版本」页换回上一个可用版本再试。
+            </AlertDescription>
+          </Alert>
+          <p className="text-xs text-muted-foreground">
+            确认后会把它记为新的绑定版本，同样的版本组合不再重复提示；取消则不启动。
+          </p>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                const w = versionWarn;
+                setVersionWarn(null);
+                if (w) void doStartProfile(w.profile, true);
+              }}
+            >
+              已知风险，继续启动
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

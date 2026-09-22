@@ -15,6 +15,8 @@ export interface QuickInstanceRow {
   pid: number | null;
   source: string | null;
   version: string | null;
+  /** 上次真正把这个 profile 跑起来的 dsh 版本；null = 从未记录（首次启动） */
+  boundVersion: string | null;
   webUrl: string | null;
   code: number | null;
   target: ProfileTarget;
@@ -109,7 +111,11 @@ export default function QuickActionsView(props: Props) {
       ? `启动失败${row.code != null ? `（退出码 ${row.code}）` : ""}`
       : PHASE_TEXT[row.phase] +
         (row.pid != null ? ` · PID ${row.pid}` : "") +
-        (row.webUrl ? ` · ${row.webUrl}` : ` · 基于 ${activeVersion || "（未选择版本）"}`);
+        (row.webUrl
+          ? ` · ${row.webUrl}`
+          : !running && row.boundVersion
+            ? ` · 上次 dsh ${row.boundVersion}`
+            : ` · 基于 ${activeVersion || "（未选择版本）"}`);
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-4">
@@ -151,7 +157,7 @@ export default function QuickActionsView(props: Props) {
             {running ? (
               <>
                 {row.webUrl && (
-                  <Button onClick={() => onOpenWeb(row.webUrl!)} title={`在浏览器打开 ${row.webUrl}`}>
+                  <Button onClick={() => onOpenWeb(row.webUrl!)} title={`打开 DSH 界面：${row.webUrl}`}>
                     <ExternalLink /> <span className="hidden sm:inline">打开界面</span>
                   </Button>
                 )}
@@ -163,7 +169,9 @@ export default function QuickActionsView(props: Props) {
                 </Button>
               </>
             ) : (
-              <Button size="lg" disabled={disabled || busy} title={disabled ? disabledTitle : `基于当前版本（${activeVersion}）启动 web`} onClick={() => onStart(row.profile)}>
+              <Button size="lg" disabled={disabled || busy} title={disabled ? disabledTitle : row.boundVersion && row.boundVersion !== activeVersion
+                ? `上次用 dsh ${row.boundVersion} 跑起来，本次将用 ${activeVersion}；版本变化可能导致该 profile 起不来，会先让你确认风险`
+                : `基于当前版本（${activeVersion}）启动 web`} onClick={() => onStart(row.profile)}>
                 {busy ? <Loader2 className="animate-spin" /> : <Play />} {row.phase === "failed" ? "重试启动" : "启动"}
               </Button>
             )}

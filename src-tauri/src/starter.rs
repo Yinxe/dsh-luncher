@@ -224,11 +224,21 @@ pub fn launch(
             } else {
                 format!("（profile: {}）", profile.trim())
             };
+            crate::diag::info(
+                "instance",
+                &format!("终端启动 dsh {}{prof_note}", target.version),
+            );
             ok(format!(
                 "已在终端窗口启动 dsh {}{prof_note}",
                 target.version
             ))
         }
-        Err(e) => fail(format!("{e}\n手动命令：{inner}")),
+        Err(e) => {
+            crate::diag::warn(
+                "instance",
+                &format!("终端启动 dsh {} 失败：{e}", target.version),
+            );
+            fail(format!("{e}\n手动命令：{inner}"))
+        }
     }
 }

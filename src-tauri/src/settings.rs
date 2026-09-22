@@ -39,8 +39,11 @@ pub struct Settings {
     pub node_mirror: String,
     /// 点击关闭按钮时隐藏到托盘而不是退出
     pub close_to_tray: bool,
-    /// Profile 启动方式：child=子进程（随启动器退出）| detached=独立进程（后台常驻）
+    /// Profile 启动方式：child=子进程（随启动器退出）| detached=独立进程（后台常驻，默认）
     pub launch_mode: String,
+    /// Web UI 打开方式：window=应用内独立窗口（默认）| browser=系统默认浏览器
+    #[serde(default = "default_web_open_mode")]
+    pub web_open_mode: String,
     /// 可选的 GitHub Token：只用于提高 api.github.com 额度（匿名 60/小时 → 5000/小时）。
     /// 探测与更新检测走免额度通道（jsDelivr / git），留空也能正常用。
     pub github_token: String,
@@ -53,10 +56,24 @@ pub struct Settings {
     /// 额外候选前缀（逗号 / 换行分隔），与内置清单一起参与测速
     #[serde(default)]
     pub github_proxy_extra: String,
+    /// 系统日志级别：debug | info | warn | error（默认 info）。
+    /// 保存后立即生效；环境变量 DSH_STARTER_LOG 存在时覆盖此设置。
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Web UI 默认在应用内独立窗口打开
+fn default_web_open_mode() -> String {
+    "window".into()
+}
+
+/// 日志级别默认 INFO（与 diag.rs 的缺省行为一致）
+fn default_log_level() -> String {
+    "info".into()
 }
 
 /// 默认走自建 R2 源（快）；R2 不可用时更新器会自动落到 GitHub
@@ -100,6 +117,8 @@ impl Settings {
             ("node_path".into(), self.node_path.clone()),
             ("node_mirror".into(), self.node_mirror.clone()),
             ("launch_mode".into(), self.launch_mode.clone()),
+            ("web_open_mode".into(), self.web_open_mode.clone()),
+            ("log_level".into(), self.log_level.clone()),
             ("terminal".into(), self.terminal.clone()),
             ("close_to_tray".into(), b(self.close_to_tray)),
             ("auto_check_update".into(), b(self.auto_check_update)),
@@ -137,7 +156,9 @@ impl Default for Settings {
             node_source: "auto".into(),
             node_mirror: "https://npmmirror.com/mirrors/node".into(),
             close_to_tray: true,
-            launch_mode: "child".into(),
+            launch_mode: "detached".into(),
+            web_open_mode: default_web_open_mode(),
+            log_level: default_log_level(),
             github_token: String::new(),
             github_accel: true,
             github_proxy: String::new(),
@@ -188,10 +209,22 @@ pub fn settings_path() -> PathBuf {
 }
 
 pub fn load_settings() -> Settings {
-    fs::read_to_string(settings_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let path = settings_path();
+    let raw = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Settings::default(), // 不存在：全新环境，正常
+    };
+    match serde_json::from_str::<Settings>(&raw) {
+        Ok(s) => s,
+        Err(e) => {
+            // 回退默认值会丢 github_token / registry 等全部设置，必须留下痕迹
+            crate::diag::warn(
+                "app",
+                &format!("设置文件解析失败，本次以默认设置运行（保存设置会覆盖）：{}：{e}", path.display()),
+            );
+            Settings::default()
+        }
+    }
 }
 
 pub fn save_settings(settings: &Settings) -> Result<(), String> {
@@ -216,6 +249,8 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
         let _ = fs::remove_file(&tmp);
         format!("写入设置失败: {e}")
     })?;
+    // 只记路径与字节数：settings.json 里可能存有 github_token
+    crate::diag::debug("app", || format!("设置已保存：{}（{} 字节）", path.display(), text.len()));
     Ok(())
 }
 

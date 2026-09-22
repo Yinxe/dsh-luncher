@@ -538,6 +538,24 @@ fn save_cache_to_disk() {
     }
 }
 
+/// 清空统计缓存：内存指纹表与磁盘文件一起清。之后首次统计会基于会话日志全量重算
+/// （会话日志本身不动，数据不会丢），返回丢弃的指纹条目数。
+pub fn clear_stats_cache() -> usize {
+    let n = match cache().lock() {
+        Ok(mut g) => {
+            let n = g.len();
+            g.clear();
+            n
+        }
+        Err(_) => 0,
+    };
+    let _ = fs::remove_file(cache_path());
+    if let Some(parent) = cache_path().parent() {
+        let _ = fs::remove_file(parent.join(format!("{CACHE_FILE}.tmp")));
+    }
+    n
+}
+
 /// 会话日志文件指纹：size:mtime 秒。live（mtime 距今 <2min）的会话返回 None（永不缓存）。
 fn fingerprint_of(md: &fs::Metadata, now: u64) -> Option<String> {
     let mtime = md.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs();

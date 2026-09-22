@@ -13,7 +13,7 @@ export const SERIES_COLORS = [
   "var(--meter-6)",
 ];
 export const OTHER_COLOR = "var(--meter-other)";
-export const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
+export const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
 
 export function fmtTok(n: number): string {
   if (n >= 1e8) return `${(n / 1e8).toFixed(2)} 亿`;
@@ -161,8 +161,8 @@ export function Heatmap({ cells }: { cells: DayCell[] }) {
     const nz = cells.filter((c) => c.tokens > 0).map((c) => c.tokens).sort((a, b) => a - b);
     const q = (f: number) => (nz.length === 0 ? Infinity : nz[Math.min(nz.length - 1, Math.floor(nz.length * f))]);
     const levels = [q(0.25), q(0.5), q(0.75)];
-    // 首日向前补空格，让每列对齐星期日→星期六
-    const lead = cells.length === 0 ? 0 : (new Date(`${cells[0].day}T00:00:00`).getDay() + 7) % 7;
+    // 首日向前补空格，让每列对齐星期一→星期日（getDay 0=周日，换成 0=周一）
+    const lead = cells.length === 0 ? 0 : (new Date(`${cells[0].day}T00:00:00`).getDay() + 6) % 7;
     const pad: Array<(typeof cells)[number] | null> = Array.from({ length: lead }, () => null);
     const flat = [...pad, ...cells];
     const weeks: Array<Array<(typeof cells)[number] | null>> = [];
@@ -217,7 +217,7 @@ export function Heatmap({ cells }: { cells: DayCell[] }) {
         {WEEKDAYS.map((w, row) => (
           <Fragment key={w}>
             <div className="flex items-center text-[9px] leading-none text-muted-foreground">
-              {row === 0 || row % 2 === 1 ? w : ""}
+              {row % 2 === 0 && row < 5 ? w : ""}
             </div>
             {weeks.map((wk, i) => {
               const c = wk[row];

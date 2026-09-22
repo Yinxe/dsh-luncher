@@ -1,5 +1,5 @@
 /** 主内容区的视图标识（侧栏导航项与之对应） */
-export type View = "quick" | "versions" | "profiles" | "plugins" | "models" | "config" | "credentials" | "stats";
+export type View = "quick" | "versions" | "profiles" | "plugins" | "models" | "config" | "credentials" | "stats" | "logs";
 
 export type InstallSource = "managed" | "global" | "path";
 
@@ -32,7 +32,7 @@ export interface ProfileInfo {
   name: string;
   kind: "dir" | "file";
   path: string;
-  /** 由 package.json 的 dsh.profile.bundles 识别：含 @deepseek-ai/dsh-web-app ⇒ web */
+  /** 由 package.json 的 name / dsh.profile.bundles 识别：桌面运行时或含 @deepseek-ai/dsh-web-app ⇒ 对应 Target */
   target: ProfileTarget;
   /** dsh 内置保留 profile（不可改名/删除） */
   reserved: boolean;
@@ -54,6 +54,10 @@ export interface EnvironmentInfo {
   runtimeInstalled: boolean;
   runtimeDir: string;
   logsDir: string;
+  /** 当前生效的系统日志级别（小写 debug/info/warn/error） */
+  logLevel: string;
+  /** 级别是否被 DSH_STARTER_LOG 环境变量锁定（锁定时应用内改级别不生效） */
+  logLevelPinned: boolean;
   /** dsh 是否已初始化过（$DSH_HOME/profiles 里有没有 profile） */
   dshInitialized: boolean;
 }
@@ -81,6 +85,8 @@ export interface Settings {
   closeToTray: boolean;
   /** Profile 启动方式：child=子进程（随启动器退出）| detached=独立进程（后台常驻） */
   launchMode: string;
+  /** Web UI 打开方式：window=应用内独立窗口 | browser=系统默认浏览器 */
+  webOpenMode: string;
   /** 可选 GitHub Token：只用于把 api.github.com 额度从 60/小时 提到 5000/小时 */
   githubToken: string;
   /** GitHub 加速：把 github 链接拼到测速选出的前缀代理上（只对 github 域名生效） */
@@ -89,6 +95,40 @@ export interface Settings {
   githubProxy: string;
   /** 额外候选前缀（逗号 / 换行分隔），与内置清单一起参与测速 */
   githubProxyExtra: string;
+  /** 系统日志级别：debug | info | warn | error（保存后立即生效；DSH_STARTER_LOG 环境变量优先） */
+  logLevel: string;
+}
+
+/** 「系统日志」页：单个分类的文件元数据（文件不存在也列出，size=0） */
+export interface SystemLogCategory {
+  category: string;
+  description: string;
+  /** `<cat>.log` 字节数 */
+  size: number;
+  /** 滚动出的 `<cat>.log.1` 字节数 */
+  rotatedSize: number | null;
+  /** 当前文件最后修改时间（epoch 毫秒） */
+  modifiedMs: number | null;
+}
+
+export interface SystemLogsInfo {
+  logsDir: string;
+  logLevel: string;
+  logLevelPinned: boolean;
+  categories: SystemLogCategory[];
+}
+
+export interface SystemLogContent {
+  category: string;
+  content: string;
+  /** 尾部截断：更早的内容没显示 */
+  truncated: boolean;
+}
+
+/** 诊断包导出结果：落盘路径 + 全文（弹窗直接展示） */
+export interface DiagnosticsExport {
+  path: string;
+  content: string;
 }
 
 /** 一个可用的前缀代理及其测速耗时 */
@@ -267,6 +307,30 @@ export interface ProfileInstance {
   startedAt: number | null;
   /** 从实例日志解析出的 dsh 访问地址（独立进程由后端解析；外部实例没有日志可解） */
   webUrl: string | null;
+}
+
+/** 某个 profile 的绑定启动版本：上次真正把它跑起来的 dsh 版本 */
+export interface ProfileVersionInfo {
+  profile: string;
+  version: string;
+  /** 记录写入时间（毫秒时间戳） */
+  updatedAt: number;
+}
+
+/** 启动时检测到的 dsh 版本变化，风险确认框的数据源 */
+export interface VersionChange {
+  profile: string;
+  /** 该 profile 上次成功启动用的版本 */
+  fromVersion: string;
+  /** 本次将要使用的版本 */
+  toVersion: string;
+  direction: "upgrade" | "downgrade";
+}
+
+/** start_embedded 的返回：要么拉起了实例，要么被版本变化闸门拦下等确认 */
+export interface StartResult {
+  proc: ProcInfo | null;
+  versionChange: VersionChange | null;
 }
 
 export interface BundleInfo {
@@ -519,6 +583,8 @@ export interface CredentialFile {
   version: number | null;
   refs: CredentialRef[];
   records: CredentialRecord[];
+  /** 读取时刻的文件指纹（size:mtime 秒）；保存时原样带回，外部改过会被拒绝写入 */
+  fingerprint: string | null;
 }
 
 /** 模型配置里的一个可用模型（llm-pi-ai.providers.<id>.models[] 条目） */

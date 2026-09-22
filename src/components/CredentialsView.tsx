@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Copy, Eye, EyeOff, FolderOpen, KeyRound, Loader2, MessageSquare, Pencil, Plus, RotateCcw, Save,
-  Trash2,
+  BookOpenText, ChevronDown, Copy, Eye, EyeOff, FolderOpen, KeyRound, Loader2,
+  MessageSquare, Pencil, Plus, RotateCcw, Save, Search, Trash2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import {
+  Collapsible, CollapsibleContent, CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -22,12 +25,18 @@ import type { CredentialFile, CredentialRef } from "../types";
 
 interface Props {
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
+  /** 本视图是否正在展示（keep-alive 挂载后用于区分「隐藏但保留草稿」状态，Ctrl+S 只在这里生效） */
+  active: boolean;
 }
 
 /** 凭据名称合法性：非空、无空白/控制字符（与后端 write_refs 校验一致，首尾空白会被 trim） */
 function validName(n: string): boolean {
   return n.length > 0 && n.length <= 128 && !/[\s\u0000-\u001f\u007f]/.test(n);
 }
+
+/** 与后端一致的 64KB 值上限（按 UTF-8 字节数算） */
+const MAX_VALUE_BYTES = 64 * 1024;
+const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
 
 /**
  * 注释规范化：去掉首尾空白与开头的 `#`（用户可能顺手带上），空串 = 没有注释。
@@ -38,11 +47,20 @@ function normalizeNote(n: string): string | null {
   return t === "" ? null : t;
 }
 
+/** Enter 提交前挡住输入法：中文候选词确认的 Enter（isComposing）不应触发保存/应用 */
+function imeSafeEnter(e: React.KeyboardEvent, fn: () => void) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    if (e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    fn();
+  }
+}
+
 /** 管理 $DSH_HOME/.credentials.yaml：表格列 key（名称）+ 注释，值仅在详情/编辑弹窗中显示 */
-export default function CredentialsView({ onToast }: Props) {
+export default function CredentialsView({ onToast, active }: Props) {
   const [data, setData] = useState<CredentialFile | null>(null);
   const [refs, setRefs] = useState<CredentialRef[]>([]);
-  const [baseline, setBaseline] = useState<string>("");
+  const [baselineRefs, setBaselineRefs] = useState<CredentialRef[]>([]);
   const [busy, setBusy] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [addName, setAddName] = useState("");
@@ -59,15 +77,39 @@ export default function CredentialsView({ onToast }: Props) {
   /** 列表里就地编辑注释：editNoteRow 非空即该行在编辑 */
   const [editNoteRow, setEditNoteRow] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
+  /** 有未保存修改时，「还原」先经此确认（直接点会静默丢弃编辑） */
+  const [revertAsk, setRevertAsk] = useState(false);
+  const [query, setQuery] = useState("");
 
-  const dirty = useMemo(() => JSON.stringify(refs) !== baseline, [refs, baseline]);
+  const dirty = useMemo(
+    () => JSON.stringify(refs) !== JSON.stringify(baselineRefs),
+    [refs, baselineRefs],
+  );
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const busyRef = useRef(false);
+  /** 相对磁盘基线的改动计数：重命名按「删 1 增 1」计 */
+  const changes = useMemo(() => {
+    const base = new Map(baselineRefs.map((r) => [r.name, r]));
+    const next = new Map(refs.map((r) => [r.name, r]));
+    let added = 0;
+    let updated = 0;
+    let deleted = 0;
+    for (const [n, r] of next) {
+      const b = base.get(n);
+      if (!b) added += 1;
+      else if (b.value !== r.value || (b.note ?? null) !== (r.note ?? null)) updated += 1;
+    }
+    for (const n of base.keys()) if (!next.has(n)) deleted += 1;
+    return { added, updated, deleted, total: added + updated + deleted };
+  }, [refs, baselineRefs]);
 
   const reload = useCallback(async () => {
     try {
       const d = await api.getCredentials();
       setData(d);
       setRefs(d.refs);
-      setBaseline(JSON.stringify(d.refs));
+      setBaselineRefs(d.refs);
     } catch (e) {
       onToast("err", `读取凭据失败: ${e}`);
     }
@@ -77,28 +119,60 @@ export default function CredentialsView({ onToast }: Props) {
     reload();
   }, [reload]);
 
+  // keep-alive 挂着的这段时间磁盘文件可能被运行中的 dsh 改过；
+  // 切回本页且没有未保存编辑时先跟磁盘对齐（有草稿则不动，保存时靠指纹校验兜底）
+  const prevActive = useRef(active);
+  useEffect(() => {
+    const was = prevActive.current;
+    prevActive.current = active;
+    if (active && !was && !dirtyRef.current) void reload();
+  }, [active, reload]);
+
   const save = useCallback(async () => {
+    if (busyRef.current) return; // 在途守卫（AGENTS）：连点/快捷键连发不并发写
+    busyRef.current = true;
     setBusy(true);
     try {
-      await api.writeCredentialRefs(refs);
-      onToast("ok", "凭据已保存（原文件已备份为 .credentials.starter-bak）");
+      // 带上读取时刻的指纹：文件在这之后被 dsh 等外部程序改过就拒绝写入（防静默覆盖）
+      await api.writeCredentialRefs(refs, data?.fingerprint ?? null);
+      onToast("ok", `已保存 ${changes.total} 处修改（原文件已备份为 .credentials.starter-bak）`);
       await reload();
     } catch (e) {
       onToast("err", String(e));
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
-  }, [refs, onToast, reload]);
+  }, [refs, data?.fingerprint, changes.total, onToast, reload]);
+
+  /** Ctrl/Cmd+S 快捷保存：仅本视图可见时挂载监听，避免 keep-alive 后在其它页面误触发 */
+  useEffect(() => {
+    if (!active) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        if (e.repeat) return;
+        // 任一弹窗开着时不保存底下的列表（保存目标不是用户正在看的内容）
+        if (addOpen || detailName !== null || revertAsk || pendingDelete !== null) return;
+        if (dirty) save();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [active, dirty, addOpen, detailName, revertAsk, pendingDelete, save]);
 
   const create = useCallback(async () => {
+    if (busyRef.current) return; // 在途守卫（AGENTS）
+    busyRef.current = true;
     setBusy(true);
     try {
-      await api.writeCredentialRefs([]);
+      await api.writeCredentialRefs([], null);
       onToast("ok", "已创建空凭据文件");
       await reload();
     } catch (e) {
       onToast("err", String(e));
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }, [onToast, reload]);
@@ -115,7 +189,7 @@ export default function CredentialsView({ onToast }: Props) {
     if (!validName(name) || refs.some((r) => r.name === name)) return;
     setRefs((rs) => [...rs, { name, value: addValue, note: normalizeNote(addNote) }]);
     setAddOpen(false);
-    onToast("info", `已添加「${name}」，点「保存」写入文件`);
+    onToast("info", `已添加「${name}」，点「保存」写入文件（Ctrl+S）`);
   }, [addName, addValue, addNote, refs, onToast]);
 
   const openDetail = useCallback((name: string) => {
@@ -145,8 +219,8 @@ export default function CredentialsView({ onToast }: Props) {
     onToast(
       "info",
       name === oldName
-        ? `已修改「${name}」，点「保存」写入文件`
-        : `已重命名为「${name}」，点「保存」写入文件`
+        ? `已修改「${name}」，点「保存」写入文件（Ctrl+S）`
+        : `已重命名为「${name}」，点「保存」写入文件（Ctrl+S）`
     );
   }, [detailName, editName, editValue, editNote, refs, onToast]);
 
@@ -170,7 +244,26 @@ export default function CredentialsView({ onToast }: Props) {
   const editTrimmed = editName.trim();
   const editDuplicated =
     editTrimmed !== "" && refs.some((r) => r.name === editTrimmed && r.name !== detailName);
-  const editNameOk = validName(editTrimmed) && !editDuplicated;
+  const editValueBytes = utf8Bytes(editValue);
+  const editNameOk = validName(editTrimmed) && !editDuplicated && editValueBytes <= MAX_VALUE_BYTES;
+
+  const addTrimmed = addName.trim();
+  const addValueBytes = utf8Bytes(addValue);
+  const addOk =
+    validName(addTrimmed) &&
+    !refs.some((r) => r.name === addTrimmed) &&
+    addValueBytes <= MAX_VALUE_BYTES;
+
+  const q = query.trim().toLowerCase();
+  const visibleRefs = useMemo(
+    () =>
+      q
+        ? refs.filter(
+            (r) => r.name.toLowerCase().includes(q) || (r.note ?? "").toLowerCase().includes(q),
+          )
+        : refs,
+    [refs, q],
+  );
 
   if (!data) {
     return (
@@ -181,6 +274,7 @@ export default function CredentialsView({ onToast }: Props) {
   }
 
   const dirPath = data.path.replace(/[/\\][^/\\]+$/, "");
+  const searchShown = refs.length >= 8;
 
   return (
     <div className="space-y-3">
@@ -192,7 +286,7 @@ export default function CredentialsView({ onToast }: Props) {
         {data.version != null && (
           <Badge variant="secondary" className="font-mono">schema v{data.version}</Badge>
         )}
-        {dirty && <Badge variant="warning">未保存</Badge>}
+        {dirty && <Badge variant="warning">未保存 · {changes.total} 处修改</Badge>}
         <span className="flex-1" />
         <Button
           size="sm"
@@ -203,26 +297,51 @@ export default function CredentialsView({ onToast }: Props) {
         >
           <FolderOpen /> 打开所在目录
         </Button>
-        <Button size="sm" variant="outline" disabled={busy || !dirty} onClick={reload}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          title="重新读取凭据文件"
+          onClick={() => (dirty ? setRevertAsk(true) : reload())}
+        >
           <RotateCcw /> 还原
         </Button>
-        <Button size="sm" disabled={busy || !dirty} onClick={save}>
-          {busy && <Loader2 className="animate-spin" />} <Save /> 保存（自动备份）
+        <Button size="sm" disabled={busy || !dirty} onClick={save} title="Ctrl+S">
+          {busy && <Loader2 className="animate-spin" />} <Save />
+          {dirty ? ` 保存 ${changes.total} 处修改（自动备份）` : " 保存（自动备份）"}
         </Button>
       </div>
-      <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
-        dsh 的凭据存储（$DSH_HOME/.credentials.yaml）：
-        <span className="font-mono text-foreground">refs</span>
-        {" "}是各处以名字引用的 API Key / 令牌（如 DEEPSEEK_API_KEY、QQ_APP_SECRET），支持增删改，
-        列表只显示名称，值仅在「详情 / 编辑」弹窗中可见；
-        <span className="text-foreground">注释</span>
-        {" "}取自文件里键<b className="font-semibold text-foreground">正上方那一行</b>注释（<span className="font-mono"># …</span>），
-        可以在列表里直接点着改：填内容就会写成键上方的一行注释，清空则删掉那一行；
-        <span className="font-mono text-foreground">records</span>
-        {" "}是 dsh 内部会话凭据（如 web 连接密钥），由 dsh 自行维护，此处只读展示。
-        保存为整表覆写 refs，records / version 等其余内容原样保留；写前自动备份（仅保留一份），
-        文件权限自动收紧为仅本用户可读写。dsh 实例运行中也可能更新凭据，建议此时避免编辑保存（后保存者生效）。
-      </div>
+      <Collapsible className="rounded-lg border border-amber-500/25 bg-amber-500/5">
+        <CollapsibleTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-auto w-full justify-start gap-2 px-2.5 py-2 text-[11.5px] font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
+          >
+            <BookOpenText className="size-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 text-left leading-relaxed">
+              凭据文件规则：<span className="font-mono text-foreground">refs</span>
+              {" "}命名凭据（值仅在详情弹窗可见）· 注释 = 键上方一行 <span className="font-mono"># …</span>
+              {" "}· records 只读 · 保存自动备份
+            </span>
+            <ChevronDown className="size-3.5 shrink-0 transition-transform duration-200 data-[state=open]:rotate-180" />
+          </Button>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="px-2.5 pb-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
+          dsh 的凭据存储（$DSH_HOME/.credentials.yaml）：
+          <span className="font-mono text-foreground">refs</span>
+          {" "}是各处以名字引用的 API Key / 令牌（如 DEEPSEEK_API_KEY、QQ_APP_SECRET），支持增删改，
+          列表只显示名称，值仅在「详情 / 编辑」弹窗中可见；
+          <span className="text-foreground">注释</span>
+          {" "}取自文件里键<b className="font-semibold text-foreground">正上方那一行</b>注释（<span className="font-mono"># …</span>），
+          可以在列表里直接点着改：填内容就会写成键上方的一行注释，清空则删掉那一行；
+          <span className="font-mono text-foreground">records</span>
+          {" "}是 dsh 内部会话凭据（如 web 连接密钥），由 dsh 自行维护，此处只读展示。
+          保存为整表覆写 refs，records / version 等其余内容原样保留；写前自动备份（仅保留一份），
+          文件权限自动收紧为仅本用户可读写。
+          切到别的页面再回来，未保存的修改会保留；切回本页若 dsh 在外部改过凭据文件，保存会被拒绝并提示先「还原」。
+        </CollapsibleContent>
+      </Collapsible>
 
       {!data.exists ? (
         <Card className="p-10 text-center text-muted-foreground">
@@ -236,11 +355,23 @@ export default function CredentialsView({ onToast }: Props) {
       ) : (
         <>
           <Card className="gap-0 py-0">
-            <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
+            <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
               <KeyRound className="h-3.5 w-3.5 text-muted-foreground" />
               <span className="eyebrow">refs · 命名凭据</span>
               <Badge variant="secondary">{refs.length}</Badge>
               <span className="flex-1" />
+              {searchShown && (
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    className="h-7 w-44 pl-7 text-[11.5px]"
+                    placeholder="按名称或注释过滤…"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => imeSafeEnter(e, () => e.currentTarget.blur())}
+                  />
+                </div>
+              )}
               <Button
                 size="sm"
                 variant="outline"
@@ -262,8 +393,13 @@ export default function CredentialsView({ onToast }: Props) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {refs.map((r) => (
-                    <TableRow key={r.name}>
+                  {visibleRefs.map((r) => (
+                    <TableRow
+                      key={r.name}
+                      className="cursor-default"
+                      title="双击查看详情"
+                      onDoubleClick={() => openDetail(r.name)}
+                    >
                       <TableCell className="max-w-[420px] pl-4">
                         <Button
                           variant="ghost"
@@ -283,12 +419,14 @@ export default function CredentialsView({ onToast }: Props) {
                             value={noteDraft}
                             onChange={(e) => setNoteDraft(e.target.value)}
                             onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                e.preventDefault();
-                                commitNote(r.name);
-                              } else if (e.key === "Escape") {
+                              if (e.key === "Escape") {
+                                if (e.nativeEvent.isComposing) return;
                                 e.preventDefault();
                                 setEditNoteRow(null);
+                              } else if (e.key === "Enter" && !e.shiftKey) {
+                                if (e.nativeEvent.isComposing) return;
+                                e.preventDefault();
+                                commitNote(r.name);
                               }
                             }}
                             onBlur={() => commitNote(r.name)}
@@ -317,7 +455,11 @@ export default function CredentialsView({ onToast }: Props) {
                         )}
                       </TableCell>
                       <TableCell className="font-mono text-xs text-muted-foreground">
-                        {r.value.length > 0 ? `${r.value.length} 字符` : "空"}
+                        {r.value.length > 0 ? (
+                          `${r.value.length} 字符`
+                        ) : (
+                          <Badge variant="warning" className="font-normal">空值</Badge>
+                        )}
                       </TableCell>
                       <TableCell className="pr-4 text-right">
                         <div className="inline-flex items-center gap-0.5">
@@ -352,6 +494,16 @@ export default function CredentialsView({ onToast }: Props) {
                       </TableCell>
                     </TableRow>
                   ))}
+                  {visibleRefs.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={4} className="py-6 text-center text-[12.5px] text-muted-foreground">
+                        没有名称或注释匹配「{query.trim()}」的凭据
+                        <Button variant="link" size="sm" className="h-auto px-1 text-[12.5px]" onClick={() => setQuery("")}>
+                          清空过滤
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  )}
                 </TableBody>
               </Table>
             ) : (
@@ -480,7 +632,7 @@ export default function CredentialsView({ onToast }: Props) {
                   <Pencil className="h-4 w-4" /> 编辑凭据
                 </DialogTitle>
                 <DialogDescription>
-                  修改仅更新本地列表，点页面右上「保存（自动备份）」才写入文件；改名称即重命名该凭据。
+                  修改仅更新本地列表，点右上「保存」或按 Ctrl+S 写入文件（自动备份）；改名称即重命名该凭据。
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-3">
@@ -492,7 +644,7 @@ export default function CredentialsView({ onToast }: Props) {
                     className="font-mono"
                     value={editName}
                     onChange={(e) => setEditName(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && applyEdit()}
+                    onKeyDown={(e) => imeSafeEnter(e, applyEdit)}
                   />
                   {editTrimmed !== "" && !validName(editTrimmed) && (
                     <p className="text-[11.5px] text-destructive">名称不能为空或包含空白 / 控制字符</p>
@@ -522,6 +674,11 @@ export default function CredentialsView({ onToast }: Props) {
                     value={editValue}
                     onChange={(e) => setEditValue(e.target.value)}
                   />
+                  {editValueBytes > MAX_VALUE_BYTES && (
+                    <p className="text-[11.5px] text-destructive">
+                      值超出上限：{editValueBytes} 字节 &gt; 64KB
+                    </p>
+                  )}
                 </div>
               </div>
               <DialogFooter>
@@ -557,16 +714,15 @@ export default function CredentialsView({ onToast }: Props) {
                 placeholder="例如 DEEPSEEK_API_KEY"
                 value={addName}
                 onChange={(e) => setAddName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && confirmAdd()}
+                onKeyDown={(e) => imeSafeEnter(e, confirmAdd)}
               />
               {(() => {
-                const t = addName.trim();
-                if (t === "") return null;
-                if (!validName(t)) {
+                if (addTrimmed === "") return null;
+                if (!validName(addTrimmed)) {
                   return <p className="text-[11.5px] text-destructive">名称不能为空或包含空白 / 控制字符</p>;
                 }
-                if (refs.some((r) => r.name === t)) {
-                  return <p className="text-[11.5px] text-destructive">凭据「{t}」已存在</p>;
+                if (refs.some((r) => r.name === addTrimmed)) {
+                  return <p className="text-[11.5px] text-destructive">凭据「{addTrimmed}」已存在</p>;
                 }
                 return null;
               })()}
@@ -589,14 +745,16 @@ export default function CredentialsView({ onToast }: Props) {
                 value={addValue}
                 onChange={(e) => setAddValue(e.target.value)}
               />
+              {addValueBytes > MAX_VALUE_BYTES && (
+                <p className="text-[11.5px] text-destructive">
+                  值超出上限：{addValueBytes} 字节 &gt; 64KB
+                </p>
+              )}
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAddOpen(false)}>取消</Button>
-            <Button
-              disabled={!validName(addName.trim()) || refs.some((r) => r.name === addName.trim())}
-              onClick={confirmAdd}
-            >
+            <Button disabled={!addOk} onClick={confirmAdd}>
               添加
             </Button>
           </DialogFooter>
@@ -609,13 +767,38 @@ export default function CredentialsView({ onToast }: Props) {
           <AlertDialogHeader>
             <AlertDialogTitle>删除凭据 {pendingDelete}？</AlertDialogTitle>
             <AlertDialogDescription>
-              将从列表移除该凭据，点「保存」后写入文件（原文件自动备份，仅保留一份）。保存前可用「还原」放弃全部修改。
+              将从列表移除该凭据，点「保存」（或 Ctrl+S）后写入文件（原文件自动备份，仅保留一份）。保存前可用「还原」放弃全部修改。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction variant="destructive" onClick={confirmDelete}>
               删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 还原确认：有未保存修改时先问一句，别一键丢草稿 */}
+      <AlertDialog open={revertAsk} onOpenChange={(o) => !o && setRevertAsk(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>放弃未保存的修改？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将丢弃当前 {changes.total} 处修改（新增 {changes.added} · 修改 {changes.updated} · 删除 {changes.deleted}），
+              从磁盘重新读取凭据文件。此操作不可撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>继续编辑</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setRevertAsk(false);
+                setQuery("");
+                reload();
+              }}
+            >
+              放弃并还原
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

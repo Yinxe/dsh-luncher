@@ -549,7 +549,7 @@ export default function ModelConfigView({ onToast }: Props) {
           if (hit) hit.value = e.value;
           else refs.push({ name: e.name, value: e.value, note: null });
         }
-        await api.writeCredentialRefs(refs);
+        await api.writeCredentialRefs(refs, creds.fingerprint);
       }
       // 2) 写 settings.yaml 两节（apiKeyEnv = 引用名）
       const input: ModelConfigInput = {

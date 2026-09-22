@@ -143,6 +143,13 @@ pub fn drop_from_manifest(profile_dir: &Path, name: &str) -> Result<bool, String
     let mut text = serde_json::to_string_pretty(&v).map_err(|e| format!("序列化失败: {e}"))?;
     text.push('\n');
     std::fs::write(&file, text).map_err(|e| format!("写入 package.json 失败: {e}"))?;
+    crate::diag::info(
+        "plugin",
+        &format!(
+            "已从清单移除损坏条目：profile {} 的 {name}（依赖行/bundle 行，改前已备份）",
+            profile_dir.display()
+        ),
+    );
     Ok(true)
 }
 
@@ -811,6 +818,15 @@ pub fn set_allow_builds(profile_dir: &Path, packages: &[String]) -> Result<Vec<S
 
     backup_once(&file)?;
     std::fs::write(&file, text).map_err(|e| format!("写入 {} 失败: {e}", file.display()))?;
+    // 放行第三方构建脚本是安全相关决定，必须留痕（记被批准的包名）
+    crate::diag::info(
+        "plugin",
+        &format!(
+            "已允许构建脚本：profile {} 放行 [{}]",
+            profile_dir.display(),
+            accepted.join(", ")
+        ),
+    );
     Ok(map.keys().cloned().collect())
 }
 

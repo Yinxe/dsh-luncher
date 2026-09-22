@@ -6,6 +6,7 @@ import {
   Copy,
   Cpu,
   Download,
+  Eraser,
   Gauge,
   Hourglass,
   Info,
@@ -19,6 +20,16 @@ import {
   Waves,
   type LucideIcon,
 } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -137,12 +148,17 @@ export default function StatsView({ onToast, appVersion }: Props) {
   const [gap, setGap] = useState<string>("15");
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 图表重播入场动画的开关：60s 静默刷新不重播（数据没变多少，柱子重新生长很干扰） */
+  const [animate, setAnimate] = useState(true);
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [dayWindow, setDayWindow] = useState<DayWindow>("30");
   const [heatMonths, setHeatMonths] = useState<"6" | "12">("6");
 
   const load = useCallback(
     async (rangeDays: number, gapMin: number, silent: boolean) => {
       setBusy(true);
+      setAnimate(!silent);
       try {
         const s = await api.getSessionStats(rangeDays, gapMin);
         setStats(s);
@@ -233,17 +249,38 @@ export default function StatsView({ onToast, appVersion }: Props) {
         } else if (await copyPng(blob)) {
           onToast("ok", "图片已复制到剪贴板");
         } else {
-          onToast("info", "浏览器不允许直接复制图片，已改为下载，请把文件手动转发");
+          onToast("info", "当前系统环境不允许直接复制图片，已改为下载，请把文件手动转发");
           downloadBlob(blob, `dsh-stats-${stats.today.day}.png`);
         }
       } catch (e) {
-        onToast("err", `导出失败: ${e}`);
+        const msg = String(e);
+        onToast(
+          "err",
+          /insecure|SecurityError|tainted/i.test(msg)
+            ? "生成分享图失败：当前系统界面（WebKitGTK）拒绝把画面导出为图片。请重试；多次失败请用「下载 PNG」或反馈"
+            : `导出失败: ${msg}`,
+        );
       } finally {
         setExporting(false);
       }
     },
     [stats, onToast],
   );
+
+  /** 清空统计缓存：删磁盘缓存 + 清内存指纹表，然后立刻全量重算一轮 */
+  const doClearCache = useCallback(async () => {
+    setClearing(true);
+    try {
+      const n = await api.clearSessionStatsCache();
+      onToast("ok", `统计缓存已清空（丢弃 ${n} 个文件指纹），正在基于会话日志重算…`);
+      setClearOpen(false);
+      await load(Number(range), Number(gap), false);
+    } catch (e) {
+      onToast("err", `清空统计缓存失败: ${e}`);
+    } finally {
+      setClearing(false);
+    }
+  }, [onToast, load, range, gap]);
 
   const ov = stats?.overview;
 
@@ -284,6 +321,9 @@ export default function StatsView({ onToast, appVersion }: Props) {
               <Share2 /> 分享
             </Button>
           )}
+          <Button variant="outline" size="sm" disabled={clearing} title="删除统计缓存并基于会话日志重算（不影响会话数据）" onClick={() => setClearOpen(true)}>
+            {clearing ? <Loader2 className="animate-spin" /> : <Eraser />} 清空缓存
+          </Button>
           <Button variant="outline" size="sm" disabled={busy} onClick={() => void load(Number(range), Number(gap), false)}>
             {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />} 刷新
           </Button>
@@ -381,14 +421,14 @@ export default function StatsView({ onToast, appVersion }: Props) {
                 title={`近 ${stats.rangeDays} 天按日 Token（堆叠=模型）`}
                 desc="口径：input + output + cacheRead + cacheWrite，与 dsh-token-stats 插件一致；fork/resume 会话已去重。"
               >
-                <StackModelChart points={trendPoints} models={modelNames} height={300} emptyHint="该时间段内没有 Token 记录" />
+                <StackModelChart points={trendPoints} models={modelNames} height={300} disableAnimation={!animate} emptyHint="该时间段内没有 Token 记录" />
                 <ModelLegend models={legend} otherTokens={otherTokens} />
               </ChartCard>
 
               {/* 今日 24h + 热力图 */}
               <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
                 <ChartCard eyebrow="Today" title={`今日 24 小时分布（${stats.today.day}）`}>
-                  <StackModelChart points={todayPoints} models={modelNames} height={220} emptyHint="今天还没有 Token 记录" />
+                  <StackModelChart points={todayPoints} models={modelNames} height={220} disableAnimation={!animate} emptyHint="今天还没有 Token 记录" />
                 </ChartCard>
                 <ChartCard
                   eyebrow="Activity"
@@ -416,11 +456,11 @@ export default function StatsView({ onToast, appVersion }: Props) {
                 title="模型用量分布（全部 · 悬浮查看构成）"
                 desc="总 Token = 输入 + 缓存读 + 缓存写 + 输出（reasoning 已含在输出内）；fork/resume 种子事件已去重。"
               >
-                <ModelUsageBoard models={stats.models} />
+                <ModelUsageBoard models={stats.models} disableAnimation={!animate} />
               </ChartCard>
 
               <div className="pb-2 text-center text-[11px] text-muted-foreground">
-                统计缓存位于 ~/.dsh-starter/session-stats-cache.json（可随时删除重建）
+                统计缓存位于 ~/.dsh-starter/session-stats-cache.json（可随时删除重建，右上角「清空缓存」即可）
               </div>
             </>
           )}
@@ -572,7 +612,7 @@ export default function StatsView({ onToast, appVersion }: Props) {
                 title={`每日在线（阈值 ${gap} 分钟 · ${dayWindow === "all" ? "全部" : `近 ${dayWindow} 天`}）`}
                 desc="柱=在线时长（阈值口径下界），线=对话进行中；跨零点活动段按本地日切分。"
               >
-                <OnlineDayChart days={windowDays} gap={gap} height={260} />
+                <OnlineDayChart days={windowDays} gap={gap} height={260} disableAnimation={!animate} />
               </ChartCard>
 
               {/* 每日排行 */}
@@ -725,6 +765,32 @@ export default function StatsView({ onToast, appVersion }: Props) {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 清空统计缓存：说清「删什么、会不会丢数据、下一步发生什么」 */}
+      <AlertDialog open={clearOpen} onOpenChange={(v) => !clearing && setClearOpen(v)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>清空统计缓存？</AlertDialogTitle>
+            <AlertDialogDescription>
+              只删除启动器的统计缓存文件（~/.dsh-starter/session-stats-cache.json）和内存指纹表，
+              dsh 会话日志本身不受影响。清空后本页会基于会话数据全量重算一轮：
+              首次可能需要几十秒，之后恢复按指纹增量秒开。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={clearing}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={clearing}
+              onClick={(e) => {
+                e.preventDefault();
+                void doClearCache();
+              }}
+            >
+              {clearing && <Loader2 className="animate-spin" />} 清空并重算
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

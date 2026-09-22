@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RotateCcw, Save } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,8 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import YamlEditor from "@/components/YamlEditor";
+import YamlIssueBanner, { YamlDirtyBadge } from "@/components/YamlIssueBanner";
+import { useSaveHotkey, useYamlIssues } from "@/lib/yaml-validate";
 import { api } from "../api";
 import type { ProfileTarget, WebQuickConfig, WebQuickConfigInput } from "../types";
 
@@ -62,6 +64,9 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
   const [form, setForm] = useState<QuickForm>(formFromQuick(null));
   const [savingPatch, setSavingPatch] = useState(false);
   const [savingQuick, setSavingQuick] = useState(false);
+  const savingPatchRef = useRef(false);
+  const savingQuickRef = useRef(false);
+  const patchIssues = useYamlIssues(patchDraft);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -88,6 +93,8 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
   }, [load]);
 
   const savePatch = useCallback(async () => {
+    if (savingPatchRef.current) return; // 在途守卫（AGENTS）：快捷键连发/连点不能并发写同一文件
+    savingPatchRef.current = true;
     setSavingPatch(true);
     try {
       await api.writeProfileFile(profile, "cordis.patch.yml", patchDraft);
@@ -96,6 +103,7 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
     } catch (e) {
       onToast("err", String(e));
     } finally {
+      savingPatchRef.current = false;
       setSavingPatch(false);
     }
   }, [profile, patchDraft, onToast, load]);
@@ -116,6 +124,8 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
       surfaceContext: form.surfaceContext,
       cookieMaxAgeDays: days,
     };
+    if (savingQuickRef.current) return; // 在途守卫（AGENTS）
+    savingQuickRef.current = true;
     setSavingQuick(true);
     try {
       await api.setWebQuickConfig(profile, input);
@@ -124,9 +134,13 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
     } catch (e) {
       onToast("err", String(e));
     } finally {
+      savingQuickRef.current = false;
       setSavingQuick(false);
     }
   }, [profile, form, onToast, load]);
+
+  const canSavePatch = patchDirty && patchIssues.length === 0 && !savingPatch;
+  const patchKeydown = useSaveHotkey(canSavePatch && tab === "patch", savePatch);
 
   if (loading) {
     return (
@@ -257,14 +271,25 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
         </TabsContent>
       )}
 
-      <TabsContent value="patch" className="space-y-2">
+      <TabsContent value="patch" className="space-y-2" onKeyDown={patchKeydown}>
         <div className="flex flex-wrap items-center gap-2">
-          {patchDirty && <Badge variant="warning">未保存</Badge>}
+          <YamlDirtyBadge dirty={patchDirty} issueCount={patchIssues.length} />
           <span className="flex-1" />
-          <Button size="sm" disabled={savingPatch || !patchDirty} onClick={savePatch}>
+          <Button
+            size="sm"
+            disabled={!canSavePatch}
+            title={patchIssues.length > 0 ? "存在语法错误，修正后才能保存" : "Ctrl/Cmd+S"}
+            onClick={savePatch}
+          >
             {savingPatch ? <Loader2 className="animate-spin" /> : <Save />} 保存（自动备份）
           </Button>
-          <Button size="sm" variant="outline" disabled={savingPatch || !patchDirty} onClick={load}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={savingPatch}
+            title="丢弃本地修改，重新读取磁盘上的文件"
+            onClick={load}
+          >
             <RotateCcw /> 还原
           </Button>
         </div>
@@ -275,9 +300,11 @@ export default function ProfileConfigPanel({ profile, target, onToast }: Props) 
             setPatchDirty(true);
           }}
         />
+        <YamlIssueBanner issues={patchIssues} dirty={patchDirty} />
         <p className="text-[11px] text-muted-foreground">
           用户 patch 层（id 覆盖 / disabled / insert；支持 !!js 表达式）。编辑保留全部注释，
-          保存前自动备份；live 模式下 dsh 热重载。注意 patch 会整体替换目标条目的 config，键需成套写全。
+          语法错误时行内标红并禁止保存，保存前自动备份；live 模式下 dsh 热重载。
+          注意 patch 会整体替换目标条目的 config，键需成套写全。
         </p>
       </TabsContent>
 

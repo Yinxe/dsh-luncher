@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::installer::InstallState;
 use crate::starter::{self, LaunchResult};
@@ -30,6 +30,10 @@ pub struct EnvironmentInfo {
     pub runtime_dir: String,
     /// 日志目录（启动留痕 / 安装与解压的操作日志都在这里）
     pub logs_dir: String,
+    /// 当前生效的系统日志级别（小写 debug/info/warn/error）
+    pub log_level: String,
+    /// 级别是否被 DSH_STARTER_LOG 环境变量锁定
+    pub log_level_pinned: bool,
     /// dsh 是否已经初始化过（`$DSH_HOME/profiles` 里有没有 profile）。
     /// 全新机器上这是 false：此时 profile 列表、快捷配置、插件管理全都无从谈起，
     /// 前端据此给出「首次初始化（跑一次 dsh web）」的引导。
@@ -98,6 +102,8 @@ pub async fn get_environment(state: State<'_, AppState>) -> Result<EnvironmentIn
             runtime_installed: crate::runtime::runtime_installed(),
             runtime_dir: crate::runtime::runtime_dir().to_string_lossy().into_owned(),
             logs_dir: crate::diag::logs_dir().to_string_lossy().into_owned(),
+            log_level: crate::diag::level_label().to_ascii_lowercase(),
+            log_level_pinned: crate::diag::env_pinned(),
             dsh_initialized: !crate::profiles::scan_profiles().is_empty(),
         })
     })
@@ -116,6 +122,14 @@ pub async fn save_settings(
     procs: State<'_, crate::procs::ProcState>,
     settings: Settings,
 ) -> Result<(), String> {
+    let mut settings = settings;
+    // 白名单归一：脏值不写进 settings.json（否则非法值会永久躺在配置里，日志变更记录也跟着失真）
+    if !matches!(settings.log_level.as_str(), "debug" | "info" | "warn" | "error") {
+        settings.log_level = "info".into();
+    }
+    if !matches!(settings.web_open_mode.as_str(), "window" | "browser") {
+        settings.web_open_mode = "window".into();
+    }
     // 有实例运行时禁止切换当前版本：所有 profile 实例都基于 active 版本启动。
     // 这个守卫要枚举系统进程（Windows 上要起 PowerShell，1s 级），必须离开主线程 ——
     // 同步命令跑在主线程上，会把界面冻住（与 GitHub issue #1 同一类问题）。
@@ -136,6 +150,23 @@ pub async fn save_settings(
             .map_err(|e| format!("保存设置失败: {e}"))??;
     }
     settings::save_settings(&settings)?;
+    // 日志级别：先落盘再立即应用（DSH_STARTER_LOG 环境变量存在时被其覆盖）
+    if current.log_level != settings.log_level {
+        let applied = crate::diag::set_runtime_level(&settings.log_level);
+        crate::diag::info(
+            "app",
+            &format!(
+                "日志级别 {} → {}{}",
+                current.log_level,
+                settings.log_level,
+                if applied {
+                    "（立即生效）"
+                } else {
+                    "（被 DSH_STARTER_LOG 环境变量覆盖，实际级别未变）"
+                }
+            ),
+        );
+    }
     *state.settings.lock().unwrap() = settings;
     Ok(())
 }
@@ -384,9 +415,44 @@ fn resolve_target(
     }
 }
 
+/// 版本变化风险提示：启动闸门把一次启动拦下来时带回给前端，由前端弹确认框。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionChange {
+    pub profile: String,
+    /// 该 profile 上次成功启动用的 dsh 版本
+    pub from_version: String,
+    /// 本次将要使用的版本
+    pub to_version: String,
+    /// `upgrade` | `downgrade`（按 semver 比较，预发布版本也能判方向）
+    pub direction: &'static str,
+}
+
+/// `start_embedded` 的返回：要么真的拉起了实例，要么被版本变化闸门拦下等用户确认。
+/// 两个字段都可能为 null，前端按 `versionChange` 是否非空分支。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartResult {
+    pub proc: Option<crate::procs::ProcInfo>,
+    pub version_change: Option<VersionChange>,
+}
+
+fn version_change(profile: &str, from: &str, to: &str) -> VersionChange {
+    VersionChange {
+        profile: profile.to_string(),
+        from_version: from.to_string(),
+        to_version: to.to_string(),
+        direction: match crate::semver::compare(to, from) {
+            std::cmp::Ordering::Less => "downgrade",
+            _ => "upgrade",
+        },
+    }
+}
+
 /// 启动 dsh：detached=false 子进程（日志回传界面，启动器退出即结束）；
 /// detached=true 独立进程（自成进程组、日志写文件，启动器退出后继续运行，重启后由扫描识别）。
 /// 缺省跟随设置里的 launchMode。
+/// `ack_version_change=true` = 用户已在确认框里认了这个版本变化，放行。
 #[tauri::command]
 pub async fn start_embedded(
     app: AppHandle,
@@ -396,13 +462,26 @@ pub async fn start_embedded(
     profile: Option<String>,
     args: Option<String>,
     detached: Option<bool>,
-) -> Result<crate::procs::ProcInfo, String> {
+    ack_version_change: Option<bool>,
+) -> Result<StartResult, String> {
     let settings = state.settings.lock().unwrap().clone();
     let proc_state = procs.inner().clone();
-    start_instance(app, settings, proc_state, version, profile, args, detached).await
+    start_instance(
+        app,
+        settings,
+        proc_state,
+        version,
+        profile,
+        args,
+        detached,
+        ack_version_change.unwrap_or(false),
+    )
+    .await
 }
 
 /// 真正拉起一个实例（内嵌 keeper 或独立进程）。`start_embedded` 与 `init_dsh` 共用。
+/// `ack_version_change=false` 时，若该 profile 上次是用另一个 dsh 版本跑起来的，
+/// 不 spawn，只把风险提示带回去让用户确认。
 async fn start_instance(
     app: AppHandle,
     settings: Settings,
@@ -411,10 +490,22 @@ async fn start_instance(
     profile: Option<String>,
     args: Option<String>,
     detached: Option<bool>,
-) -> Result<crate::procs::ProcInfo, String> {
+    ack_version_change: bool,
+) -> Result<StartResult, String> {
     let detached = detached.unwrap_or(settings.launch_mode == "detached");
 
-    // 1) 解析目标版本 + profile 唯一性守卫（线程池执行）
+    enum Prep {
+        /// 第 4 个字段：用户确认过版本变化时的新版本 —— spawn 成功后才写绑定表
+        Go(
+            crate::installed::InstalledVersion,
+            String,
+            String,
+            Option<String>,
+        ),
+        NeedConfirm(VersionChange),
+    }
+
+    // 1) 解析目标版本 + profile 唯一性守卫 + 版本变化闸门（线程池执行）
     let prep = tauri::async_runtime::spawn_blocking({
         let settings = settings.clone();
         let proc_state = proc_state.clone();
@@ -429,16 +520,69 @@ async fn start_instance(
             if let Err(msg) = ensure_profile_free(&proc_state, &profile) {
                 return Err(msg);
             }
-            Ok((target, profile, launch_args))
+            // 版本变化闸门：换 dsh 版本可能让这个 profile 起不来（插件不兼容、
+            // 配置格式变了），降级尤其危险。首次启动没有历史版本，不打扰。
+            // 用 semver 比较而非字符串相等：「1.0」与「1.0.0」功能同版，不该弹确认。
+            let change = crate::profile_versions::bound(&profile)
+                .filter(|prev| {
+                    crate::semver::compare(prev, &target.version) != std::cmp::Ordering::Equal
+                })
+                .map(|prev| version_change(&profile, &prev, &target.version));
+            match change {
+                None => Ok(Prep::Go(target, profile, launch_args, None)),
+                Some(c) if !ack_version_change => {
+                    crate::diag::info(
+                        "instance",
+                        &format!(
+                            "版本变化已拦下等确认：profile={:?} dsh {} → {}（{}）",
+                            c.profile, c.from_version, c.to_version, c.direction
+                        ),
+                    );
+                    Ok(Prep::NeedConfirm(c))
+                }
+                Some(c) => {
+                    // 用户已经认了这个风险：等 spawn 成功再写绑定（见下方两条启动路径）。
+                    // 立刻写的话，端口被占等原因起不来时绑定已被改成新版本，
+                    // 下次启动不再提醒——正是这道闸门要拦的场景被静默吞掉；
+                    // 而 record_running 的 15s grace 对已退出的进程也没机会纠偏。
+                    crate::diag::info(
+                        "instance",
+                        &format!(
+                            "版本变化已确认放行：profile={:?} dsh {} → {}（{}）",
+                            c.profile, c.from_version, c.to_version, c.direction
+                        ),
+                    );
+                    Ok(Prep::Go(target, profile, launch_args, Some(c.to_version)))
+                }
+            }
         }
     })
     .await
     .map_err(|e| format!("启动失败: {e}"))??;
 
+    let (target, profile, launch_args, confirmed_version) = match prep {
+        Prep::NeedConfirm(change) => {
+            return Ok(StartResult {
+                proc: None,
+                version_change: Some(change),
+            })
+        }
+        Prep::Go(target, profile, launch_args, confirmed_version) => {
+            (target, profile, launch_args, confirmed_version)
+        }
+    };
+    let prep = (target, profile, launch_args);
+    let profile_name = prep.1.clone();
+
     // 2) 独立进程：直接 spawn（无 keeper、无日志管道），实例由 /proc 扫描感知
     if detached {
+        let rec = confirmed_version.clone();
         return tauri::async_runtime::spawn_blocking(move || {
-            crate::procs::spawn_detached(&settings, &prep.0, &prep.1, &prep.2)
+            let info = crate::procs::spawn_detached(&settings, &prep.0, &prep.1, &prep.2)?;
+            if let Some(v) = rec {
+                crate::profile_versions::record(&prep.1, &v);
+            }
+            Ok(started(info))
         })
         .await
         .map_err(|e| format!("启动失败: {e}"))?;
@@ -449,12 +593,26 @@ async fn start_instance(
     let rx = crate::procs::spawn_keeper(app, proc_state, settings, prep.0, prep.1, prep.2);
 
     // 4) 等待 spawn 结果
-    tauri::async_runtime::spawn_blocking(move || {
+    let info = tauri::async_runtime::spawn_blocking(move || {
         rx.recv().map_err(|e| format!("dsh keeper 线程异常: {e}"))?
     })
     .await
-    .map_err(|e| format!("启动失败: {e}"))?
+    .map_err(|e| format!("启动失败: {e}"))??;
+    // 用户确认过版本变化且确实 spawn 成功：现在才写绑定表
+    if let Some(v) = confirmed_version {
+        let p = profile_name;
+        tauri::async_runtime::spawn_blocking(move || crate::profile_versions::record(&p, &v));
+    }
+    Ok(started(info))
 }
+
+fn started(info: crate::procs::ProcInfo) -> StartResult {
+    StartResult {
+        proc: Some(info),
+        version_change: None,
+    }
+}
+
 
 /// 校验 profile 未被任何实例（内嵌/外部）占用
 fn ensure_profile_free(
@@ -549,9 +707,24 @@ pub async fn list_profile_instances(
     // profile_instances 会扫盘 / 逐个校验 detached 存活（ps/PowerShell）/ 真实 TCP
     // 端口探测，Windows 上可达 1 秒；且被前端每 3 秒轮询，必须离开主线程执行。
     let procs = procs.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || Ok(crate::procs::profile_instances(&procs)))
+    tauri::async_runtime::spawn_blocking(move || {
+        let list = crate::procs::profile_instances(&procs);
+        // 顺手把「这个版本确实把该 profile 跑起来了」写进绑定表（只在真有变化时落盘）。
+        // 放在这里而不是 profile_instances 内部：那个函数保持纯枚举、不带磁盘副作用，
+        // 落盘统一由命令层在 spawn_blocking 里做。
+        crate::profile_versions::record_running(&list, crate::profile_versions::RUN_GRACE_MS);
+        Ok(list)
+    })
+    .await
+    .map_err(|e| format!("枚举实例失败: {e}"))?
+}
+
+/// 各 profile 的绑定启动版本（上次真正跑起来用的 dsh 版本），供界面显示「上次 dsh x.y.z」
+#[tauri::command]
+pub async fn list_profile_versions() -> Result<Vec<crate::profile_versions::ProfileVersionInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| Ok(crate::profile_versions::list()))
         .await
-        .map_err(|e| format!("枚举实例失败: {e}"))?
+        .map_err(|e| format!("读取 profile 绑定版本失败: {e}"))?
 }
 
 /// dsh 会话统计：扫描 $DSH_HOME/sessions 的会话日志，按 dsh-token-stats 口径聚合
@@ -566,6 +739,15 @@ pub async fn get_session_stats(
     tauri::async_runtime::spawn_blocking(move || crate::sessions::session_stats(range, gap))
         .await
         .map_err(|e| format!("统计扫描失败: {e}"))?
+}
+
+/// 清空统计缓存（~/.dsh-starter/session-stats-cache.json + 内存指纹表）。
+/// 只影响下次扫描的快慢：清空后统计页会基于会话日志全量重算，会话数据本身不动。
+#[tauri::command]
+pub async fn clear_session_stats_cache() -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(crate::sessions::clear_stats_cache)
+        .await
+        .map_err(|e| format!("清空统计缓存失败: {e}"))
 }
 
 /// 分享面板署名：git 全局身份（user.name / user.email），前端导出 PNG 用
@@ -626,7 +808,9 @@ pub async fn init_dsh(
     );
     // profile 固定 "web"：这正是 `dsh web` 的等价形式（dsh 自己的 help 写明
     // `web` 是 `--profile web` 的别名），且无需 profile 目录已存在。
-    let info = start_instance(
+    // ack_version_change 传 true：首次初始化没有任何绑定记录可比，
+    // 拿一句「请先确认升级风险」拦住初始化向导只会让人莫名其妙。
+    let out = start_instance(
         app,
         settings,
         proc_state,
@@ -634,12 +818,16 @@ pub async fn init_dsh(
         Some("web".into()),
         None,
         None,
+        true,
     )
     .await
     .map_err(|e| {
         crate::diag::error("app", &format!("首次初始化启动失败：{e}"));
         format!("初始化失败：{e}")
     })?;
+    let info = out
+        .proc
+        .ok_or_else(|| "初始化失败：dsh 实例未拉起，请重试或到「版本」页检查已安装版本".to_string())?;
     crate::diag::info(
         "app",
         &format!(
@@ -716,6 +904,8 @@ pub async fn rename_profile(
         crate::profile_cfg::rename_profile(&old2, &new2)?;
         // 独立进程登记表里也记着 profile 名，不同步会在实例列表里留下旧名的幽灵条目
         crate::procs::rename_detached_profile(&old2, &new2);
+        // 绑定版本同理：不搬就走旧名那条记录，新名被当成首次启动（少一次风险提示）
+        crate::profile_versions::rename(&old2, &new2);
         Ok::<(), String>(())
     })
     .await
@@ -745,6 +935,7 @@ pub async fn delete_profile(
         ensure_profile_idle(&proc_state, &name2)?;
         let trash = crate::profile_cfg::delete_profile(&name2)?;
         crate::procs::drop_detached_profile(&name2);
+        crate::profile_versions::drop(&name2);
         Ok::<String, String>(trash)
     })
     .await
@@ -1413,18 +1604,29 @@ pub fn reveal_git_plugins_dir() -> Result<String, String> {
 
 /// 生成诊断包：环境摘要 + 设置（脱敏）+ 各分类日志尾部，写成一个 txt 并返回路径。
 /// 用户报问题时发这一个文件即可，不用逐个追问环境细节。
+/// 诊断包导出结果：落盘路径 + 全文（前端弹窗直接展示内容，不必再去开文件夹）
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsExport {
+    pub path: String,
+    pub content: String,
+}
+
 #[tauri::command]
-pub async fn export_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn export_diagnostics(state: State<'_, AppState>) -> Result<DiagnosticsExport, String> {
     let settings = state.settings.lock().unwrap().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let body = crate::diag::diagnostics(env!("CARGO_PKG_VERSION"), &settings);
         let dir = crate::diag::logs_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建日志目录失败: {e}"))?;
         let name = format!("diagnostics-{}.txt", crate::diag::run_id());
-        let path = dir.join(name);
-        std::fs::write(&path, body).map_err(|e| format!("写诊断包失败: {e}"))?;
+        let path = dir.join(&name);
+        std::fs::write(&path, &body).map_err(|e| format!("写诊断包失败: {e}"))?;
         crate::diag::info("app", &format!("已生成诊断包：{}", path.display()));
-        Ok(path.to_string_lossy().into_owned())
+        Ok(DiagnosticsExport {
+            path: path.to_string_lossy().into_owned(),
+            content: body,
+        })
     })
     .await
     .map_err(|e| format!("生成诊断包失败: {e}"))?
@@ -1440,6 +1642,150 @@ pub fn log_ui(level: String, message: String) {
         _ => crate::diag::Level::Info,
     };
     crate::diag::log("ui", lv, &message);
+}
+
+/// 「系统日志」页：单个分类的文件元数据（不存在也列出，size=0）
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemLogCategory {
+    pub category: String,
+    pub description: String,
+    pub size: u64,
+    pub rotated_size: Option<u64>,
+    pub modified_ms: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemLogsInfo {
+    pub logs_dir: String,
+    /// 当前生效级别（小写 debug/info/warn/error）
+    pub log_level: String,
+    /// 级别是否被 DSH_STARTER_LOG 环境变量锁定（锁定时应用内改级别不生效）
+    pub log_level_pinned: bool,
+    pub categories: Vec<SystemLogCategory>,
+}
+
+#[tauri::command]
+pub async fn list_system_logs() -> Result<SystemLogsInfo, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        Ok(SystemLogsInfo {
+            logs_dir: crate::diag::logs_dir().to_string_lossy().into_owned(),
+            log_level: crate::diag::level_label().to_ascii_lowercase(),
+            log_level_pinned: crate::diag::env_pinned(),
+            categories: crate::diag::list_log_files()
+                .into_iter()
+                .map(|f| SystemLogCategory {
+                    category: f.category.into(),
+                    description: f.description.into(),
+                    size: f.size,
+                    rotated_size: f.rotated_size,
+                    modified_ms: f.modified_ms,
+                })
+                .collect(),
+        })
+    })
+    .await
+    .map_err(|e| format!("读取日志清单失败: {e}"))?
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemLogContent {
+    pub category: String,
+    pub content: String,
+    /// 尾部截断：更早的内容没显示（文件比 maxBytes 大）
+    pub truncated: bool,
+}
+
+/// 读某个分类日志的尾部（滚动出的 `.1` + 当前文件连续读，能跨滚动看到更早历史）。
+#[tauri::command]
+pub async fn read_system_log(
+    category: String,
+    max_bytes: Option<u32>,
+) -> Result<SystemLogContent, String> {
+    // 只接受白名单里的分类名，用户输入不拼进路径
+    if !crate::diag::CATEGORIES.iter().any(|(name, _)| *name == category) {
+        return Err(unknown_log_cat(&category));
+    }
+    let max = max_bytes.unwrap_or(256 * 1024).clamp(1024, 4 * 1024 * 1024) as u64;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (content, truncated) = crate::diag::read_cat_tail(&category, max);
+        Ok(SystemLogContent {
+            category,
+            content,
+            truncated,
+        })
+    })
+    .await
+    .map_err(|e| format!("读取日志失败: {e}"))?
+}
+
+/// 分类名白校验的统一报错：说清哪些类别可选（AGENTS：报错要能指导下一步）
+fn unknown_log_cat(category: &str) -> String {
+    format!(
+        "未知日志类别「{category}」，可选：{}",
+        crate::diag::CATEGORIES
+            .iter()
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>()
+            .join(" / ")
+    )
+}
+
+/// 清除系统日志（「系统日志」页的清理按钮）。`categories` 为空 / 缺省 = 全部类别。
+/// 返回释放的字节数；部分文件删不掉时错误里列明是哪一类。
+#[tauri::command]
+pub async fn clear_system_logs(categories: Option<Vec<String>>) -> Result<u64, String> {
+    let cats: Vec<String> = match categories {
+        Some(list) if !list.is_empty() => list,
+        _ => crate::diag::CATEGORIES
+            .iter()
+            .map(|(n, _)| (*n).to_string())
+            .collect(),
+    };
+    // 用户输入先过白名单，不拼路径
+    if let Some(bad) = cats
+        .iter()
+        .find(|c| !crate::diag::CATEGORIES.iter().any(|(n, _)| *n == **c))
+    {
+        return Err(unknown_log_cat(bad));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut freed = 0u64;
+        let mut errs: Vec<String> = Vec::new();
+        for c in &cats {
+            match crate::diag::clear_cat_log(c) {
+                Ok(n) => freed += n,
+                Err(e) => errs.push(format!("{c}：{e}")),
+            }
+        }
+        // 先删再记：这样「清除过日志」这条记录不会被自己删掉
+        crate::diag::info(
+            "app",
+            &format!(
+                "清除 {} 个日志分类，释放 {} 字节{}",
+                cats.len(),
+                freed,
+                if errs.is_empty() {
+                    String::new()
+                } else {
+                    format!("，部分失败：{}", errs.join("；"))
+                }
+            ),
+        );
+        if errs.is_empty() {
+            Ok(freed)
+        } else {
+            Err(format!(
+                "以下分类的日志未能删除（通常是有程序正占用日志文件）：{}；其余分类已释放 {} 字节",
+                errs.join("；"),
+                freed
+            ))
+        }
+    })
+    .await
+    .map_err(|e| format!("清除日志失败: {e}"))?
 }
 
 #[tauri::command]
@@ -1595,16 +1941,24 @@ pub async fn fetch_provider_models(
 }
 
 #[tauri::command]
-pub fn get_credentials() -> Result<crate::credentials::CredentialFile, String> {
-    crate::credentials::read()
+pub async fn get_credentials() -> Result<crate::credentials::CredentialFile, String> {
+    tauri::async_runtime::spawn_blocking(crate::credentials::read)
+        .await
+        .map_err(|e| format!("凭据读取任务失败: {e}"))?
 }
 
-/// 整表保存凭据 refs（records / version 等其余顶层键原样保留，写前自动备份）
+/// 整表保存凭据 refs（records / version 等其余顶层键原样保留，写前自动备份）。
+/// `expected_fingerprint` 为页面读取时拿到的文件指纹，用于拒绝覆盖 dsh 等外部程序的修改。
 #[tauri::command]
-pub fn write_credential_refs(
+pub async fn write_credential_refs(
     refs: Vec<crate::credentials::CredentialRefInput>,
+    expected_fingerprint: Option<String>,
 ) -> Result<(), String> {
-    crate::credentials::write_refs(&refs)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::credentials::write_refs(&refs, expected_fingerprint.as_deref())
+    })
+    .await
+    .map_err(|e| format!("凭据保存任务失败: {e}"))?
 }
 
 #[tauri::command]
@@ -1656,6 +2010,61 @@ pub fn reveal_folder(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn open_external(url: String) -> Result<(), String> {
     tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| format!("打开链接失败: {e}"))
+}
+
+/// 在应用内为实例的 Web UI 开一个独立窗口（无浏览器地址栏，像桌面端一样）。
+/// 同一地址复用同一窗口（已开则前置聚焦），多个实例可以同时各开一个窗口。
+///
+/// 窗口装饰完全交给系统（标题栏、拖动、缩放都是原生的），启动器不插手：
+/// 自绘标题栏要么依赖各平台各自的窗口能力（Linux 的 Wayland 会话下直接不成立，
+/// 会把标题栏甩成窗口中间的一块浮面），要么得改 dsh 页面自己的布局，代价都大于收益。
+#[tauri::command]
+pub fn open_web_window(
+    app: AppHandle,
+    url: String,
+    title: Option<String>,
+) -> Result<(), String> {
+    let parsed: tauri::Url = url
+        .parse()
+        .map_err(|_| format!("地址无效，无法打开：{url}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(format!("只支持 http/https 地址：{url}"));
+    }
+    // label 由 scheme+host+port 派生：保证一个地址全局只有一个窗口。
+    // 只留字母数字（其余含 IPv6 的 [] : 统统换成 -），否则 `[::1]` 会派生出
+    // 含非法字符的 label 导致 build 失败；label 含 scheme 则避免 http/https
+    // 同 host 端口共用一个窗口（复用分支只聚焦、不导航到第二个地址）。
+    let host: String = parsed
+        .host_str()
+        .ok_or_else(|| format!("地址缺少主机名，无法打开：{url}"))?
+        .chars()
+        .map(|c| {
+            let l = c.to_ascii_lowercase();
+            if l.is_ascii_alphanumeric() {
+                l
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let port = parsed.port().map(|p| format!("-{p}")).unwrap_or_default();
+    let label = format!("dsh-web-{}-{host}{port}", parsed.scheme());
+    let win_title = title.unwrap_or_else(|| "DSH Web".into());
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.unminimize();
+        win.show().map_err(|e| format!("恢复窗口失败: {e}"))?;
+        win.set_focus().map_err(|e| format!("聚焦窗口失败: {e}"))?;
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(parsed))
+        .title(&win_title)
+        .inner_size(1000.0, 720.0)
+        .min_inner_size(480.0, 520.0)
+        .resizable(true)
+        .center()
+        .build()
+        .map_err(|e| format!("打开窗口失败：{e}"))?;
+    Ok(())
 }
 
 /// 一键安装内置 Node 运行时（下载默认走镜像站）

@@ -11,6 +11,7 @@ mod pnpm;
 mod profiles;
 mod procs;
 mod profile_cfg;
+mod profile_versions;
 mod registry;
 mod runtime;
 mod semver;
@@ -32,17 +33,20 @@ pub fn run() {
     diag::mark("启动器启动");
 
     let settings = settings::load_settings();
+    // 先把设置里的日志级别装上（DSH_STARTER_LOG 环境变量存在时仍优先）
+    diag::set_runtime_level(&settings.log_level);
     // 启动横幅：排查任何问题都先看这一行（版本、平台、日志位置、级别、数据目录）
     diag::info(
         "app",
         &format!(
-            "DSH Starter v{} 启动：os={} arch={} run={} 日志目录={} 级别={} 数据目录={}",
+            "DSH Starter v{} 启动：os={} arch={} run={} 日志目录={} 级别={}（来源：{}） 数据目录={}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH,
             diag::run_id(),
             diag::logs_dir().display(),
             diag::level_label(),
+            if diag::env_pinned() { "环境变量 DSH_STARTER_LOG" } else { "设置" },
             settings::starter_home().display()
         ),
     );
@@ -84,7 +88,9 @@ pub fn run() {
             commands::stop_process,
             commands::list_processes,
             commands::list_profile_instances,
+            commands::list_profile_versions,
             commands::get_session_stats,
+            commands::clear_session_stats_cache,
             commands::get_share_identity,
             commands::stop_profile_instance,
             commands::export_proc_log,
@@ -94,6 +100,7 @@ pub fn run() {
             commands::install_starter_update,
             commands::reveal_folder,
             commands::open_external,
+            commands::open_web_window,
             commands::install_runtime,
             commands::get_profile_detail,
             commands::get_patch_reload,
@@ -115,6 +122,9 @@ pub fn run() {
             commands::delete_cloned_plugin,
             commands::reveal_git_plugins_dir,
             commands::export_diagnostics,
+            commands::list_system_logs,
+            commands::read_system_log,
+            commands::clear_system_logs,
             commands::log_ui,
             commands::read_profile_file,
             commands::write_profile_file,
@@ -158,20 +168,24 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let close_to_tray = window
-                    .app_handle()
-                    .state::<settings::AppState>()
-                    .settings
-                    .lock()
-                    .unwrap()
-                    .close_to_tray;
-                if close_to_tray {
-                    // 关闭按钮 → 隐藏到托盘，后台常驻
-                    api.prevent_close();
-                    let _ = window.hide();
-                    diag::debug("app", || "关闭按钮 → 隐藏到托盘，进程继续常驻".into());
+            match event {
+                WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
+                    let close_to_tray = window
+                        .app_handle()
+                        .state::<settings::AppState>()
+                        .settings
+                        .lock()
+                        .unwrap()
+                        .close_to_tray;
+                    if close_to_tray {
+                        // 关闭按钮 → 隐藏到托盘，后台常驻（只针对主窗口：
+                        // dsh Web 窗口没有托盘入口，藏进去用户就再也找不回来了）
+                        api.prevent_close();
+                        let _ = window.hide();
+                        diag::debug("app", || "关闭按钮 → 隐藏到托盘，进程继续常驻".into());
+                    }
                 }
+                _ => {}
             }
         })
         .build(tauri::generate_context!())

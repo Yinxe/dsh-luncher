@@ -16,6 +16,8 @@ import ClonedReposCard from "@/components/ClonedReposCard";
 import InstallPluginDialog from "@/components/InstallPluginDialog";
 import PluginTerminal from "@/components/PluginTerminal";
 import YamlEditor from "@/components/YamlEditor";
+import YamlIssueBanner, { YamlDirtyBadge } from "@/components/YamlIssueBanner";
+import { useSaveHotkey, useYamlIssues } from "@/lib/yaml-validate";
 import { usePluginJobs } from "../hooks/use-plugin-jobs";
 import { api } from "../api";
 import type { ClonedPlugin, PluginUpdateInfo, ProfileDetail } from "../types";
@@ -66,6 +68,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [bundleBusy, setBundleBusy] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [updates, setUpdates] = useState<Record<string, PluginUpdateInfo> | null>(null);
@@ -161,6 +164,8 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
   );
 
   const saveFile = useCallback(async () => {
+    if (savingRef.current) return; // 在途守卫（AGENTS）：快捷键连发/连点不能并发写同一文件
+    savingRef.current = true;
     setSaving(true);
     try {
       await api.writeProfileFile(profile, editFile, draft);
@@ -169,9 +174,14 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
     } catch (e) {
       onToast("err", String(e));
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }, [profile, editFile, draft, onToast, reload]);
+
+  const patchIssues = useYamlIssues(draft);
+  const canSaveFile = dirty && patchIssues.length === 0 && !busy;
+  const patchKeydown = useSaveHotkey(canSaveFile, saveFile);
 
   const doCheckUpdates = useCallback(async () => {
     const target = profile; // 检查在途时可切 profile，旧结果不能写进新 profile 的视图
@@ -583,7 +593,7 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
         onLinkInstall={(spec) => installMany([spec], "install")}
       />
 
-      <Card className="p-4">
+      <Card className="p-4" onKeyDown={patchKeydown}>
         <div className="mb-2.5 flex flex-wrap items-center gap-3">
           <div className="text-[13px] font-semibold">
             cordis.patch.yml
@@ -591,18 +601,31 @@ export default function PluginsView({ profiles, initialProfile, onToast }: Props
               插件启停的权威配置（disabled: true / 恢复）
             </span>
           </div>
-          {dirty && <Badge variant="warning">未保存</Badge>}
+          <YamlDirtyBadge dirty={dirty} issueCount={patchIssues.length} />
           <span className="flex-1" />
-          <Button size="sm" disabled={busy || !dirty} onClick={saveFile}>
+          <Button
+            size="sm"
+            disabled={!canSaveFile}
+            title={patchIssues.length > 0 ? "存在语法错误，修正后才能保存" : "Ctrl/Cmd+S"}
+            onClick={saveFile}
+          >
             <Save /> 保存（自动备份）
           </Button>
-          <Button size="sm" variant="outline" disabled={busy || !dirty} onClick={reload}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            title="丢弃本地修改，重新读取磁盘上的文件"
+            onClick={reload}
+          >
             <RotateCcw /> 还原
           </Button>
         </div>
         <YamlEditor value={draft} onChange={(v) => { setDraft(v); setDirty(true); }} />
+        <YamlIssueBanner issues={patchIssues} dirty={dirty} className="mt-1.5" />
         <div className="mt-1.5 text-[11px] text-muted-foreground">
-          专业 YAML 编辑器：语法高亮 + 行内错误校验，编辑保留全部注释；保存前自动备份，live 模式下 dsh 热重载
+          专业 YAML 编辑器：语法高亮 + 行内错误校验，编辑保留全部注释；语法错误时禁止保存，
+          保存前自动备份，live 模式下 dsh 热重载
         </div>
       </Card>
 
