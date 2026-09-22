@@ -177,8 +177,9 @@ export const api = {
   getGithubRateLimit: () => invoke<GitHubRateLimit>("get_github_rate_limit"),
   /** 通道自检：并发探测 refs / jsDelivr / raw / api 的可达性与延迟 */
   checkChannels: () => invoke<ChannelProbe[]>("check_channels"),
-  /** 各 dsh 版本的发布说明（GitHub Releases；一次拉全量，按版本号从新到旧） */
-  dshReleaseNotes: () => invoke<DshRelease[]>("dsh_release_notes"),
+  /** 各 dsh 版本的发布说明（GitHub Releases；一次拉全量，按版本号从新到旧）。
+   *  默认命中磁盘缓存即返回、不打 API；force=true（对话框「刷新」）才真正拉一次。 */
+  dshReleaseNotes: (force = false) => invoke<DshRelease[]>("dsh_release_notes", { force }),
   readGlobalConfig: () => invoke<string>("read_global_config"),
   writeGlobalConfig: (content: string) => invoke<void>("write_global_config", { content }),
   getModelConfig: () => invoke<ModelConfigInfo>("get_model_config"),

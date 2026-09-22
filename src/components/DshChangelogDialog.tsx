@@ -31,9 +31,10 @@ const fmtDate = (iso: string | null) =>
 /**
  * dsh 更新日志：左栏逐个版本、右栏是该版本的 Release 正文。
  *
- * 数据来自官方 monorepo 的 GitHub Release（tag `dsh-v*`），一次拉全量并缓存
- * （Rust 侧 10 分钟 + ETag），所以前后翻版本是零等待的 —— 官方发的是中英双段，
- * 正文里用 `<h3 id="cn-…">` 之类的锚点分段，这里按语言切成两个标签页。
+ * 数据来自官方 monorepo 的 GitHub Release（tag `dsh-v*`），一次拉全量后
+ * **磁盘缓存长期有效**（正常打开零 API 请求，标题栏「刷新」才强制拉一次），
+ * 所以前后翻版本是零等待的 —— 官方发的是中英双段，正文里用 `<h3 id="cn-…">`
+ * 之类的锚点分段，这里按语言切成两个标签页。
  * npm 的 packument 里没有 changelog，这也正是「更新日志只能来自 Release」的原因。
  */
 export default function DshChangelogDialog({
@@ -46,11 +47,11 @@ export default function DshChangelogDialog({
   const [lang, setLang] = useState<"zh" | "en">("zh");
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = false) => {
     setLoading(true);
     setError(null);
     try {
-      setReleases(await api.dshReleaseNotes());
+      setReleases(await api.dshReleaseNotes(force));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -120,6 +121,17 @@ export default function DshChangelogDialog({
                 {withNotes} 个版本有发布说明
               </span>
             )}
+            {/* 缓存长期有效，正常打开不碰 GitHub；发了新版本时点这里强制拉一次 */}
+            <Button
+              size="sm"
+              variant="ghost"
+              className="ml-auto h-6 gap-1 px-2 text-[10.5px] text-muted-foreground"
+              title="从 GitHub 重新拉取发布说明（会消耗一次 API 额度）"
+              disabled={loading}
+              onClick={() => load(true)}
+            >
+              <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} /> 刷新
+            </Button>
           </DialogTitle>
           <DialogDescription>
             官方仓库 deepseek-ai/deepseek-harness 里各版本的 Release 正文。
@@ -178,7 +190,7 @@ export default function DshChangelogDialog({
                 <AlertDescription className="space-y-2 text-[11.5px] leading-relaxed">
                   <div className="break-words">{error}</div>
                   <div className="flex flex-wrap gap-1.5">
-                    <Button size="sm" variant="outline" className="h-6 px-2 text-[10.5px]" onClick={load}>
+                    <Button size="sm" variant="outline" className="h-6 px-2 text-[10.5px]" onClick={() => load(true)}>
                       <RefreshCw className="size-3" /> 重试
                     </Button>
                     <Button

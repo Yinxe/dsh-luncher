@@ -923,7 +923,7 @@ pub const DSH_REPO: &str = "deepseek-ai/deepseek-harness";
 pub const DSH_TAG_PREFIX: &str = "dsh-v";
 
 /// 一个 dsh 版本的发布说明
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, Serialize, serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct DshRelease {
     /// 版本号（去掉 tag 前缀）
@@ -940,18 +940,67 @@ pub struct DshRelease {
     pub html_url: String,
 }
 
-/// 进程内缓存：一次会话里反复开关更新日志不该反复打 GitHub。
-/// （`api_get_json` 的 ETag 缓存命中 304 时不计额度，但仍要一次网络往返。）
-static DSH_RELEASES: Mutex<Option<(Instant, Vec<DshRelease>)>> = Mutex::new(None);
-const DSH_RELEASES_TTL: Duration = Duration::from_secs(10 * 60);
+/// 进程内缓存：一次会话里反复开关更新日志不该反复读磁盘 / 打 GitHub。
+static DSH_RELEASES: Mutex<Option<Vec<DshRelease>>> = Mutex::new(None);
+
+/// 磁盘缓存（`~/.dsh-starter/dsh-releases.json`，与 github-accel.json 同款）：
+/// 某版本的 Release 正文发布后基本不再变，所以**只要缓存存在就一直直接用**
+/// （重启、断网、额度耗尽都能照常翻日志），正常打开一次 API 请求都不发。
+/// 想看新发布版本的说明走对话框里的「刷新」（force=true），它跳过缓存真正打一次 GitHub。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DshReleasesCache {
+    /// 写入时刻（unix 秒），仅供排查/将来展示
+    fetched_at: u64,
+    releases: Vec<DshRelease>,
+}
+
+fn dsh_releases_cache_path() -> PathBuf {
+    crate::settings::starter_home().join("dsh-releases.json")
+}
+
+/// 读磁盘缓存；文件缺失/损坏当作没有
+fn dsh_releases_load_disk() -> Option<Vec<DshRelease>> {
+    let text = std::fs::read_to_string(dsh_releases_cache_path()).ok()?;
+    let cache: DshReleasesCache = serde_json::from_str(&text).ok()?;
+    if cache.releases.is_empty() {
+        return None;
+    }
+    Some(cache.releases)
+}
+
+/// 写盘失败不升级为报错：缓存只是省额度的加速器，不该拖垮一次成功的读取
+fn dsh_releases_save_disk(list: &[DshRelease]) {
+    let path = dsh_releases_cache_path();
+    let Some(parent) = path.parent() else { return };
+    let text = match serde_json::to_string(&DshReleasesCache {
+        fetched_at: now_unix(),
+        releases: list.to_vec(),
+    }) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    if std::fs::create_dir_all(parent).is_ok() {
+        let _ = std::fs::write(&path, text);
+    }
+}
 
 /// 拉取 dsh 的全部 Release（新→旧），只保留 `dsh-v*` 前缀的那些。
-pub async fn fetch_dsh_releases(token: Option<&str>) -> Result<Vec<DshRelease>, String> {
-    if let Ok(g) = DSH_RELEASES.lock() {
-        if let Some((at, list)) = g.as_ref() {
-            if at.elapsed() < DSH_RELEASES_TTL {
+///
+/// `force=false`（默认）：命中内存或磁盘缓存就直接返回，**完全不碰 GitHub**，
+/// 只有从没缓存过时才发一次请求。`force=true`：跳过缓存打一次 API（对话框「刷新」），
+/// 失败就如实报错 —— 静默回退旧数据会让人误以为刷新成功了。
+pub async fn fetch_dsh_releases(token: Option<&str>, force: bool) -> Result<Vec<DshRelease>, String> {
+    if !force {
+        if let Ok(g) = DSH_RELEASES.lock() {
+            if let Some(list) = g.as_ref() {
                 return Ok(list.clone());
             }
+        }
+        if let Some(list) = dsh_releases_load_disk() {
+            if let Ok(mut g) = DSH_RELEASES.lock() {
+                *g = Some(list.clone());
+            }
+            return Ok(list);
         }
     }
     let url = format!("https://api.github.com/repos/{DSH_REPO}/releases?per_page=100");
@@ -961,8 +1010,9 @@ pub async fn fetch_dsh_releases(token: Option<&str>) -> Result<Vec<DshRelease>, 
     }
     let list = dsh_releases_from_json(&json)?;
     if let Ok(mut g) = DSH_RELEASES.lock() {
-        *g = Some((Instant::now(), list.clone()));
+        *g = Some(list.clone());
     }
+    dsh_releases_save_disk(&list);
     Ok(list)
 }
 
@@ -1964,6 +2014,29 @@ mod tests {
         assert!(err.contains(DSH_TAG_PREFIX), "报错应点明前缀：{err}");
         let not_array = dsh_releases_from_json(&serde_json::json!({"message":"Not Found"})).unwrap_err();
         assert!(not_array.contains("不是 Release 列表"), "{not_array}");
+    }
+
+    /// 磁盘缓存（dsh-releases.json）：写出读回来字段不丢、格式坏掉时优雅当作无缓存
+    #[test]
+    fn dsh_releases_disk_cache_roundtrip() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"[{"tag_name":"dsh-v0.1.5","name":"v0.1.5","body":"说明","html_url":"https://x/1","prerelease":false,"published_at":"2026-09-03T06:06:07Z"}]"#,
+        )
+        .unwrap();
+        let list = dsh_releases_from_json(&json).unwrap();
+        let text = serde_json::to_string(&DshReleasesCache {
+            fetched_at: now_unix(),
+            releases: list.clone(),
+        })
+        .unwrap();
+        let back: DshReleasesCache = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.releases.len(), 1);
+        assert_eq!(back.releases[0].version, "0.1.5");
+        assert_eq!(back.releases[0].body, "说明");
+        assert_eq!(back.releases[0].published_at.as_deref(), Some("2026-09-03T06:06:07Z"));
+        // 旧文件被改坏 / 不是对象：load 路径上的 from_str 会失败，调用方按「无缓存」处理
+        assert!(serde_json::from_str::<DshReleasesCache>("not json").is_err());
+        assert!(serde_json::from_str::<DshReleasesCache>("{}").is_err());
     }
 
 

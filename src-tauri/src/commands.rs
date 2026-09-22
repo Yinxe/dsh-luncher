@@ -1519,13 +1519,15 @@ pub fn get_github_rate_limit() -> crate::registry::GitHubRateLimit {
 /// 各 dsh 版本的发布说明（GitHub Releases，tag 前缀 `dsh-v`）。
 /// 一次拉全量、按版本号倒序返回：更新日志对话框里要能随手翻前后几个版本，
 /// 逐版本按需请求会把匿名额度（60/小时）几下用光。
+/// 默认命中磁盘缓存就返回、不打 API；`force=true`（对话框「刷新」）才真正拉一次。
 #[tauri::command]
 pub async fn dsh_release_notes(
     state: State<'_, AppState>,
+    force: Option<bool>,
 ) -> Result<Vec<crate::registry::DshRelease>, String> {
     let token = state.settings.lock().unwrap().github_token.clone();
     let token = crate::registry::github_token(Some(&token));
-    crate::registry::fetch_dsh_releases(token.as_deref()).await
+    crate::registry::fetch_dsh_releases(token.as_deref(), force.unwrap_or(false)).await
 }
 
 #[tauri::command]
