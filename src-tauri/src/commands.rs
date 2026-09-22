@@ -1817,15 +1817,20 @@ pub fn set_web_quick_config(
     crate::profile_cfg::set_web_quick_config(&profile, &config)
 }
 
-/// 复制 profile。复制后**自动错开 web 端口**（复用「邻近空闲端口」那套逻辑），
+/// 复制 profile。复制后**补装依赖**（dsh 不会自动重装，缺 bundle 启动即报错；
+/// 失败则回滚副本）并**自动错开 web 端口**（复用「邻近空闲端口」那套逻辑），
 /// 否则两个实例配置同一个端口、无法并行启动。返回新端口（null = 该 profile 没有 webserver 配置）。
 #[tauri::command]
-pub async fn copy_profile(source: String, new_name: String) -> Result<Option<u16>, String> {
-    // 整目录递归复制（profile 可能带 node_modules）+ 端口探测都在磁盘上耗时，
+pub async fn copy_profile(
+    state: State<'_, AppState>,
+    source: String,
+    new_name: String,
+) -> Result<Option<u16>, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    // 整目录递归复制 + npm 装依赖 + 端口探测都在磁盘/子进程上耗时，
     // 留在同步命令里会卡住主线程
     tauri::async_runtime::spawn_blocking(move || {
-        crate::profile_cfg::copy_profile(&source, &new_name)?;
-        crate::profile_cfg::assign_free_web_port(new_name.trim())
+        crate::profile_cfg::copy_profile_with_deps(&settings, &source, &new_name)
     })
     .await
     .map_err(|e| format!("复制 profile 失败: {e}"))?

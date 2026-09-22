@@ -1176,9 +1176,12 @@ pub fn set_web_quick_config(profile: &str, input: &WebQuickConfigInput) -> Resul
 
 // ── 复制 profile 实例 ─────────────────────────
 
-/// 复制 profile：目录型整目录拷贝（跳过 node_modules / cache 等可重建的运行时产物，
-/// 依赖在首次启动时由 dsh/pnpm 重装）；文件型（profiles/ 下的 yaml/json）拷为
-/// 「新名.同扩展名」文件。实例名需手动输入并过合法性校验，目标已存在则拒绝。
+/// 复制 profile：目录型整目录拷贝（跳过 node_modules / cache 等可重建的运行时产物）；
+/// 文件型（profiles/ 下的 yaml/json）拷为「新名.同扩展名」文件。实例名需手动输入并过
+/// 合法性校验，目标已存在则拒绝。
+///
+/// **注意**：dsh 不会在首次启动时自动重装依赖 —— bundle 解析不到直接报错退出。
+/// 复制出来的副本必须走 [`copy_profile_with_deps`]，由启动器补一次官方安装命令。
 pub fn copy_profile(source: &str, new_name: &str) -> Result<(), String> {
     let source = source.trim();
     let name = new_name.trim();
@@ -1214,6 +1217,78 @@ pub fn copy_profile(source: &str, new_name: &str) -> Result<(), String> {
         crate::diag::info("profile", &format!("profile 已复制：{source} → {name}"));
     }
     r
+}
+
+/// 复制的完整流程：目录拷贝 → 补装依赖 → 错开 web 端口。
+/// 依赖装不上就把副本整体回滚（副本目录是我们刚建的，删掉无副作用），
+/// 保证「复制成功 = 可启动」；用户修好网络/镜像后重试即可。
+pub fn copy_profile_with_deps(
+    settings: &Settings,
+    source: &str,
+    new_name: &str,
+) -> Result<Option<u16>, String> {
+    copy_profile(source, new_name)?;
+    let name = new_name.trim();
+    if let Err(e) = install_copied_deps(settings, name) {
+        let dir = profiles::profiles_dir().join(name);
+        if dir.is_dir() {
+            let _ = std::fs::remove_dir_all(&dir);
+            crate::diag::warn("profile", &format!("副本「{name}」依赖安装失败，已回滚删除"));
+        }
+        return Err(format!(
+            "副本依赖自动安装失败，已回滚（未留下半成品）：{e}\n\
+             请检查网络 / npm 镜像后重试；也可先关闭试用，稍后在「插件管理」里手动补装。"
+        ));
+    }
+    assign_free_web_port(name)
+}
+
+/// 副本跳过了 node_modules，而 dsh 启动时解析不到 bundle 会直接报错退出，
+/// 所以复制后替用户跑一次官方 `dsh plugin --profile <名> install`。
+/// 文件型 profile（无目录）没有依赖可装，直接返回 Ok。
+fn install_copied_deps(settings: &Settings, name: &str) -> Result<(), String> {
+    let dir = profiles::profiles_dir().join(name);
+    if !dir.is_dir() || !dir.join("package.json").is_file() {
+        return Ok(());
+    }
+    let (node, bin_js) = resolve_dsh_bin(settings)?;
+    let mut cmd = util::hidden_command(&node);
+    cmd.arg(&bin_js)
+        .arg("plugin")
+        .arg("--profile")
+        .arg(name)
+        .arg("install")
+        .current_dir(&dir)
+        .env(
+            "DSH_HOME",
+            profiles::dsh_native_home().to_string_lossy().into_owned(),
+        )
+        // pnpm 10+ 没有 TTY 时会卡在静默交互提示上；CI 模式让它直接干活或报错
+        .env("CI", "true")
+        .env("npm_config_update_notifier", "false");
+    // git（含 pnpm 内部调用 git）一律不弹账号密码提示：宁可失败也要把原因写进输出
+    for (k, v) in crate::plugin::git_no_prompt_env() {
+        cmd.env(k, v);
+    }
+    util::with_node_on_path(&mut cmd, Some(&node));
+    crate::diag::info("profile", &format!("副本「{name}」开始安装依赖（dsh plugin install）"));
+    let out = cmd
+        .output()
+        .map_err(|e| format!("无法执行 dsh plugin install（{}）: {e}", bin_js.display()))?;
+    if !out.status.success() {
+        let mut text = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if text.is_empty() {
+            text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        }
+        let short: String = text.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
+        return Err(if short.is_empty() {
+            format!("退出码 {:?}", out.status.code())
+        } else {
+            short
+        });
+    }
+    crate::diag::info("profile", &format!("副本「{name}」依赖安装完成"));
+    Ok(())
 }
 
 /// 递归复制目录，跳过指定名称的子目录（可重建的运行时产物）与符号链接等非普通文件

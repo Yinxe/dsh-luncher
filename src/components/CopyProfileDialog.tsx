@@ -41,8 +41,8 @@ export default function CopyProfileDialog({ source, initialName = "", existing, 
       onToast(
         "ok",
         port != null
-          ? `已复制为「${trimmed}」，web 端口已自动错开为 ${port}（node_modules / cache 不复制，首次启动自动重装依赖）`
-          : `已复制为「${trimmed}」（node_modules / cache 不复制，首次启动自动重装依赖）`
+          ? `已复制为「${trimmed}」并装好依赖，web 端口已自动错开为 ${port}`
+          : `已复制为「${trimmed}」并装好依赖`
       );
       onCopied(trimmed);
       onClose();
@@ -61,8 +61,8 @@ export default function CopyProfileDialog({ source, initialName = "", existing, 
             <CopyPlus className="h-4 w-4" /> 复制 profile「{source}」
           </DialogTitle>
           <DialogDescription>
-            把该 profile 的配置目录整份拷贝为新实例。实例名需手动输入；
-            node_modules / cache 等可重建产物不复制，首次启动自动重装依赖。
+            把该 profile 的配置目录整份拷贝为新实例，并自动装好插件依赖
+            （node_modules 不复制，走一次官方安装，可能要几十秒）。实例名需手动输入。
             若源实例配置了 web 端口，副本会自动换一个邻近的空闲端口，可直接并行运行。
           </DialogDescription>
         </DialogHeader>
@@ -81,7 +81,7 @@ export default function CopyProfileDialog({ source, initialName = "", existing, 
         <DialogFooter>
           <Button variant="outline" disabled={busy} onClick={onClose}>取消</Button>
           <Button disabled={!canSubmit} onClick={confirm}>
-            {busy && <Loader2 className="animate-spin" />} 复制
+            {busy && <Loader2 className="animate-spin" />} {busy ? "复制并安装依赖…" : "复制"}
           </Button>
         </DialogFooter>
       </DialogContent>
