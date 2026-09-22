@@ -56,6 +56,20 @@
   --card-shadow:
     0 1px 2px oklch(0.35 0.05 150 / 5%),
     0 10px 26px -14px oklch(0.35 0.05 150 / 16%);
+  /* 统计图表序列色（recharts 直接用 var()，随主题切换；导出 PNG 同样解析）：
+     品牌绿领头 + 青/琥珀/玫红/天蓝/紫罗兰，末位为「其他」中性灰 */
+  --meter-1: #2f8f46;
+  --meter-2: #0d9488;
+  --meter-3: #d97706;
+  --meter-4: #e11d48;
+  --meter-5: #0284c7;
+  --meter-6: #7c3aed;
+  --meter-other: #94a3b8;
+  /* 活跃热力图 4 档绿阶（0 档用 --muted） */
+  --heat-1: #cfe4cb;
+  --heat-2: #9ed09b;
+  --heat-3: #59ab5c;
+  --heat-4: #237a37;
 }
 
 .dark {
@@ -100,6 +114,18 @@
   --card-shadow:
     0 1px 2px oklch(0 0 0 / 35%),
     0 10px 28px -14px oklch(0 0 0 / 55%);
+  /* 暗色下提亮一档，保证深灰卡片上对比足够 */
+  --meter-1: #4ade80;
+  --meter-2: #2dd4bf;
+  --meter-3: #fbbf24;
+  --meter-4: #fb7185;
+  --meter-5: #38bdf8;
+  --meter-6: #a78bfa;
+  --meter-other: #8b949e;
+  --heat-1: #2f3d35;
+  --heat-2: #3f5a49;
+  --heat-3: #54805f;
+  --heat-4: #74b183;
 }
 
 @theme inline {

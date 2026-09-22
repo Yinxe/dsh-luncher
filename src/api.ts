@@ -40,6 +40,8 @@ import type {
   ModelConfigInfo,
   ModelConfigInput,
   RemoteModelInfo,
+  SessionStats,
+  ShareIdentity,
 } from "./types";
 
 export const api = {
@@ -72,6 +74,14 @@ export const api = {
   stopProcess: (id: number) => invoke<boolean>("stop_process", { id }),
   listProcesses: () => invoke<ProcInfo[]>("list_processes"),
   listProfileInstances: () => invoke<ProfileInstance[]>("list_profile_instances"),
+  /** 会话统计（聚合全部历史；trend 为最近 rangeDays 天，默认 30；gapMin 为在线空闲阈值） */
+  getSessionStats: (rangeDays?: number, gapMin?: number) =>
+    invoke<SessionStats>("get_session_stats", {
+      rangeDays: rangeDays ?? null,
+      gapMin: gapMin ?? null,
+    }),
+  /** 分享面板署名：本机 git 身份（缓存，取不到时 name/email 为空） */
+  getShareIdentity: () => invoke<ShareIdentity>("get_share_identity"),
   stopProfileInstance: (profile: string) =>
     invoke<boolean>("stop_profile_instance", { profile }),
   exportProcLog: (profile: string, pid: number, content: string) =>

@@ -37,6 +37,7 @@ import InstallCard from "./components/InstallCard";
 import ConfigView from "./components/ConfigView";
 import ModelConfigView from "./components/ModelConfigView";
 import CredentialsView from "./components/CredentialsView";
+import StatsView from "./components/StatsView";
 import PluginsView from "./components/PluginsView";
 import QuickActionsView from "./components/QuickActionsView";
 import ProcessSidePanel from "./components/ProcessSidePanel";
@@ -1582,6 +1583,7 @@ export default function App() {
           {view === "models" && <ModelConfigView onToast={addToast} />}
           {view === "config" && <ConfigView onToast={addToast} />}
           {view === "credentials" && <CredentialsView onToast={addToast} />}
+          {view === "stats" && <StatsView onToast={addToast} appVersion={env?.appVersion ?? ""} />}
         </div>
 
         {/* dsh 更新日志：版本表里的「更新日志」按钮与工具栏按钮都从这里打开 */}

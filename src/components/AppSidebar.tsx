@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import {
-  Bot, Copy, ExternalLink, FileCog, Home, KeyRound, Package, Puzzle, Rocket, ScrollText, X,
+  BarChart3, Bot, Copy, ExternalLink, FileCog, Home, KeyRound, Package, Puzzle, Rocket, ScrollText, X,
 } from "lucide-react";
 
 import {
@@ -143,6 +143,7 @@ export default function AppSidebar({
     ["models", "模型配置", Bot, null, null],
     ["config", "配置文件", FileCog, null, null],
     ["credentials", "凭据管理", KeyRound, null, null],
+    ["stats", "统计", BarChart3, runningInstanceCount > 0 ? runningInstanceCount : null, "success"],
   ];
 
   const navigate = (key: View) => {

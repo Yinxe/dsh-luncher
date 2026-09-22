@@ -554,10 +554,31 @@ pub async fn list_profile_instances(
         .map_err(|e| format!("枚举实例失败: {e}"))?
 }
 
+/// dsh 会话统计：扫描 $DSH_HOME/sessions 的会话日志，按 dsh-token-stats 口径聚合
+/// （token 总量/趋势/热力图/模型分布/今日 + 在线时长三口径）。首扫全量、之后按文件指纹增量。
+#[tauri::command]
+pub async fn get_session_stats(
+    range_days: Option<u32>,
+    gap_min: Option<u32>,
+) -> Result<crate::sessions::SessionStats, String> {
+    let range = range_days.unwrap_or(30).clamp(1, 3650);
+    let gap = gap_min.unwrap_or(crate::sessions::DEFAULT_GAP_MIN);
+    tauri::async_runtime::spawn_blocking(move || crate::sessions::session_stats(range, gap))
+        .await
+        .map_err(|e| format!("统计扫描失败: {e}"))?
+}
+
+/// 分享面板署名：git 全局身份（user.name / user.email），前端导出 PNG 用
+#[tauri::command]
+pub async fn get_share_identity() -> Result<crate::share::ShareIdentity, String> {
+    Ok(tauri::async_runtime::spawn_blocking(crate::share::share_identity)
+        .await
+        .map_err(|e| format!("读取 git 身份失败: {e}"))?)
+}
+
 /// 停止某个 profile 的实例（内嵌或外部）
 #[tauri::command]
-pub async fn stop_profile_instance(
-    app: AppHandle,
+pub async fn stop_profile_instance(    app: AppHandle,
     procs: State<'_, crate::procs::ProcState>,
     profile: String,
 ) -> Result<bool, String> {

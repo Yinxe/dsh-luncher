@@ -38,6 +38,10 @@ sha2 = "0.10"
 listeners = "0.6"
 # pnpm 失败分类用（dshmarket 的 pnpm-compat 思路；锁定文件里已有 1.13）
 regex = "1"
+# 会话统计：dsh 的会话日志是 zstd 压缩 JSONL（sessions/session(.v3).jsonl.zstd）
+zstd = "0.13"
+# 会话统计的本地时区日/小时分桶与连续天数计算
+chrono = "0.4"
 
 [dev-dependencies]
 # mock_app：给插件任务运行器做「真起进程 + 真流式事件」的集成测试

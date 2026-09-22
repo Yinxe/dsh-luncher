@@ -14,7 +14,9 @@ mod profile_cfg;
 mod registry;
 mod runtime;
 mod semver;
+mod sessions;
 mod settings;
+mod share;
 mod starter;
 mod tray;
 mod update_check;
@@ -82,6 +84,8 @@ pub fn run() {
             commands::stop_process,
             commands::list_processes,
             commands::list_profile_instances,
+            commands::get_session_stats,
+            commands::get_share_identity,
             commands::stop_profile_instance,
             commands::export_proc_log,
             commands::read_instance_log,

@@ -1,5 +1,5 @@
 /** 主内容区的视图标识（侧栏导航项与之对应） */
-export type View = "quick" | "versions" | "profiles" | "plugins" | "models" | "config" | "credentials";
+export type View = "quick" | "versions" | "profiles" | "plugins" | "models" | "config" | "credentials" | "stats";
 
 export type InstallSource = "managed" | "global" | "path";
 
@@ -614,4 +614,125 @@ export interface Toast {
   id: number;
   kind: "ok" | "err" | "info";
   text: string;
+}
+
+// ── 会话统计（与 src-tauri/src/sessions.rs 的 camelCase 输出一一对应） ──
+
+export interface PeakDay {
+  day: string;
+  tokens: number;
+}
+
+export interface PeakStep {
+  tokens: number;
+  day: string;
+  model: string;
+}
+
+export interface Overview {
+  totalInput: number;
+  totalOutput: number;
+  totalCacheRead: number;
+  totalCacheWrite: number;
+  totalTokens: number;
+  calls: number;
+  activeDays: number;
+  currentStreak: number;
+  longestStreak: number;
+  peakDay: PeakDay | null;
+  peakStep: PeakStep | null;
+  firstDay: string | null;
+  lastDay: string | null;
+  avgDay: number;
+}
+
+export interface ModelTokens {
+  model: string;
+  tokens: number;
+}
+
+export interface TrendPoint {
+  day: string;
+  byModel: ModelTokens[];
+  total: number;
+  calls: number;
+}
+
+export interface DayCell {
+  day: string;
+  tokens: number;
+  sessions: number;
+}
+
+export interface ModelUsage {
+  model: string;
+  tokens: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  calls: number;
+  share: number;
+}
+
+export interface HourCell {
+  hour: number;
+  byModel: ModelTokens[];
+  total: number;
+}
+
+export interface TodayStats {
+  day: string;
+  total: number;
+  calls: number;
+  yesterdayTotal: number;
+  hours: HourCell[];
+}
+
+export interface SessionStats {
+  overview: Overview;
+  trend: TrendPoint[];
+  today: TodayStats;
+  heatmap: DayCell[];
+  models: ModelUsage[];
+  online: OnlineSnapshot;
+  rangeDays: number;
+  sessionsTotal: number;
+  sessionsWithUsage: number;
+  errors: number;
+  generatedAt: number;
+}
+
+/** 单日在线时长：byGap/segByGap 的键是空闲阈值（分钟数字符串） */
+export interface OnlineDay {
+  d: string;
+  sessions: number;
+  tokens: number;
+  turnMs: number;
+  byGap: Record<string, number>;
+  segByGap: Record<string, number>;
+  llmMs: number;
+  toolMs: number;
+}
+
+/** 在线时长快照：五档阈值下的累计/段数 + 三口径（对话/模型/工具） */
+export interface OnlineSnapshot {
+  defaultGapMin: number;
+  gaps: number[];
+  totalMs: Record<string, number>;
+  segments: Record<string, number>;
+  turnMs: number;
+  llmMs: number;
+  toolMs: number;
+  activeDays: number;
+  firstDay: string | null;
+  lastDay: string | null;
+  days: OnlineDay[];
+}
+
+/** 分享面板署名：本机 git 身份（via = env / git / config-file / none） */
+export interface ShareIdentity {
+  name: string;
+  email: string;
+  via: string;
 }
