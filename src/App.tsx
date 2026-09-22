@@ -1389,7 +1389,7 @@ export default function App() {
                           ) : row.phase === "failed" ? (
                             <XCircle className="h-4 w-4 shrink-0 text-red-500" />
                           ) : (
-                            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${row.phase === "external" ? "bg-sky-500" : "bg-muted-foreground/30"}`} />
+                            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${row.phase === "external" ? "bg-teal-500" : "bg-muted-foreground/30"}`} />
                           )}
                           <div className="min-w-0 grow basis-[calc(100%-1.75rem)] xl:basis-0">
                             <div className="flex items-center gap-1.5">

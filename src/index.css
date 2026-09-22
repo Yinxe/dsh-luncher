@@ -8,7 +8,7 @@
 
 :root {
   /* 亮色主题 —— Levels 风格：奶油纸感底 + 绿色信号色 + 绿灰中性色
-     参考 design-systems/levels/tokens.css */
+     （墨灰渐变鲸鱼标；harness 蓝不再出现在任何主题令牌里） */
   --radius: 0.75rem;
   /* 无边框窗口的圆角：.app-frame 与 body 上的弹层遮罩共用；
      最大化时由 html.window-maximized 置零（见文件末尾） */
@@ -49,12 +49,17 @@
   --sidebar-accent-foreground: #1f2a24;
   --sidebar-border: #dbe3d7;
   --sidebar-ring: #2f8f46;
-  /* eyebrow 标签用信号绿（Levels 招牌细节）；页面底微渐变（暗色关闭） */
+  /* eyebrow 标签用信号绿（Levels 招牌细节）；页面底微渐变 */
   --eyebrow: var(--primary);
-  --page-gradient: linear-gradient(135deg, #fbf7ef 0%, #eef7ed 100%);
+  --page-gradient: linear-gradient(135deg, #fbf7ef 0%, #e7f2e4 100%);
+  /* 卡片层次：奶油底上靠极暖的墨绿投影拉开前后关系（纯描边太素） */
+  --card-shadow:
+    0 1px 2px oklch(0.35 0.05 150 / 5%),
+    0 10px 26px -14px oklch(0.35 0.05 150 / 16%);
 }
 
 .dark {
+  /* 暗色主题：中性无彩灰（原样保留）；仅 sidebar-primary 不再用 harness 蓝 */
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
@@ -83,15 +88,18 @@
   --chart-5: oklch(0.269 0 0);
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
+  /* 原值 harness 蓝 oklch(0.488 0.243 264.376)，按「蓝是 harness 专属」换成中性亮灰 */
+  --sidebar-primary: oklch(0.922 0 0);
+  --sidebar-primary-foreground: oklch(0.205 0 0);
   --sidebar-accent: oklch(0.269 0 0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
-  /* 暗色主题保持原中性风格：eyebrow 不用绿、无页面渐变 */
   --eyebrow: var(--muted-foreground);
   --page-gradient: none;
+  --card-shadow:
+    0 1px 2px oklch(0 0 0 / 35%),
+    0 10px 28px -14px oklch(0 0 0 / 55%);
 }
 
 @theme inline {
@@ -256,6 +264,16 @@ body {
     text-transform: uppercase;
     color: var(--eyebrow, var(--muted-foreground));
   }
+  /* 卡片投影：两档主题各配一档（--card-shadow），拉开与纸底/墨底的前后层次；
+     放在 components 层，`shadow-none` 工具类仍能覆盖（侧栏底部小卡用） */
+  [data-slot="card"] {
+    box-shadow: var(--card-shadow);
+  }
+}
+
+/* 选中文本染主色：两档主题一致的细节签名 */
+::selection {
+  background: color-mix(in oklch, var(--primary) 26%, transparent);
 }
 
 /* CodeMirror 编辑器跟随应用主题（覆盖 One Dark 自带的蓝灰底/行号/选中区/光标，

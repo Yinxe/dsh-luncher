@@ -35,7 +35,7 @@ interface Props {
 const RAIL: Record<string, string> = {
   latest: "border-l-emerald-500",
   stable: "border-l-emerald-600/70",
-  rc: "border-l-sky-500",
+  rc: "border-l-teal-500",
   alpha: "border-l-amber-500",
   beta: "border-l-amber-500",
   next: "border-l-violet-500",

@@ -210,7 +210,7 @@ export default function PluginTerminal({
                       } data-[state=on]:border-primary/50 data-[state=on]:bg-primary/10 data-[state=on]:text-foreground`}
                     >
                       {j.running ? (
-                        <Loader2 className="animate-spin text-sky-500" />
+                        <Loader2 className="animate-spin text-teal-500" />
                       ) : (
                         <span
                           className={`h-1.5 w-1.5 rounded-full ${

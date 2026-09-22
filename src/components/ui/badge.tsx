@@ -20,7 +20,7 @@ const badgeVariants = cva(
         link: "text-primary underline-offset-4 hover:underline",
         success: "bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400",
         warning: "bg-amber-500/10 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400",
-        info: "bg-sky-500/10 text-sky-600 dark:bg-sky-500/15 dark:text-sky-400",
+        info: "bg-slate-500/10 text-slate-600 dark:bg-slate-400/15 dark:text-slate-300",
       },
     },
     defaultVariants: {
