@@ -71,10 +71,10 @@
 
 dsh 自 `0.1.7-alpha.x` 起，设置不再放全局 `~/.dsh/settings.yaml`，而是**每个 profile 一份** `profiles/<名字>/cordis.patch.yml`：
 
-- **一次性迁移**：某个 profile 第一次以 ≥0.1.7 启动时，dsh 会把旧全局 `settings.yaml` 的各节**导入一次**到该 profile 的 patch（写成 `- id: llm-pi-ai` / `- id: agent-default-model` / `- id: ui-theme` 这类条目），然后把 `settings.yaml` 改名为 `settings.yaml.imported` 归档。被导入拒绝的节只留在归档文件里——启动器的「配置文件」Tab 提供这份归档的**只读**查看入口。
+- **一次性迁移**：某个 profile 第一次以 ≥0.1.7 启动时，dsh 会把旧全局 `settings.yaml` 的各节**导入一次**到该 profile 的 patch（写成 `- id: llm-pi-ai` / `- id: agent-default-model` / `- id: ui-theme` 这类条目），然后把 `settings.yaml` 改名为 `settings.yaml.imported` 归档。被导入拒绝的节只留在归档文件里——启动器的「配置文件」Tab 提供这份归档的**只读**查看入口。**注意 `.imported` 不是完整存档**（成功导入的节已搬进 patch）；删除承载迁移配置的 profile 前，启动器会在确认框里警示「全局 settings.yaml 缺失 + 该补丁是唯一完整副本」这一风险。
 - **热更范围**：插件设置存于当前 profile patch 条目的 `config:` 里，只有插件声明了 `.volatile()` 的字段支持不重启生效（工作台的「插件」Tab 顶部有 live / startup 徽标），其余字段改完需重启实例。
 - **启动器怎么改 patch**：模型配置与快捷配置写进 patch 时采用**marker 注释块整块接管**（`# dsh-starter: modelcfg` / `# dsh-starter: web-quick`），保存只替换自己接管的那一块——`!!js` 自定义标签行、qqbot/insert 等其余条目与节外注释逐字节不动。若 patch 里出现两份同名条目（比如又在 dsh 的设置表单里改过一次），页面会警示「后者生效」，保存时自动收敛为一份。
-- **旧版兼容（<0.1.7）**：旧版 dsh 只认全局 `settings.yaml`，而迁移已把它改名。绑定旧版的 profile 点「启动」时，启动器会先检查：`settings.yaml` 缺失就从 `.imported` **复制还原一份**（归档文件本身不动），toast 明示还原到哪。之后若再用 ≥0.1.7 启动别的 profile，dsh 会再次导入并改名——这是官方的一次性行为，还原↔改名可能循环出现，属正常。旧版的全局配置能力将随 0.1.6 之前的版本支持一并弃用。
+- **旧版兼容（<0.1.7）**：旧版 dsh 只认全局 `settings.yaml`，而迁移已把它改名。`settings.yaml` 缺失时，启动器在**旧版 profile 启动前、以及编辑它的模型/配置文件时**自动复制还原一份：优先 `settings.starter-bak`（启动器覆写 settings.yaml 前留下的**完整**快照），没有才退回 `settings.yaml.imported`（只含导入被拒绝的节的**残段**，不是完整存档）；两个源文件都不改动，toast 明示还原到哪。之后若再用 ≥0.1.7 启动别的 profile，dsh 会再次导入并改名——这是官方的一次性行为，还原↔改名可能循环出现，属正常。旧版的全局配置能力将随 0.1.6 之前的版本支持一并弃用。
 - **并发写风险（已知并接受）**：dsh 自己的设置表单 / 配置编辑器也会写同一份 `cordis.patch.yml`，启动器保存与其之间没有文件锁；两边写入各自原子落盘且启动器保存前都留 `*.starter-bak` 备份，真踩上「后保存覆盖先保存」时从备份找回即可。
 - **恢复模式模板**：`web-Recovery` 从官方 `web` 模板新建时若模板 patch 已带启动器的 marker 块，会一并继承（providers/快捷配置同源），符合预期。
 

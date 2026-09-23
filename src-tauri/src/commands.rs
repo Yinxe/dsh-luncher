@@ -377,7 +377,7 @@ pub async fn launch_version(
             return Err(msg.into());
         }
         // 旧版兜底：目标 dsh < 0.1.7 时它只认全局 settings.yaml，若已被 0.1.7 导入
-        // 改名则先还原一份（幂等，绝不改 .imported；诊断日志由 restore 内部记录）。
+        // 改名则先还原一份（优先 starter-bak；幂等，还原源都不改动；日志由 restore 内部记录）。
         if !crate::profile_cfg::uses_patch_config(&target.version) {
             crate::profile_cfg::restore_legacy_settings();
         }
@@ -447,8 +447,8 @@ pub struct VersionChange {
 pub struct StartResult {
     pub proc: Option<crate::procs::ProcInfo>,
     pub version_change: Option<VersionChange>,
-    /// 旧版（<0.1.7）启动前从 settings.yaml.imported 还原了全局配置时带回其路径，
-    /// 前端 toast 明示；未发生还原为 null
+    /// 旧版（<0.1.7）启动前把缺失的全局 settings.yaml 还原回来（源 starter-bak/.imported）
+    /// 时带回其路径，前端 toast 明示；未发生为 null
     pub legacy_restored: Option<String>,
 }
 
@@ -591,8 +591,9 @@ async fn start_instance(
     let profile_name = prep.1.clone();
 
     // 旧版兜底（spawn 前）：本次要跑的 dsh < 0.1.7，而它只认全局 settings.yaml。
-    // 若那份文件已被 0.1.7 导入改名（只剩 settings.yaml.imported），先复制还原一份，
-    // 否则旧版读不到模型/凭据配置。幂等：settings.yaml 已存在则 no-op，绝不改 .imported。
+    // 若那份文件已被 0.1.7 导入改名走，先复制还原一份（优先 starter-bak 完整快照，
+    // 其次 .imported 残段），否则旧版读不到模型/凭据配置。
+    // 幂等：settings.yaml 已存在则 no-op，两个还原源都不改动。
     let version_for_restore = prep.0.version.clone();
     let legacy_restored = tauri::async_runtime::spawn_blocking(move || {
         if crate::profile_cfg::uses_patch_config(&version_for_restore) {
@@ -949,6 +950,16 @@ pub async fn rename_profile(
         let _ = settings::save_settings(&s);
     }
     Ok(new)
+}
+
+/// 删除 profile 的风险预检：全局 settings.yaml 缺失且该 profile 补丁携带 0.1.7 导入的
+/// 全局配置时返回警示文本（删除可能销毁唯一完整副本），否则 None。供确认框升级措辞。
+#[tauri::command]
+pub async fn check_delete_profile_risk(name: String) -> Result<Option<String>, String> {
+    let name = name.trim().to_string();
+    tauri::async_runtime::spawn_blocking(move || Ok(crate::profile_cfg::delete_profile_warning(&name)))
+        .await
+        .map_err(|e| format!("风险检测失败: {e}"))?
 }
 
 /// 删除 profile：移入 ~/.dsh-starter/deleted-profiles/ 可找回；
@@ -1954,7 +1965,7 @@ pub fn write_global_config(content: String) -> Result<(), String> {
     crate::profile_cfg::write_global_config(&content)
 }
 
-/// 只读查看被 0.1.7 导入存档的旧全局配置（settings.yaml.imported）；不存在时 Err
+/// 只读查看 0.1.7 导入改名留下的残段（settings.yaml.imported，仅含被拒绝的节）；不存在时 Err
 #[tauri::command]
 pub fn read_imported_settings() -> Result<String, String> {
     let path = crate::profile_cfg::imported_settings_path();

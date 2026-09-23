@@ -132,6 +132,7 @@ pub fn run() {
             commands::set_web_quick_config,
             commands::copy_profile,
             commands::rename_profile,
+            commands::check_delete_profile_risk,
             commands::delete_profile,
             commands::create_recovery_profile,
             commands::list_deleted_profiles,

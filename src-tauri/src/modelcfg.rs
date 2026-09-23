@@ -177,6 +177,11 @@ fn model_from_yaml(v: &Yaml) -> Option<ModelEntry> {
 /// 读取模型配置。文件不存在时 exists=false 而非报错（dsh 首次运行后才创建）。
 pub fn read() -> Result<ModelConfig, String> {
     let path = global_config_path();
+    // 旧版全局文件缺失多半是 0.1.7 导入改名走：先尝试还原，避免表单在空配置上
+    // 编辑后把「不存在」当成「没有配置」，最终覆盖掉唯一存档。
+    if !path.is_file() {
+        crate::profile_cfg::restore_legacy_settings();
+    }
     let exists = path.is_file();
     let mut out = ModelConfig {
         path: path.to_string_lossy().into_owned(),
@@ -683,11 +688,19 @@ pub fn write(input: &ModelConfigInput) -> Result<(), String> {
 
     // 读原文件：存在但解析失败 / 顶层非映射 → 拒绝（防止覆盖未知内容）
     let path = global_config_path();
-    // 只有「文件不存在」才当作空文档；权限 / IO 等其它读取失败必须拒绝写入，
+    // 只有「文件不存在（且还原失败）」才当作空文档；权限 / IO 等其它读取失败必须拒绝写入，
     // 否则会用新内容覆盖掉磁盘上已有的 settings.yaml（静默丢配置）。
+    // NotFound 先走一次还原：0.1.7 导入会把 settings.yaml 改名走，此时直接当空文档
+    // 保存，等于丢掉 merge 基底——磁盘上明明还有 starter-bak/.imported 可救。
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match crate::profile_cfg::restore_legacy_settings() {
+                Some(_) => std::fs::read_to_string(&path)
+                    .map_err(|e| format!("还原旧版配置后仍读取失败: {e}"))?,
+                None => String::new(),
+            }
+        }
         Err(e) => return Err(format!("读取 settings.yaml 失败，已拒绝写入以免覆盖现有配置：{e}")),
     };
     let existing_root: Option<Mapping> = if raw.trim().is_empty() {

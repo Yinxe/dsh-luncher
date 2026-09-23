@@ -354,7 +354,8 @@ export interface ProfileConfigMode {
   mode: "patch" | "legacy";
   /** 判定所用的生效版本：绑定版本，回落当前版本；可能为空 */
   version: string;
-  /** settings.yaml.imported 存在 = 全局配置已被导入过一次（旧版启动前需还原） */
+  /** settings.yaml.imported 存在 = 全局配置已被 ≥0.1.7 导入接管过（旧版启动/编辑前需还原；
+   *  该文件只残留被拒绝的节，完整快照在 settings.starter-bak） */
   imported: boolean;
 }
 
@@ -372,7 +373,8 @@ export interface VersionChange {
 export interface StartResult {
   proc: ProcInfo | null;
   versionChange: VersionChange | null;
-  /** 旧版（<0.1.7）启动前从 settings.yaml.imported 还原了全局配置时的文件路径；未发生为 null */
+  /** 旧版（<0.1.7）启动前把缺失的全局 settings.yaml 还原回来（源 starter-bak/.imported）
+   *  时的文件路径；未发生为 null */
   legacyRestored: string | null;
 }
 

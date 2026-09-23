@@ -201,6 +201,10 @@ export const api = {
   /** 删除 profile（移入 ~/.dsh-starter/deleted-profiles/ 可找回）；返回回收站路径 */
   deleteProfile: (name: string) =>
     invoke<string>("delete_profile", { name }),
+  /** 删除前风险预检：全局 settings.yaml 缺失且该 profile 补丁带着 0.1.7 导入的
+   *  全局配置时返回警示文本（可能销毁唯一完整副本），否则 null */
+  checkDeleteProfileRisk: (name: string) =>
+    invoke<string | null>("check_delete_profile_risk", { name }),
   /** 回收站：删除的 profile 可列出 / 还原 / 彻底删除 */
   listDeletedProfiles: () => invoke<DeletedProfile[]>("list_deleted_profiles"),
   restoreDeletedProfile: (dirName: string) =>
@@ -224,7 +228,7 @@ export const api = {
   dshReleaseNotes: (force = false) => invoke<DshRelease[]>("dsh_release_notes", { force }),
   readGlobalConfig: () => invoke<string>("read_global_config"),
   writeGlobalConfig: (content: string) => invoke<void>("write_global_config", { content }),
-  /** 只读查看被 0.1.7 导入存档的旧全局配置（settings.yaml.imported） */
+  /** 只读查看 0.1.7 导入改名留下的残段（settings.yaml.imported，仅含被拒绝的节） */
   readImportedSettings: () => invoke<string>("read_imported_settings"),
   /** 某个 profile 的配置归属（patch=0.1.7+ / legacy=旧版全局），驱动各 Tab 读写路由 */
   getProfileConfigMode: (profile: string) =>

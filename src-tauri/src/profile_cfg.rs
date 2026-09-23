@@ -871,12 +871,30 @@ pub fn global_config_path() -> PathBuf {
 }
 
 pub fn read_global_config() -> Result<String, String> {
-    std::fs::read_to_string(global_config_path()).map_err(|e| format!("读取失败: {e}"))
+    let path = global_config_path();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(s),
+        // settings.yaml 缺失多半是 0.1.7 导入改名的结果：先尝试还原再读，
+        // 否则「配置文件」页会拿到读取报错、用户转而新建空文件覆盖掉唯一存档。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if restore_legacy_settings().is_some() {
+                std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {e}"))
+            } else {
+                Err(format!("读取失败: {e}"))
+            }
+        }
+        Err(e) => Err(format!("读取失败: {e}")),
+    }
 }
 
 pub fn write_global_config(content: &str) -> Result<(), String> {
     validate_yaml(content)?;
     let path = global_config_path();
+    // 编辑期文件被 0.1.7 导入改名走：先还原，让下面的 backup() 把这份唯一存档
+    // 快照进 starter-bak，而不是直接以编辑内容覆盖掉磁盘上可能刚出现的文件。
+    if !path.exists() {
+        restore_legacy_settings();
+    }
     backup(&path)?;
     std::fs::write(&path, content).map_err(|e| format!("写入失败: {e}"))?;
     // settings.yaml 含 apiKeyEnv 等引用信息，只记路径与字节数
@@ -892,6 +910,9 @@ pub fn write_global_config(content: &str) -> Result<(), String> {
 /// 0.1.7 起 dsh 的插件设置与模型配置全部按 profile 存进该 profile 的 cordis.patch.yml；
 /// 旧全局 ~/.dsh/settings.yaml 只会被「首个以 ≥0.1.7 启动的 profile」导入一次并改名
 /// settings.yaml.imported（官方行为，见 @deepseek-ai/dsh-settings README）。
+/// **注意 .imported 不是完整存档**：被成功导入的节写进了该 profile 的 patch，
+/// .imported 里只剩**导入被拒绝**的残段。完整的全局配置快照在 starter-bak
+///（启动器每次保存 settings.yaml 前写的 settings.starter-bak）。
 pub const PATCH_CONFIG_MIN_VERSION: &str = "0.1.7";
 
 /// 该 dsh 版本是否已启用「按 profile 的 cordis.patch 配置体系」。
@@ -916,7 +937,8 @@ pub struct ProfileConfigMode {
     pub mode: &'static str,
     /// 判定所用的生效版本：绑定版本，缺省回落当前版本；可能为空
     pub version: String,
-    /// settings.yaml.imported 存在 = 全局配置已被导入过一次（旧版启动前需还原）
+    /// settings.yaml.imported 存在 = 全局配置已被 ≥0.1.7 导入接管（旧版启动/编辑前需还原；
+    /// 该文件只残留被拒绝的节，完整快照看 starter-bak）
     pub imported: bool,
 }
 
@@ -938,36 +960,141 @@ pub fn imported_settings_path() -> PathBuf {
     profiles::dsh_native_home().join("settings.yaml.imported")
 }
 
-/// 旧版 dsh（<0.1.7）只认 ~/.dsh/settings.yaml。若它已被 0.1.7 导入并改名
-///（settings.yaml 缺失、settings.yaml.imported 存在），复制还原一份供旧版启动。
-/// settings.yaml 已存在时 no-op（幂等，绝不覆盖）；.imported 本体保持不动，
-/// 已导入的 profile 不受影响。返回还原后的路径（未动作为 None）。
+/// 启动器每次覆写 settings.yaml 前留下的完整快照（`backup()` 的固定命名规则）
+pub fn global_config_backup_path() -> PathBuf {
+    global_config_path().with_file_name("settings.starter-bak")
+}
+
+/// 旧版 dsh（<0.1.7）只认 ~/.dsh/settings.yaml。若它已被 0.1.7 导入改名
+///（settings.yaml 缺失），复制还原一份供旧版启动 / 编辑。
+///
+/// 还原源按可信度排序：
+/// 1. `settings.starter-bak` —— 启动器保存前的**完整**配置（0.1.7 导入也是从这份
+///    内容迁走的全量来源）；
+/// 2. `settings.yaml.imported` —— dsh 导入后改名留下的**残段**（只含被拒绝的节），
+///    没有 bak 时聊胜于无。
+///
+/// settings.yaml 已存在时 no-op（幂等，绝不覆盖）；两个源文件都保持不动。
+/// 返回还原后的路径（未动作为 None）。
 pub fn restore_legacy_settings() -> Option<PathBuf> {
     let cfg = global_config_path();
-    let imported = imported_settings_path();
-    if cfg.exists() || !imported.is_file() {
+    if cfg.exists() {
         return None;
     }
-    match std::fs::copy(&imported, &cfg) {
-        Ok(_) => {
-            crate::diag::info(
-                "profile",
-                &format!(
-                    "旧版兼容：已从 settings.yaml.imported 还原全局配置 {}（{} 字节）",
-                    cfg.display(),
-                    std::fs::metadata(&cfg).map(|m| m.len()).unwrap_or(0)
-                ),
-            );
-            Some(cfg)
+    let sources = [
+        (global_config_backup_path(), "settings.starter-bak"),
+        (imported_settings_path(), "settings.yaml.imported（仅含导入被拒绝的节）"),
+    ];
+    for (src, label) in sources {
+        if !src.is_file() {
+            continue;
         }
-        Err(e) => {
-            crate::diag::warn(
-                "profile",
-                &format!("还原旧版全局配置失败：{}：{e}", imported.display()),
-            );
-            None
+        match std::fs::copy(&src, &cfg) {
+            Ok(_) => {
+                crate::diag::info(
+                    "profile",
+                    &format!(
+                        "旧版兼容：已从 {label} 还原全局配置 {}（{} 字节）",
+                        cfg.display(),
+                        std::fs::metadata(&cfg).map(|m| m.len()).unwrap_or(0)
+                    ),
+                );
+                return Some(cfg);
+            }
+            Err(e) => {
+                crate::diag::warn(
+                    "profile",
+                    &format!("还原旧版全局配置失败（源 {label}）：{}：{e}", src.display()),
+                );
+            }
         }
     }
+    None
+}
+
+/// 删除 profile 前的一次性风险检测：全局 settings.yaml 缺失（被 0.1.7 导入改名走）时，
+/// 若目标 profile 的补丁里存在与全局配置节**同名**的顶层条目，说明 0.1.7 迁移把全局配置
+/// 搬到了这个 profile —— 删掉它可能销毁唯一存活的完整副本（回收站可手工找回，但旧版
+/// dsh 不会自动还原）。返回 Some(中文警示) 供确认框升级措辞；无风险返回 None。
+///
+/// 节名来源：`settings.starter-bak` / `settings.yaml.imported` 的顶层键（都是普通
+/// YAML，可安全 parse）；两者都读不到时退回内置常见节名表。补丁带 `!!js` 自定义
+/// tag，**绝不 parse**，只做行级匹配；启动器自己写的接管块（`# dsh-starter:` 标记
+/// 行开头的 llm-pi-ai / agent-default-model）不算导入痕迹，跳过。
+pub fn delete_profile_warning(name: &str) -> Option<String> {
+    if global_config_path().exists() {
+        return None; // settings.yaml 还在，旧版照常读它，删 profile 不动全局配置
+    }
+    let mut sections: std::collections::BTreeSet<String> = Default::default();
+    for src in [global_config_backup_path(), imported_settings_path()] {
+        if let Ok(raw) = std::fs::read_to_string(&src) {
+            if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+                if let Some(m) = v.as_mapping() {
+                    for k in m.keys() {
+                        if let Some(s) = k.as_str() {
+                            sections.insert(s.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if sections.is_empty() {
+        // 没有任何可对照的存档（或存档解析失败）：退回已知的全局配置节名兜底
+        sections.extend(
+            [
+                "llm-pi-ai",
+                "agent-default-model",
+                "ui-settings-general",
+                "ui-theme",
+                "ui-chat",
+                "agent-presets",
+                "shell",
+            ]
+            .map(String::from),
+        );
+    }
+
+    let target = existing_profile_path(name.trim())?;
+    let patch = if target.is_dir() {
+        target.join("cordis.patch.yml")
+    } else {
+        target
+    };
+    let raw = std::fs::read_to_string(&patch).ok()?;
+
+    let mut hits: std::collections::BTreeSet<String> = Default::default();
+    let lines: Vec<&str> = raw.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        // 只认顶层条目的 id 行（列 0 的 `- id: <x>`），缩进的 insert 子项不算
+        let Some(rest) = line.strip_prefix("- id:") else {
+            continue;
+        };
+        let id = rest.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+        if !sections.contains(&id) {
+            continue;
+        }
+        // 启动器接管块：紧邻上一行是 `# dsh-starter:` 标记 → 这是启动器写的，不是导入痕迹
+        let preceded_by_marker = i
+            .checked_sub(1)
+            .map(|k| lines[k].trim_start().starts_with("# dsh-starter:"))
+            .unwrap_or(false);
+        if preceded_by_marker {
+            continue;
+        }
+        hits.insert(id);
+    }
+    if hits.is_empty() {
+        return None;
+    }
+    let hits = hits.into_iter().collect::<Vec<_>>().join(" / ");
+    Some(format!(
+        "注意：全局 ~/.dsh/settings.yaml 目前缺失（0.1.7 迁移把它导入改名成了 settings.yaml.imported），\
+         而本 profile 的补丁里含有从全局配置导入的 {hits} 等条目——删除后这些设置的唯一完整副本只在回收站\
+         （~/.dsh-starter/deleted-profiles/）里，旧版 dsh 不会自动找回。\
+         建议先在「配置文件」页恢复 settings.yaml（或改用其它 profile 承载迁移配置）再删除。\
+         仍要删除的话，原文件会移入回收站，可手动找回。"
+    ))
 }
 
 /// 生成一个 modelcfg 接管块的标记注释行（与 web-quick 标记同族，供整块替换时识别）
@@ -3513,8 +3640,8 @@ mod tests {
         std::env::remove_var("DSH_STARTER_HOME");
     }
 
-    /// 旧版启动前的全局配置还原：只在 settings.yaml 缺失且有 .imported 时复制一份，
-    /// 绝不覆盖已有文件，.imported 本体保持不动。
+    /// 旧版启动前的全局配置还原：只在 settings.yaml 缺失时有源可还才复制一份，
+    /// 绝不覆盖已有文件，两个还原源本体都保持不动。
     #[test]
     fn restore_legacy_settings_copies_only_when_missing() {
         let _env = crate::util::DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -3522,7 +3649,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::set_var("DSH_HOME", &tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let imported = "# 导入存档\nui-theme:\n  preference: dark\n";
+        let imported = "# 导入残段\nui-theme:\n  preference: dark\n";
         std::fs::write(imported_settings_path(), imported).unwrap();
 
         let restored = restore_legacy_settings().expect("缺 settings.yaml 时应还原");
@@ -3535,10 +3662,67 @@ mod tests {
         assert!(restore_legacy_settings().is_none());
         assert_eq!(std::fs::read_to_string(global_config_path()).unwrap(), "mine: 1\n");
 
-        // 无 .imported 存档：无事可做
+        // 还原源优先级：starter-bak（完整快照）> .imported（只剩被拒绝的节）
+        std::fs::remove_file(global_config_path()).unwrap();
+        std::fs::write(global_config_backup_path(), "full: bak\n").unwrap();
+        std::fs::write(imported_settings_path(), "remnant: imported\n").unwrap();
+        let restored = restore_legacy_settings().expect("两源齐备时应还原");
+        assert_eq!(std::fs::read_to_string(&restored).unwrap(), "full: bak\n");
+
+        // 无 bak → 退回 .imported
+        std::fs::remove_file(global_config_path()).unwrap();
+        std::fs::remove_file(global_config_backup_path()).unwrap();
+        let restored = restore_legacy_settings().expect("缺 bak 时应退回 .imported");
+        assert_eq!(std::fs::read_to_string(&restored).unwrap(), "remnant: imported\n");
+
+        // 无任何还原源：无事可做
         std::fs::remove_file(global_config_path()).unwrap();
         std::fs::remove_file(imported_settings_path()).unwrap();
         assert!(restore_legacy_settings().is_none());
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// 删除 profile 的全局配置风险检测：settings.yaml 缺失 + 目标补丁带同名导入节才警示；
+    /// 启动器自己写的 modelcfg 接管块（标记行开头）不算导入痕迹。
+    #[test]
+    fn delete_profile_warning_flags_imported_global_sections() {
+        let _env = crate::util::DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-delrisk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_root = tmp.join("profiles");
+        std::fs::create_dir_all(prof_root.join("v017")).unwrap();
+        std::fs::create_dir_all(prof_root.join("plain")).unwrap();
+        std::fs::write(
+            global_config_backup_path(),
+            "ui-theme:\n  preference: dark\nllm-pi-ai:\n  providers: {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            prof_root.join("v017").join("cordis.patch.yml"),
+            "- id: ui-theme\n  config:\n    preference: dark\n\
+             # dsh-starter: modelcfg llm-pi-ai（启动器管理）\n- id: llm-pi-ai\n  config:\n    providers: {}\n\
+             - id: webserver\n  config:\n    port: 5173\n",
+        )
+        .unwrap();
+        std::fs::write(
+            prof_root.join("plain").join("cordis.patch.yml"),
+            "- id: webserver\n  config:\n    port: 5174\n",
+        )
+        .unwrap();
+
+        // settings.yaml 缺失 + 补丁带导入节（ui-theme）→ 警示；marker 块不背锅
+        let warn = delete_profile_warning("v017").expect("应检出唯一副本风险");
+        assert!(warn.contains("ui-theme"), "{warn}");
+        assert!(!warn.contains("llm-pi-ai"), "启动器接管块不应算导入痕迹：{warn}");
+        // 补丁与全局节无关 → 无风险
+        assert!(delete_profile_warning("plain").is_none());
+
+        // settings.yaml 还在（旧版照常读它）→ 删除 profile 不动全局配置，不警示
+        std::fs::write(global_config_path(), "ui-theme:\n  preference: light\n").unwrap();
+        assert!(delete_profile_warning("v017").is_none());
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");

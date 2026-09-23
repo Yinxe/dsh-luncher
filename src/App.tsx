@@ -135,6 +135,8 @@ export default function App() {
   const [renameTarget, setRenameTarget] = useState<string | null>(null);
   /** 删除确认的目标 profile；null = 关闭 */
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  /** 删除前风险预检结果（0.1.7 导入的全局配置可能只存于该 profile 补丁），null = 无风险/未返回 */
+  const [deleteRisk, setDeleteRisk] = useState<string | null>(null);
   /** 回收站（删除的 profile 可还原 / 彻底删除） */
   const [trashOpen, setTrashOpen] = useState(false);
   /** 恢复模式创建确认 */
@@ -659,6 +661,20 @@ export default function App() {
     } catch (e) { addToast("err", `删除失败: ${e}`); }
   }, [deleteTarget, addToast, refreshProfiles, refreshInstances]);
 
+  // 打开删除确认时做一次风险预检：全局 settings.yaml 缺失且该 profile 补丁带着
+  // 0.1.7 导入的配置时，删除会销毁唯一完整副本——必须让用户先看到这句再决定。
+  useEffect(() => {
+    if (!deleteTarget) {
+      setDeleteRisk(null);
+      return;
+    }
+    let alive = true;
+    api.checkDeleteProfileRisk(deleteTarget)
+      .then((r) => { if (alive) setDeleteRisk(r); })
+      .catch(() => { if (alive) setDeleteRisk(null); });
+    return () => { alive = false; };
+  }, [deleteTarget]);
+
   const confirmCreateRecovery = useCallback(async () => {
     setRecoveryOpen(false);
     setRecoveryBusy(true);
@@ -744,9 +760,10 @@ export default function App() {
         addToast("err", `启动失败：profile「${profile}」没有返回实例信息，请重试`);
         return;
       }
-      // 旧版 dsh（<0.1.7）只认全局 settings.yaml：后端在拉起前把它从 .imported 还原了回来
+      // 旧版 dsh（<0.1.7）只认全局 settings.yaml：缺失时后端拉起前已自动还原
+      //（优先 starter-bak 完整快照，其次 .imported 残段；来源见 profile 诊断日志）
       if (res.legacyRestored) {
-        addToast("info", `旧版 dsh：全局配置已从 settings.yaml.imported 还原到 ${res.legacyRestored}`);
+        addToast("info", `旧版 dsh：已自动还原缺失的全局配置到 ${res.legacyRestored}`);
       }
       if (detached) {
         // 独立进程没有日志管道：先刷新实例列表把它带进「终端面板」，再选中并展开，
@@ -1974,6 +1991,12 @@ export default function App() {
               实例运行中会先被拒绝。
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {deleteRisk && (
+            <Alert variant="destructive">
+              <TriangleAlert />
+              <AlertDescription className="text-xs leading-relaxed">{deleteRisk}</AlertDescription>
+            </Alert>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction variant="destructive" onClick={confirmDeleteProfile}>

@@ -92,8 +92,10 @@ function ImportedSettingsDialog({
           </DialogTitle>
           <DialogDescription>
             旧全局配置在首次以 0.1.7+ 启动 profile 时被一次性导入该 profile 的
-            cordis.patch.yml，原文件改名为 settings.yaml.imported 存档。
-            被组合拒绝、没导入成功的节也留在这里——可在「配置文件」里手动搬进 patch 条目。
+            cordis.patch.yml，原文件改名为 settings.yaml.imported。
+            <span className="font-medium">注意：这里只剩被拒绝、没导入成功的节，不是完整存档</span>
+            ——完整快照在启动器每次保存前留下的 settings.starter-bak；
+            缺失的节可从这里手动搬进 patch 条目。
           </DialogDescription>
         </DialogHeader>
         {err ? (
