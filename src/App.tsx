@@ -1479,7 +1479,10 @@ export default function App() {
                注意：容器查询对自己不生效（@[60rem]:flex-row 若挂在 @container 同一元素上永远不匹配），
                所以外层只放 @container，flex 与断点类放内层。 */
             <div className="@container">
-            <div className="flex flex-col items-start gap-4 @[60rem]:flex-row">
+            {/* 窄屏 flex-col 时 items-start 会作用在水平轴上：子列按 max-content 定宽，
+                插件 ID 这类 nowrap 长行会把整卡撑出屏幕——交叉轴必须 stretch，
+                顶端对齐只在宽屏 flex-row（纵向交叉轴）下加回。 */}
+            <div className="flex flex-col gap-4 @[60rem]:flex-row @[60rem]:items-start">
               {/* 左列：实例列表（内容够宽时双栏并排；窄屏选中 profile 后隐藏，让位给全屏工作台） */}
               <div className={`min-w-0 grow space-y-3 @[60rem]:w-[480px] @[60rem]:shrink-0 @[60rem]:grow-0 ${selectedProfile ? "hidden @[60rem]:block" : ""}`}>
               <div className="flex items-center gap-2">
