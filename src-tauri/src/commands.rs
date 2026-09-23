@@ -2181,8 +2181,15 @@ fn loading_overlay_js(dark: bool) -> String {
     + '<div style="width:45%;height:100%;border-radius:9999px;background:{bar};animation:__dsl 1.15s ease-in-out infinite"></div></div>'
     + '<div>正在加载…</div>'
     + '<style>@keyframes __dsl{{0%{{transform:translateX(-110%)}}100%{{transform:translateX(330%)}}}}</style>';
-  function mount() {{ (document.body || document.documentElement).appendChild(o); }}
-  if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount, {{ once: true }});
+  // 立即挂到 documentElement：不能等 DOMContentLoaded——dsh 前端 bundle 很大且是同步脚本，
+  // DOMContentLoaded 要等它整个跑完，这期间页面白底已经先画出来了（用户看到的白屏就在这）。
+  // document-start 时 <html> 已存在，fixed 定位相对视口，body 还没解析出来也照样盖住。
+  function mount() {{
+    var host = document.body || document.documentElement;
+    if (host) host.appendChild(o);
+    else setTimeout(mount, 10);
+  }}
+  mount();
   var t0 = Date.now(), done = false;
   function hide() {{
     if (done) return; done = true;
