@@ -4,7 +4,7 @@ import {
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon,
   TriangleAlert, SlidersHorizontal, CopyPlus, Info, RotateCw, FileText, ScrollText,
   Pencil, Trash2, ShieldPlus, Rocket, Wand2,
-  Home, Package, KeyRound, BarChart3, Terminal, Monitor, Download,
+  Home, Package, KeyRound, BarChart3, Terminal, Monitor, Download, MessageSquare,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
@@ -1009,27 +1009,12 @@ export default function App() {
       { id: "nav-logs", group: "导航", label: "系统日志", icon: ScrollText, keywords: "log 排查 诊断 级别", run: () => navigate("logs") },
       {
         id: "open-web", group: "操作", label: "打开 DSH 主界面", icon: ExternalLink,
-        hint: web?.webUrl ?? "无运行实例", disabled: !web?.webUrl, keywords: "ui web",
+        disabled: !web?.webUrl, keywords: "ui web",
         run: () => web?.webUrl && openDshWeb(web.webUrl, undefined, web.profile),
       },
     ];
-    for (const p of profiles) {
-      const inst = instances.find((i) => i.profile === p.name && i.running);
-      const busy = startingProfile === p.name || restartingProfile != null;
-      cmds.push(
-        { id: `config-${p.name}`, group: "操作", label: `打开 ${p.name} 工作台`, icon: SlidersHorizontal, keywords: "profile 插件 模型 配置", run: () => { setSelectedProfile(p.name); navigate("profiles"); } },
-      );
-      if (inst) {
-        cmds.push(
-          { id: `restart-${p.name}`, group: "操作", label: `重启 ${p.name}`, icon: RotateCw, hint: "运行中", disabled: busy, keywords: "profile", run: () => void doRestartProfile(p.name) },
-          { id: `stop-${p.name}`, group: "操作", label: `停止 ${p.name}`, icon: Square, hint: "运行中", disabled: busy, keywords: "profile", run: () => void doStopInstance({ profile: p.name, pid: inst.pid }) },
-        );
-      } else {
-        cmds.push(
-          { id: `start-${p.name}`, group: "操作", label: `启动 ${p.name}`, icon: Play, disabled: busy, keywords: "profile 运行", run: () => void doStartProfile(p.name) },
-        );
-      }
-    }
+    // 运行控制（启动/停止/重启）与 per-profile「打开工作台」都不进命令面板：
+    // 动作有确认框与在途守卫，去「首页」或 Profiles 卡片上点，别在列表里堆一堆同名条目
     cmds.push(
       { id: "refresh-instances", group: "操作", label: "刷新实例列表", icon: RefreshCw, keywords: "实例", run: () => void refreshInstances() },
       { id: "refresh-profiles", group: "操作", label: "重扫 Profile 目录", icon: RefreshCw, keywords: "profile 扫描", run: () => void refreshProfiles() },
@@ -1046,8 +1031,8 @@ export default function App() {
     );
     return cmds;
   }, [
-    liveWebProcs, profiles, instances, startingProfile, restartingProfile, terminalOpen, theme,
-    navigate, openDshWeb, doStartProfile, doRestartProfile, doStopInstance,
+    liveWebProcs, terminalOpen, theme,
+    navigate, openDshWeb,
     refreshInstances, refreshProfiles, refreshRemote, doCheckUpdate, setTheme,
   ]);
 
@@ -1101,6 +1086,15 @@ export default function App() {
               <ExternalLink /> <span className="hidden lg:inline">打开 DSH 界面</span>
             </Button>
           )}
+          {/* DeepSeek 官方对话入口常驻顶栏：与首页卡片同一动作（应用内独立窗口，可多开） */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={doOpenDeepSeek}
+            title="打开 DeepSeek 官方对话（应用内独立窗口，每次点击新开一个窗口）"
+          >
+            <MessageSquare /> <span className="hidden lg:inline">打开 DeepSeek Chat</span>
+          </Button>
           <Button
             variant="ghost"
             size="icon"
@@ -1198,6 +1192,7 @@ export default function App() {
           {view === "quick" && (
             <QuickActionsView
               row={instanceRows.find((r) => r.profile === "web") ?? null}
+              env={env}
               activeVersion={settings.activeVersion}
               hasNode={!!env.node}
               hasInstalled={installed.length > 0}
@@ -1211,6 +1206,7 @@ export default function App() {
               onOpenDeepSeek={doOpenDeepSeek}
               onNavigate={navigate}
               onInitDsh={() => void doInitDsh()}
+              onConfigure={(p) => { setSelectedProfile(p); navigate("profiles"); }}
             />
           )}
 
@@ -1617,6 +1613,22 @@ export default function App() {
                                 也正是这条记录决定换版本启动时要不要先确认风险 */}
                             {!row.version && row.boundVersion ? ` · 上次 dsh ${row.boundVersion}` : ""}
                           </div>
+                          {/* 访问地址单独一行，点击即复制（长地址不再挤进状态行被截断） */}
+                          {row.webUrl && (
+                            <Button
+                              variant="link"
+                              size="xs"
+                              className="h-auto max-w-full justify-start truncate px-0 font-mono text-[11px] font-normal text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                              title={`点击复制访问地址：${row.webUrl}`}
+                              onClick={() => {
+                                navigator.clipboard.writeText(row.webUrl!)
+                                  .then(() => addToast("ok", `已复制访问地址：${row.webUrl}`))
+                                  .catch(() => addToast("err", "复制失败（剪贴板不可用），地址见按钮悬停提示"));
+                              }}
+                            >
+                              {row.webUrl}
+                            </Button>
+                          )}
                         </div>
                         {/* 无名实例（终端 `dsh web` 没带 --profile）没有对应 profile，不提供配置工作台 */}
                         {row.profile && (
