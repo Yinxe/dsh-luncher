@@ -35,9 +35,9 @@ interface Props {
   runningInstanceCount: number;
   /** 可升级的版本数 */
   upgradableCount: number;
-  /** 实例终端抽屉是否打开 */
+  /** 通用终端面板是否打开 */
   terminalOpen: boolean;
-  /** 打开/收起实例终端抽屉 */
+  /** 打开/收起通用终端面板 */
   onToggleTerminal: () => void;
   /** 检查启动器新版本（原顶栏按钮，收进仓库卡） */
   onCheckUpdate: () => void;
@@ -208,10 +208,10 @@ export default function AppSidebar({
           size="sm"
           variant={terminalOpen ? "secondary" : "outline"}
           className="mt-1.5 h-6 w-full gap-1 text-[10.5px]"
-          title="打开/收起实例终端"
+          title="打开/收起终端面板：实例日志与安装任务"
           onClick={onToggleTerminal}
         >
-          <Terminal className="size-3" /> 实例终端
+          <Terminal className="size-3" /> 终端
           {runningInstanceCount > 0 && (
             <span className="ml-0.5 rounded-full bg-emerald-500/15 px-1 font-mono text-[10px] text-emerald-600 dark:text-emerald-400">
               {runningInstanceCount}
@@ -470,7 +470,7 @@ export default function AppSidebar({
           <Button
             variant={terminalOpen ? "secondary" : "ghost"}
             size="icon-sm"
-            title="打开/收起实例终端"
+            title="打开/收起终端面板：实例日志与安装任务"
             onClick={onToggleTerminal}
           >
             <Terminal className="size-3.5" />

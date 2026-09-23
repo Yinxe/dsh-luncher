@@ -17,7 +17,7 @@ export type NavTier = "expanded" | "rail" | "drawer"
 export const NAV_EXPAND_MIN_WIDTH = 1024
 
 /** 订阅一条 media query，只在跨越断点时触发一次重渲染（比监听 resize 省得多） */
-function useMediaQuery(query: string): boolean {
+export function useMediaQuery(query: string): boolean {
   const subscribe = React.useCallback(
     (onChange: () => void) => {
       const mql = window.matchMedia(query)

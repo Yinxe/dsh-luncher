@@ -34,7 +34,8 @@ import StatsView from "./components/StatsView";
 import LogsView from "./components/LogsView";
 import ProfileWorkspace from "./components/ProfileWorkspace";
 import QuickActionsView from "./components/QuickActionsView";
-import ProcessSidePanel from "./components/ProcessSidePanel";
+import TerminalPanel from "./components/TerminalPanel";
+import { useTerminalInline } from "./hooks/use-terminal-host";
 import VersionRow from "./components/VersionRow";
 import SettingsDrawer from "./components/SettingsDrawer";
 import UpdateBanner from "./components/UpdateBanner";
@@ -46,7 +47,7 @@ import type {
   EnvironmentInfo, InstalledVersion, StarterUpdateStatus, ProcEntry,
   ProcExitEvent, ProcLogEvent, ProfileInfo, ProfileInstance, ProfileTarget,
   RegistryInfo, Settings as SettingsT, View, VersionChange, ProfileVersionInfo,
-  InstallFinishedEvent, RuntimeFinishedEvent,
+  InstallFinishedEvent, RuntimeFinishedEvent, TerminalTaskRef,
 } from "./types";
 
 /** 恢复模式 profile 名（与后端 profile_cfg::RECOVERY_PROFILE 保持一致） */
@@ -95,7 +96,10 @@ export default function App() {
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
   const [procs, setProcs] = useState<Record<number, ProcEntry>>({});
   const [activeProc, setActiveProc] = useState<number | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  /** 通用终端面板当前聚焦的任务；null = 未选（面板显示引导占位） */
+  const [terminalTask, setTerminalTask] = useState<TerminalTaskRef | null>(null);
+  const terminalInline = useTerminalInline();
   const runtimeBusy = useRef(false);
   const [instances, setInstances] = useState<ProfileInstance[]>([]);
   const [view, setView] = useState<View>("quick");
@@ -223,9 +227,9 @@ export default function App() {
     addToast(e.ok ? "ok" : "err", e.message);
   }, [addToast]);
   const {
-    installTask, nodeTask,
+    tasks: sysTasks, installTask, nodeTask,
     startInstall, startNode,
-    fail: failSystemTask,
+    fail: failSystemTask, clearFinished: clearFinishedSystemTasks,
   } = useTerminalJobs({ onInstallFinished, onRuntimeFinished });
 
   // ── 首次初始化（dsh 还没生成 $DSH_HOME 时） ────────────────
@@ -368,6 +372,8 @@ export default function App() {
       });
       if (hit) addToast("ok", `dsh「${e.profile}」启动成功，可点击「打开」进入主界面`);
       setActiveProc((a) => a ?? e.id);
+      // 面板还没有聚焦任何实例时，自动跟上新来的日志
+      setTerminalTask((cur) => (cur?.kind === "instance" ? cur : { kind: "instance", id: String(e.id) }));
     }));
     track(events.onProcExit?.((e: ProcExitEvent) => {
       const old = procsRef.current[e.id];
@@ -398,6 +404,8 @@ export default function App() {
   // ── 动作 ───────────────────────────────────
   const doInstall = useCallback(async (version: string, force: boolean) => {
     startInstall(version);
+    setTerminalTask({ kind: "dshInstall", id: version });
+    setTerminalOpen(true);
     try {
       await api.install(version, force);
     } catch (e) {
@@ -421,10 +429,36 @@ export default function App() {
     api.reveal(path).catch((e) => addToast("err", String(e)));
   }, [addToast]);
 
+  /** 面板任务选中：实例任务同步回 activeProc（导出/打开 Web 的闭包以它为键） */
+  const selectTerminalTask = useCallback((ref: TerminalTaskRef | null) => {
+    setTerminalTask(ref);
+    if (ref?.kind === "instance") setActiveProc(Number(ref.id));
+  }, []);
+  /** 清理面板里的全部已结束任务 */
+  const clearFinishedTerminalTasks = useCallback(() => {
+    setProcs((m) => {
+      const next = Object.fromEntries(Object.entries(m).filter(([, p]) => !p.exited)) as Record<number, ProcEntry>;
+      setActiveProc((a) => (a != null && next[a] ? a : (Object.values(next)[0]?.id ?? null)));
+      return next;
+    });
+    clearFinishedSystemTasks();
+    setTerminalTask((cur) => {
+      if (!cur) return cur;
+      if (cur.kind === "instance") {
+        const p = procsRef.current[Number(cur.id)];
+        return p && !p.exited ? cur : null;
+      }
+      const t = sysTasks.find((x) => x.kind === cur.kind && x.id === cur.id);
+      return t?.running ? cur : null;
+    });
+  }, [clearFinishedSystemTasks, sysTasks]);
+
   const doInstallRuntime = useCallback(async () => {
     if (runtimeBusy.current) return;
     runtimeBusy.current = true;
     startNode();
+    setTerminalTask({ kind: "nodeInstall", id: "node" });
+    setTerminalOpen(true);
     try {
       const msg = await api.installRuntime();
       addToast("ok", msg);
@@ -680,7 +714,8 @@ export default function App() {
         );
         await refreshInstances();
         setActiveProc(info.id);
-        setDrawerOpen(true);
+        setTerminalTask({ kind: "instance", id: String(info.id) });
+        setTerminalOpen(true);
       } else {
         setProcs((m) => ({
           ...m,
@@ -690,7 +725,8 @@ export default function App() {
           },
         }));
         setActiveProc(info.id);
-        setDrawerOpen(true);
+        setTerminalTask({ kind: "instance", id: String(info.id) });
+        setTerminalOpen(true);
         addToast("ok", `profile「${info.profile}」启动中（dsh ${info.version}，PID ${info.id}）`);
       }
       refreshInstances(); // 立即感知新实例，让「切换版本」锁定尽快生效（否则要等 3s 轮询）
@@ -957,8 +993,8 @@ export default function App() {
       { id: "refresh-remote", group: "操作", label: "刷新 dsh 版本清单", icon: Package, keywords: "远端 registry", run: () => void refreshRemote() },
       { id: "check-update", group: "操作", label: "检查启动器更新", icon: Download, keywords: "升级 新版本", run: () => void doCheckUpdate() },
       {
-        id: "toggle-terminal", group: "操作", label: drawerOpen ? "收起实例终端" : "打开实例终端", icon: Terminal,
-        keywords: "日志 抽屉", run: () => setDrawerOpen((v) => !v),
+        id: "toggle-terminal", group: "操作", label: terminalOpen ? "收起终端" : "打开终端", icon: Terminal,
+        keywords: "日志 面板 任务 安装 实例", run: () => setTerminalOpen((v) => !v),
       },
       { id: "open-settings", group: "操作", label: "打开设置", icon: SettingsIcon, keywords: "偏好", run: () => setShowSettings(true) },
       { id: "theme-dark", group: "外观", label: "深色模式", icon: Moon, hint: theme === "dark" ? "当前" : undefined, run: () => setTheme("dark") },
@@ -967,7 +1003,7 @@ export default function App() {
     );
     return cmds;
   }, [
-    liveWebProcs, profiles, instances, startingProfile, restartingProfile, drawerOpen, theme,
+    liveWebProcs, profiles, instances, startingProfile, restartingProfile, terminalOpen, theme,
     navigate, openDshWeb, doStartProfile, doRestartProfile, doStopInstance,
     refreshInstances, refreshProfiles, refreshRemote, doCheckUpdate, setTheme,
   ]);
@@ -994,8 +1030,8 @@ export default function App() {
         settings={settings}
         runningInstanceCount={runningInstanceCount}
         upgradableCount={upgradableCount}
-        terminalOpen={drawerOpen}
-        onToggleTerminal={() => setDrawerOpen((v) => !v)}
+        terminalOpen={terminalOpen}
+        onToggleTerminal={() => setTerminalOpen((v) => !v)}
         onCheckUpdate={doCheckUpdate}
         onToast={addToast}
       />
@@ -1022,6 +1058,15 @@ export default function App() {
               <ExternalLink /> <span className="hidden lg:inline">打开 DSH 界面</span>
             </Button>
           )}
+          <Button
+            variant="ghost"
+            size="icon"
+            title={terminalOpen ? "收起终端面板：实例日志与安装任务" : "打开终端面板：实例日志与安装任务"}
+            className={terminalOpen ? "bg-muted" : undefined}
+            onClick={() => setTerminalOpen((v) => !v)}
+          >
+            <Terminal className="h-4 w-4" />
+          </Button>
           <Button variant="ghost" size="icon" title="设置" onClick={() => setShowSettings(true)}>
             <SettingsIcon className="h-4 w-4" />
           </Button>
@@ -1089,11 +1134,13 @@ export default function App() {
           </Alert>
         )}
 
+        {/* 内容行：滚动内容区 + 通用终端右栏（宽屏并排占位；窄屏面板自渲染为 Sheet，不占列） */}
+        <div className="flex min-h-0 flex-1">
         {/* 内容区（key 随视图变化：切换时重新挂载并播放入场动画）
             超窄窗口收紧内边距，把横向空间尽量留给表格与表单 */}
         <div
           key={view}
-          className="min-h-0 flex-1 animate-in fade-in slide-in-from-bottom-2 overflow-y-auto p-3 duration-200 sm:p-4 lg:p-5"
+          className="min-h-0 min-w-0 flex-1 animate-in fade-in slide-in-from-bottom-2 overflow-y-auto p-3 duration-200 sm:p-4 lg:p-5"
         >
           {view === "quick" && (
             <QuickActionsView
@@ -1366,11 +1413,11 @@ export default function App() {
                 <span className="flex-1" />
                 <Button
                   size="sm"
-                  variant={drawerOpen ? "secondary" : "outline"}
-                  onClick={() => setDrawerOpen((v) => !v)}
-                  title="实例终端：查看各实例的实时日志与启停（子进程日志实时回传，独立进程读日志文件尾部）"
+                  variant={terminalOpen ? "secondary" : "outline"}
+                  onClick={() => setTerminalOpen((v) => !v)}
+                  title="终端：实例日志与插件/Node/dsh 安装任务统一在右侧面板显示"
                 >
-                  <Terminal /> 实例终端
+                  <Terminal /> 终端
                 </Button>
                 <Button
                   size="sm"
@@ -1725,6 +1772,29 @@ export default function App() {
           )}
         </div>
 
+          <TerminalPanel
+            open={terminalOpen}
+            inline={terminalInline}
+            onOpenChange={setTerminalOpen}
+            task={terminalTask}
+            onSelectTask={selectTerminalTask}
+            procs={panelProcs}
+            sysTasks={sysTasks}
+            onStop={doStopProc}
+            onReadLog={readInstanceLog}
+            onReveal={revealPath}
+            onOpenWeb={(u) => openDshWeb(u, undefined, activeProc != null ? procsRef.current[activeProc]?.profile : undefined)}
+            onExport={() => {
+              const p = activeProc != null ? procsRef.current[activeProc] : null;
+              if (!p) return;
+              api.exportProcLog(p.profile || "default", p.id, p.lines.join("\n"))
+                .then((path) => addToast("ok", `日志已导出：${path}`))
+                .catch((e) => addToast("err", `导出失败: ${e}`));
+            }}
+            onClearFinished={clearFinishedTerminalTasks}
+          />
+        </div>
+
         {/* dsh 更新日志：版本表里的「更新日志」按钮与工具栏按钮都从这里打开 */}
         <DshChangelogDialog
           open={notesVersion !== null}
@@ -1737,32 +1807,6 @@ export default function App() {
         {/* 全局命令面板（⌘K / Ctrl+K，侧栏也有入口按钮） */}
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />
       </SidebarInset>
-
-      <ProcessSidePanel
-        procs={panelProcs}
-        activeId={activeProc}
-        open={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        onSelect={setActiveProc}
-        onStop={doStopProc}
-        onReadLog={readInstanceLog}
-        onReveal={revealPath}
-        onOpenWeb={(u) => openDshWeb(u, undefined, activeProc != null ? procsRef.current[activeProc]?.profile : undefined)}
-        onExport={() => {
-          const p = activeProc != null ? procsRef.current[activeProc] : null;
-          if (!p) return;
-          api.exportProcLog(p.profile || "default", p.id, p.lines.join("\n"))
-            .then((path) => addToast("ok", `日志已导出：${path}`))
-            .catch((e) => addToast("err", `导出失败: ${e}`));
-        }}
-        onClearExited={() => {
-          const next = Object.fromEntries(
-            Object.entries(procsRef.current).filter(([, p]) => !p.exited)
-          ) as Record<number, ProcEntry>;
-          setProcs(next);
-          setActiveProc((a) => (a != null && next[a] ? a : (Object.values(next)[0]?.id ?? null)));
-        }}
-      />
 
       <SettingsDrawer
         open={showSettings}
