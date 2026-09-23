@@ -43,6 +43,7 @@ import AppSidebar from "./components/AppSidebar";
 import DshChangelogDialog from "./components/DshChangelogDialog";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { useTerminalJobs } from "./hooks/use-terminal-jobs";
+import { usePluginJobs } from "./hooks/use-plugin-jobs";
 import type {
   EnvironmentInfo, InstalledVersion, StarterUpdateStatus, ProcEntry,
   ProcExitEvent, ProcLogEvent, ProfileInfo, ProfileInstance, ProfileTarget,
@@ -231,6 +232,43 @@ export default function App() {
     startInstall, startNode,
     fail: failSystemTask, clearFinished: clearFinishedSystemTasks,
   } = useTerminalJobs({ onInstallFinished, onRuntimeFinished });
+
+  // ── 插件任务（安装/卸载/升级/clone）：原「插件页内置终端」的数据源上提到 App，
+  //    通用终端面板与插件页状态条共用同一份；任务结束后 PluginsTab 靠 tick 刷新列表 ──
+  const [pluginJobsTick, setPluginJobsTick] = useState(0);
+  const {
+    jobs: pluginJobs, activeId: pluginActiveId,
+    runningCount: pluginRunningCount, cancel: cancelPluginJob, clear: clearPluginJobs,
+  } = usePluginJobs({
+    onStarted: (e) => {
+      setTerminalTask({ kind: "plugin", id: String(e.jobId) });
+      setTerminalOpen(true);
+    },
+    onFinished: (e) => {
+      const tag = e.cancelled ? "已取消" : e.ok ? "完成" : "失败";
+      // 失败时优先显示对症建议（供应链策略 / 构建脚本 / 鉴权 / 404…），而不是笼统的「看终端」
+      const detail = e.ok ? "" : e.hint ? `：${e.hint.split("\n")[0]}` : "：在终端面板查看输出";
+      addToast(e.cancelled ? "info" : e.ok ? "ok" : "err", `${e.label} ${tag}${detail}`);
+      setPluginJobsTick((t) => t + 1);
+    },
+  });
+  /** 插件页「在终端中查看」：聚焦最近一个插件任务并打开面板 */
+  const openPluginTerminal = useCallback(() => {
+    const id = pluginActiveId ?? pluginJobs[0]?.id ?? null;
+    if (id != null) setTerminalTask({ kind: "plugin", id: String(id) });
+    setTerminalOpen(true);
+  }, [pluginActiveId, pluginJobs]);
+  const doRetryPluginJob = useCallback((jobId: number) => {
+    // 新任务开始时 onStarted 事件会把面板聚焦过去，这里只报个信
+    api.retryPluginJob(jobId)
+      .then(() => addToast("info", "已重试：输出见终端面板"))
+      .catch((e) => addToast("err", String(e)));
+  }, [addToast]);
+  const doApprovePluginBuilds = useCallback((jobId: number) => {
+    api.approvePluginBuilds(jobId)
+      .then(() => addToast("info", "已写入 allowBuilds，正在重跑（输出见终端面板）"))
+      .catch((e) => addToast("err", String(e)));
+  }, [addToast]);
 
   // ── 首次初始化（dsh 还没生成 $DSH_HOME 时） ────────────────
   // dsh 的数据目录是「第一次运行 dsh」才生成的；在那之前没有任何 profile，
@@ -442,16 +480,21 @@ export default function App() {
       return next;
     });
     clearFinishedSystemTasks();
+    clearPluginJobs();
     setTerminalTask((cur) => {
       if (!cur) return cur;
       if (cur.kind === "instance") {
         const p = procsRef.current[Number(cur.id)];
         return p && !p.exited ? cur : null;
       }
+      if (cur.kind === "plugin") {
+        const j = pluginJobs.find((x) => String(x.id) === cur.id);
+        return j?.running ? cur : null;
+      }
       const t = sysTasks.find((x) => x.kind === cur.kind && x.id === cur.id);
       return t?.running ? cur : null;
     });
-  }, [clearFinishedSystemTasks, sysTasks]);
+  }, [clearFinishedSystemTasks, clearPluginJobs, sysTasks, pluginJobs]);
 
   const doInstallRuntime = useCallback(async () => {
     if (runtimeBusy.current) return;
@@ -1749,6 +1792,9 @@ export default function App() {
                   target={profiles.find((p) => p.name === selectedProfile)?.target ?? "unknown"}
                   onToast={addToast}
                   onBack={selectedProfile ? () => setSelectedProfile(null) : undefined}
+                  pluginRunningCount={pluginRunningCount}
+                  pluginJobsTick={pluginJobsTick}
+                  onOpenPluginTerminal={openPluginTerminal}
                 />
               </div>
             </div>
@@ -1779,10 +1825,16 @@ export default function App() {
             task={terminalTask}
             onSelectTask={selectTerminalTask}
             procs={panelProcs}
+            pluginJobs={pluginJobs}
+            pluginProfile={selectedProfile ?? ""}
+            onCancelPluginJob={cancelPluginJob}
+            onRetryPluginJob={doRetryPluginJob}
+            onApprovePluginBuilds={doApprovePluginBuilds}
             sysTasks={sysTasks}
             onStop={doStopProc}
             onReadLog={readInstanceLog}
             onReveal={revealPath}
+            onToast={addToast}
             onOpenWeb={(u) => openDshWeb(u, undefined, activeProc != null ? procsRef.current[activeProc]?.profile : undefined)}
             onExport={() => {
               const p = activeProc != null ? procsRef.current[activeProc] : null;

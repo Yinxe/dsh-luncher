@@ -21,6 +21,10 @@ interface Props {
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
   /** 窄屏（工作台占满整页）返回实例列表；宽屏双栏时不显示 */
   onBack?: () => void;
+  /** 插件任务流（App 层 usePluginJobs）：透传给「插件」Tab 做 busy 锁/刷新/终端跳转 */
+  pluginRunningCount: number;
+  pluginJobsTick: number;
+  onOpenPluginTerminal: () => void;
 }
 
 const TAB_KEYS = ["quick", "models", "plugins", "files", "package"] as const;
@@ -70,7 +74,10 @@ function PackageTab({ profile }: { profile: string }) {
  * 各 Tab 据此读写 cordis.patch.yml 或全局 settings.yaml。Tab 首次打开才挂载，
  * 之后保持挂载（切 Tab 不丢未保存的编辑）。
  */
-export default function ProfileWorkspace({ profile, profiles, target, onToast, onBack }: Props) {
+export default function ProfileWorkspace({
+  profile, profiles, target, onToast, onBack,
+  pluginRunningCount, pluginJobsTick, onOpenPluginTerminal,
+}: Props) {
   const [mode, setMode] = useState<ProfileConfigMode | null>(null);
   const isWeb = target === "web";
   const [tab, setTab] = useState<TabKey>(() => (isWeb ? "quick" : "models"));
@@ -168,7 +175,13 @@ export default function ProfileWorkspace({ profile, profiles, target, onToast, o
             )}
             {visited.has("plugins") && (
               <div className={tab === "plugins" ? "" : "hidden"}>
-                <PluginsTab profile={profile} onToast={onToast} />
+                <PluginsTab
+                  profile={profile}
+                  onToast={onToast}
+                  pluginRunningCount={pluginRunningCount}
+                  pluginJobsTick={pluginJobsTick}
+                  onOpenPluginTerminal={onOpenPluginTerminal}
+                />
               </div>
             )}
             {visited.has("files") && (

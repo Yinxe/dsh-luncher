@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Cloud, FileArchive, GitBranch, Link2, PackageX, Plus, RefreshCw,
+  Cloud, FileArchive, GitBranch, Link2, Loader2, PackageX, Plus, RefreshCw,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,8 +12,6 @@ import {
 import { Switch } from "@/components/ui/switch";
 import ClonedReposCard from "@/components/ClonedReposCard";
 import InstallPluginDialog from "@/components/InstallPluginDialog";
-import PluginTerminal from "@/components/PluginTerminal";
-import { usePluginJobs } from "../hooks/use-plugin-jobs";
 import { api } from "../api";
 import type { ClonedPlugin, PluginUpdateInfo, ProfileDetail } from "../types";
 
@@ -21,6 +19,12 @@ interface Props {
   /** 工作台选中的 profile：本页所有操作只作用于它 */
   profile: string;
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
+  /** App 层 usePluginJobs 的运行中任务数（busy 锁与状态条数据源，终端面板已收走输出） */
+  pluginRunningCount: number;
+  /** 每次有插件任务结束 +1：触发本页 reload（原内置终端的 onFinished→reload） */
+  pluginJobsTick: number;
+  /** 「在终端中查看」：聚焦最近插件任务并打开右侧终端面板 */
+  onOpenPluginTerminal: () => void;
 }
 
 /** 来源徽标：决定「怎么更新」的视觉线索 */
@@ -53,10 +57,14 @@ function managedCloneName(u: PluginUpdateInfo | undefined): string | null {
 
 /**
  * 工作台「插件」Tab：profile 由外层工作台选定（props 注入），
- * bundle 启停、其他依赖、克隆仓库、内置终端、检查更新/升级都在这里。
+ * bundle 启停、其他依赖、克隆仓库、检查更新/升级都在这里。
+ * 安装/卸载/升级的实时输出统一进右侧「通用终端面板」（App 层持有任务流），
+ * 本页只在有任务时显示进度条 + 「在终端中查看」跳转。
  * cordis.patch.yml 的编辑统一在「配置文件」Tab，本页不再嵌一份编辑器。
  */
-export default function PluginsTab({ profile, onToast }: Props) {
+export default function PluginsTab({
+  profile, onToast, pluginRunningCount, pluginJobsTick, onOpenPluginTerminal,
+}: Props) {
   const [detail, setDetail] = useState<ProfileDetail | null>(null);
   const [reloadMode, setReloadMode] = useState<string>("live");
   const [bundleBusy, setBundleBusy] = useState(false);
@@ -94,23 +102,17 @@ export default function PluginsTab({ profile, onToast }: Props) {
     reload();
   }, [reload]);
 
-  // 插件任务流（内置终端数据源）；任务结束自动刷新插件列表
-  const { jobs, activeId, setActiveId, runningCount, cancel, clear } = usePluginJobs({
-    onFinished: (e) => {
-      const tag = e.cancelled ? "已取消" : e.ok ? "完成" : "失败";
-      // 失败时优先显示对症建议（供应链策略 / 构建脚本 / 鉴权 / 404…），而不是笼统的「看终端」
-      const detail = e.ok
-        ? ""
-        : e.hint
-        ? `：${e.hint.split("\n")[0]}`
-        : "：展开内置终端查看输出";
-      onToast(e.cancelled ? "info" : e.ok ? "ok" : "err", `${e.label} ${tag}${detail}`);
-      reload();
-    },
-  });
+  // 插件任务结束（App 层任务流 tick 递增）→ 刷新本页列表。
+  // 首次挂载时 reload 已由上面的 effect 跑过，这里只响应挂载后的增量。
+  const lastTickRef = useRef(pluginJobsTick);
+  useEffect(() => {
+    if (lastTickRef.current === pluginJobsTick) return;
+    lastTickRef.current = pluginJobsTick;
+    reload();
+  }, [pluginJobsTick, reload]);
 
   /** 有插件任务在跑或正在切换 bundle 时，禁用会互踩的操作 */
-  const busy = runningCount > 0 || bundleBusy;
+  const busy = pluginRunningCount > 0 || bundleBusy;
 
   const toggleBundle = useCallback(
     async (name: string, enabled: boolean) => {
@@ -138,7 +140,7 @@ export default function PluginsTab({ profile, onToast }: Props) {
     (name: string, cloneDir: string | null) => {
       api
         .pluginUninstall(profile, name, cloneDir)
-        .then(() => onToast("info", `已开始卸载 ${name}（输出见内置终端）`))
+        .then(() => onToast("info", `已开始卸载 ${name}（输出见终端面板）`))
         .catch((e) => onToast("err", String(e)));
     },
     [profile, onToast]
@@ -179,7 +181,7 @@ export default function PluginsTab({ profile, onToast }: Props) {
         .then(() =>
           onToast(
             "info",
-            `${mode === "upgrade" ? "升级" : "安装"} ${specs.length} 个包：输出见内置终端`
+            `${mode === "upgrade" ? "升级" : "安装"} ${specs.length} 个包：输出见终端面板`
           )
         )
         .catch((e) => onToast("err", String(e)));
@@ -195,7 +197,7 @@ export default function PluginsTab({ profile, onToast }: Props) {
     ) => {
       api
         .pluginCloneInstall(profile, input, accel)
-        .then(() => onToast("info", "已开始 clone + link 安装：进度见内置终端"))
+        .then(() => onToast("info", "已开始 clone + link 安装：进度见右侧终端面板"))
         .catch((e) => onToast("err", String(e)));
     },
     [profile, onToast]
@@ -207,7 +209,7 @@ export default function PluginsTab({ profile, onToast }: Props) {
       const name = repo.candidates.find((c) => c.path === subPath)?.name ?? repo.dirName;
       api
         .pluginPullUpdate(profile, name, repo.path, subPath, build)
-        .then(() => onToast("info", `已开始 git pull 更新 ${name}：输出见内置终端`))
+        .then(() => onToast("info", `已开始 git pull 更新 ${name}：输出见终端面板`))
         .catch((e) => onToast("err", String(e)));
     },
     [profile, onToast]
@@ -220,7 +222,7 @@ export default function PluginsTab({ profile, onToast }: Props) {
       if (u.updateKind === "git-pull" && u.cloneDir) {
         api
           .pluginPullUpdate(profile, u.name, u.cloneDir, u.subPath, u.libOk === false)
-          .then(() => onToast("info", `已开始 git pull 升级 ${u.name}：输出见内置终端`))
+          .then(() => onToast("info", `已开始 git pull 升级 ${u.name}：输出见终端面板`))
           .catch((e) => onToast("err", String(e)));
         return;
       }
@@ -301,34 +303,19 @@ export default function PluginsTab({ profile, onToast }: Props) {
         )}
       </div>
 
-      {/* 内置终端：安装/卸载/升级的实时输出 */}
-      <PluginTerminal
-        jobs={jobs}
-        activeId={activeId}
-        onSelect={setActiveId}
-        onCancel={cancel}
-        onClear={clear}
-        profile={profile}
-        onToast={onToast}
-        onRetry={(jobId) =>
-          api
-            .retryPluginJob(jobId)
-            .then((id) => {
-              setActiveId(id);
-              onToast("info", "已重试：输出见内置终端");
-            })
-            .catch((e) => onToast("err", String(e)))
-        }
-        onApproveBuilds={(jobId) =>
-          api
-            .approvePluginBuilds(jobId)
-            .then((id) => {
-              setActiveId(id);
-              onToast("info", "已写入 allowBuilds，正在重跑（输出见内置终端）");
-            })
-            .catch((e) => onToast("err", String(e)))
-        }
-      />
+      {/* 插件任务进行中：输出已统一到右侧通用终端面板，这里只留进度条与跳转 */}
+      {pluginRunningCount > 0 && (
+        <Card className="flex items-center gap-2 px-4 py-2.5 text-[12px]">
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-teal-500" />
+          <span className="min-w-0 truncate">
+            {pluginRunningCount} 个插件任务进行中…输出正流入右侧终端面板
+          </span>
+          <span className="flex-1" />
+          <Button size="sm" variant="outline" onClick={onOpenPluginTerminal}>
+            在终端中查看
+          </Button>
+        </Card>
+      )}
 
       <Card className="p-4">
         <div className="mb-2.5 flex flex-wrap items-center gap-2.5">
@@ -403,7 +390,7 @@ export default function PluginsTab({ profile, onToast }: Props) {
                 title={
                   b.official
                     ? `${b.name} 是 dsh 宿主自带的插件包，卸载会让这个 profile 起不来；要折腾请用「恢复模式」新建一个实例`
-                    : "通过官方 dsh plugin 命令卸载（remove），输出进内置终端"
+                    : "通过官方 dsh plugin 命令卸载（remove），输出进终端面板"
                 }
               >
                 卸载
@@ -505,7 +492,7 @@ export default function PluginsTab({ profile, onToast }: Props) {
             </AlertDialogTitle>
             <AlertDialogDescription>
               {pendingUninstall?.isBundle
-                ? `将执行 dsh plugin remove，从 profile「${profile}」同时移除 bundles 与依赖声明（本地 link 插件目录不会被删除）。输出会实时显示在内置终端。`
+                ? `将执行 dsh plugin remove，从 profile「${profile}」同时移除 bundles 与依赖声明（本地 link 插件目录不会被删除）。输出会实时显示在右侧终端面板。`
                 : `「${pendingUninstall?.name}」在 package.json 依赖中但未声明为插件 bundle，可能是误装或残留依赖。将从 profile「${profile}」中移除，其他插件若依赖它则会受影响。`}
             </AlertDialogDescription>
           </AlertDialogHeader>

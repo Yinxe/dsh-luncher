@@ -203,7 +203,7 @@ function effectiveGit(
 }
 
 /**
- * 插件的三种安装方式（全部由后端走官方 `dsh plugin` 命令，输出进内置终端）：
+ * 插件的三种安装方式（全部由后端走官方 `dsh plugin` 命令，输出进通用终端面板）：
  * 1. NPM 包 —— registry 搜索 / 精确规格；版本号可检测更新
  * 2. 链接直装 —— 本地 link 路径、仓库插件链接或 .tgz 直链；无版本渠道，仅手动重装
  * 3. Clone 仓库 + 本地 link —— 克隆到启动器目录，可 git pull 更新
@@ -348,7 +348,7 @@ export default function InstallPluginDialog({
             <span className="text-[10.5px] text-muted-foreground">只影响这个 profile</span>
           </div>
           <DialogDescription className="text-[11.5px] leading-relaxed">
-            全部通过官方 <span className="font-mono">dsh plugin add</span> 执行，输出实时显示在插件页的内置终端里。
+            全部通过官方 <span className="font-mono">dsh plugin add</span> 执行，输出实时显示在右侧终端面板里。
           </DialogDescription>
         </DialogHeader>
 

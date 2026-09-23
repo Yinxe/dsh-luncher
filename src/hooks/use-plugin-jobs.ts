@@ -17,8 +17,10 @@ export interface PluginJobsApi {
 }
 
 interface Options {
-  /** 某个任务结束时回调（用于刷新 profile 详情 / 提示） */
+  /** 某个任务结束时回调（用于刷新列表 / 提示） */
   onFinished?: (e: PluginJobEvent) => void;
+  /** 某个任务开始时回调（用于把终端面板聚焦到该任务） */
+  onStarted?: (e: PluginJobEvent) => void;
 }
 
 /** 把后端快照和本地实时状态按 id 合并。
@@ -58,7 +60,7 @@ function mergeJobs(prev: PluginJob[], list: PluginJob[]): PluginJob[] {
  * 插件任务流：挂载时拉一次后端快照（重挂载/切换视图后历史不丢），
  * 之后靠 plugin-log / plugin-job 事件增量更新。
  */
-export function usePluginJobs({ onFinished }: Options = {}): PluginJobsApi {
+export function usePluginJobs({ onFinished, onStarted }: Options = {}): PluginJobsApi {
   const [jobs, setJobs] = useState<PluginJob[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const pending = useRef<PluginLogEvent[]>([]);
@@ -66,6 +68,8 @@ export function usePluginJobs({ onFinished }: Options = {}): PluginJobsApi {
   const refreshSeq = useRef(0);
   const finishedRef = useRef(onFinished);
   finishedRef.current = onFinished;
+  const startedRef = useRef(onStarted);
+  startedRef.current = onStarted;
 
   const flush = useCallback(() => {
     timer.current = null;
@@ -168,8 +172,12 @@ export function usePluginJobs({ onFinished }: Options = {}): PluginJobsApi {
           return next;
         });
         // 新任务自动聚焦
-        if (e.running) setActiveId(e.jobId);
-        else finishedRef.current?.(e);
+        if (e.running) {
+          setActiveId(e.jobId);
+          startedRef.current?.(e);
+        } else {
+          finishedRef.current?.(e);
+        }
       })
       .then((u) => (alive ? unlisteners.push(u) : u()));
 
