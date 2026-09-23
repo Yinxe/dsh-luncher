@@ -32,6 +32,12 @@
   —— 与 `src-tauri/src/update_check.rs` 的 `R2_BASE`、`scripts/r2-manifest.mjs` 的固定键表必须保持一致。
   **换桶时四处同改**：两处 `R2_BASE`（客户端 + 下载页）与 `release.yml` 的 `R2_BUCKET` / `R2_PUBLIC_BASE`；
   只改一半会让客户端读到旧桶那份「陈旧但有效」的清单，判定「已是最新」而**静默卡死更新**（见 `docs/RELEASING.md`）。
+- **发布流水线脚本**（`scripts/`，纯 Node、零依赖）：`release.yml` 只负责装环境与调脚本，判断逻辑全在这里 ——
+  `release-gate.mjs`（版本门禁）、`release-notes.mjs`（CHANGELOG 唯一来源）、`publish-release.mjs`（认领本版本草稿 →
+  资产门禁 → 补 git tag → 转正式 → 回查）、`sync-r2.mjs`（拉全部资产 + 改清单 + 出 upload.tsv）、`verify-r2.mjs`（公网自检），
+  共用 `lib/gh.mjs`。**铁律：读 release 资产一律先拿 `releaseId`、再走 `/releases/<id>/assets` 专用端点** ——
+  `releases/tags/*` 与列表内嵌 assets 在转正式后会长时间返回滞后的空副本（0.3.1 两次 publish-r2 死因），
+  `gh release download` / `gh release view` 都走滞后接口，流水线里禁止再用。
 - **文档**：`README.md`（面向用户的能力与配置）、`CHANGELOG.md`（**发布说明唯一来源**）、
   `docs/RELEASING.md`（发版手册）、`docs/releases/`（旧版说明归档，生成物）。
 

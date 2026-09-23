@@ -1,21 +1,33 @@
 name: 发布
 
 # 官方模板：https://v2.tauri.app/distribute/pipelines/github
-# 在原模板上改了四处，代码里都标了 ★：
+# 在原模板上改了五处，代码里都标了 ★：
 #   ★1 触发方式：push 到 main（平时在 dev 开发，合进 main 即发版）+ 手动触发
 #   ★2 注入签名密钥：否则产物没有 .sig、也不会生成 latest.json
 #   ★3 发布说明取自 CHANGELOG.md：本版本段落缺失 / 三处版本号不一致就直接失败；
 #      正文会由 tauri-action 写进 latest.json 的 notes → 客户端「发现新版本」直接展示
 #   ★4 末尾一个作业：把停在 Draft 的 release 转正式，发布前再按 CHANGELOG 刷一遍正文
+#   ★5 发布逻辑全部抽进 scripts/*.mjs（release-gate / publish-release / sync-r2 / verify-r2），
+#      本文件只留「装环境 + 调脚本 + aws 上传」。踩过的坑都写在脚本头部注释里：
+#      releases/tags 接口的滞后读副本会吞资产（gh release download 因此连挂两轮），
+#      脚本一律按 release id 走 /releases/<id>/assets 专用端点。
 #
 # 发版流程：CHANGELOG.md 加 ## [新版本号] - 日期 段落（写清用户可见变化）
 # → 三处版本号一起改（src-tauri/tauri.conf.json、src-tauri/Cargo.toml、package.json）
 # → npm run notes:archive 生成归档快照 → 合进 main → 完事。
 # 版本号没改就推 main 也不会白跑：门禁会跳过，不会重复发版。
+#
+# 手动触发带 force_r2=true：不重新打包，认领**已发布**的 v<当前版本> 只做 R2 全量补传
+# （GitHub 发好了但 R2 停在旧版时用，替代 docs/RELEASING.md 第 7 节的手工流程）。
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      force_r2:
+        description: 只补 R2 同步（不重新打包/发布，要求当前版本已正式发布）
+        type: boolean
+        default: false
 
 jobs:
   publish-tauri:
@@ -38,22 +50,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # 版本号没变就别白跑 7 分钟：已经正式发布过就跳过这一步之后的动作
+      # 版本号没变（或 force_r2 纯补传）就别白跑 7 分钟打包：门禁直接 skip
       - name: 该版本是否已发布
         id: gate
         shell: bash          # Windows runner 默认是 PowerShell，这里必须显式指定
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          V=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          HIT=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            --jq ".[] | select(.tag_name==\"v$V\" and .draft==false) | .tag_name")
-          if [ -n "$HIT" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::v$V 已经发布过了，本次跳过。发新版本请先改 version"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          FORCE_R2: ${{ inputs.force_r2 }}
+        run: node scripts/release-gate.mjs
 
       - name: setup node
         if: steps.gate.outputs.skip != 'true'
@@ -62,10 +66,8 @@ jobs:
           node-version: lts/*
           cache: npm
 
-      # ★3 发布说明门禁 + 提取。CHANGELOG.md 是唯一来源：
-      # - 三处版本号不一致 → 失败
-      # - 本版本在 CHANGELOG 里没有段落 / 段落里没有任何「- 」条目 → 失败
-      # 这样就不会再发出去「Windows：.exe / .msi」这种没有信息量的说明。
+      # ★3 发布说明门禁 + 提取（详见 scripts/release-notes.mjs）：
+      # 三处版本号不一致 / 本版本在 CHANGELOG 没段落 / 段落没有「- 」条目 → 直接失败
       - name: 读取本版本发布说明（CHANGELOG.md）
         id: notes
         if: steps.gate.outputs.skip != 'true'
@@ -91,42 +93,22 @@ jobs:
 
       # 缓存 Rust 依赖与 target/：这是整个发版最贵的一步 —— 冷缓存下 tauri-action
       # 要现编 500 多个 crate（实测 Windows 620s / Linux 492s，占整作业 90%+）。
-      # 三端并行，所以墙钟时间 = 最慢的那个平台。
       # workspaces 必须写成 `src-tauri -> target`：本仓库的 Cargo.toml 在子目录里，
       # 用默认值会找不到 target 目录、缓存等于没开。
-      # 注意：GitHub 的缓存 7 天没被访问就会被清掉，发版间隔超过一周时这里可能仍然
-      # 是冷启动（.github/workflows 里也别指望它永远命中）。
+      # GitHub 的缓存 7 天没被访问就会被清掉，发版间隔超过一周时这里可能仍是冷启动
+      #（配套的 cache-warm.yml 每周作业专门刷新这份缓存的 TTL）。
       - name: 缓存 Rust 构建
         if: steps.gate.outputs.skip != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: 'src-tauri -> target'
-          # 与 .github/workflows/cache-warm.yml 同名：那个每周作业只恢复、不保存，
-          # 专门刷新 GitHub 缓存「7 天不访问即清」的 TTL（本仓库只有真发版才会走到
-          # 构建步骤，发版间隔超过一周时缓存必然过期、又回到冷编译）。
           shared-key: tauri-release
           # save-if 保持默认（成功才存），避免存下坏缓存
           cache-on-failure: false
 
-      # AppImage 打包要用的 5 个工具（AppRun-x86_64、linuxdeploy-*.AppImage、
-      # linuxdeploy-plugin-gtk/gstreamer.sh、linuxdeploy-plugin-appimage.AppImage，共约 36MB）。
-      # tauri-bundler 是「文件不存在才下载」（linuxdeploy.rs 的 prepare_tools），所以日志里
-      # 那串 Downloading 只在缓存缺失时出现 —— 恢复这份目录就等于跳过它。
-      # 默认位置是 `dirs::cache_dir()/tauri`，即 ~/.cache/tauri。
-      #
-      # 为什么不改成 tauri.conf.json 的 `bundle.useLocalToolsDir: true`（工具落到 target/.tauri）：
-      # rust-cache 保存缓存前会执行 cleanTargetDir，把 target 下**非 profile 目录里的散落文件**
-      # 全部删掉（只保留 build / .fingerprint / deps 及其依赖产物）。工具正好是目录里的散落文件，
-      # 会在「存缓存」那一刻被清空 —— 配置看起来生效，实际每次照旧重下，且没有任何报错。
-      # 所以必须放在 target 之外，独立成一份缓存。
-      #
-      # 为什么不直接塞进上面 rust-cache 那份（它的 cache-directories 输入）：
-      # rust-cache 的条目**不可覆盖** —— 恢复命中原 key 时它会直接跳过保存（save.ts 的
-      # isCacheUpToDate），所以往已有条目里加新路径要等下一次依赖/rustc 变更才会带上，
-      # 更新 key 之前这条路径一直进不了缓存。独立 key 才能第一次构建就存下来。
-      #
-      # key 固定：这 5 个文件基本没有版本概念（linuxdeploy 是 continuous、AppRun 来自 apprun-old），
-      # 文件名写死在 bundler 里，缺哪个下哪个，所以陈旧缓存不会出错；要强制重下就把 -v1 改成 -v2。
+      # AppImage 打包要用的 5 个工具（约 36MB），tauri-bundler「文件不存在才下载」，
+      # 默认位置 ~/.cache/tauri。为什么独立成一份缓存（不放 target/.tauri、
+      # 不放 rust-cache 的 cache-directories）见 git 历史里这段的长注释。
       - name: 缓存 Tauri 打包工具（AppImage，仅 Linux）
         if: matrix.platform == 'ubuntu-22.04' && steps.gate.outputs.skip != 'true'
         uses: actions/cache@v4
@@ -189,64 +171,32 @@ jobs:
   # 但 releases/latest 只认「非草稿 + 非预发布」，停在草稿或误勾 pre-release
   # 都会让客户端一直「检查不到更新」，所以这里自动转正式。
   # 之所以必须先草稿：三个平台是并发跑的，直接发布会让先跑完的那个把
-  # release 发出去，另外两个找不到草稿就去创建 → 422 already_exists，
-  # 结果整个平台的产物都缺失。
+  # release 发出去，另外两个找不到草稿就去创建 → 422 already_exists。
+  #
+  # 全部判断逻辑在 scripts/publish-release.mjs（为何按 id 读资产、如何认领草稿、
+  # 为何转正式前先建 git tag —— 注释都在脚本头部）。它把 releaseId 输出给
+  # publish-r2，让下游完全不碰滞后的 tag 接口。
   publish:
     needs: [publish-tauri, check]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
-    # 供 publish-r2 判断「这一轮到底有没有真的发版」：版本号没变时这里什么都没发，
-    # 再跑一遍 R2 同步纯属白下载白上传 118MB（还会把手工换过的缓存指纹改回版本号）。
+    # released：这一轮到底有没有真的发版（force_r2 时是「认领已发布」）；
+    # releaseId：publish-r2 读资产的唯一凭据。版本号没变时 released=false，下游全跳过。
     outputs:
       released: ${{ steps.release.outputs.released }}
+      releaseId: ${{ steps.release.outputs.releaseId }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
 
-      # 发布前统一按 CHANGELOG 刷一遍正文：草稿可能由任一平台先创建，
-      # 这样 Release 页面与客户端看到的说明一定一致。
-      # 草稿的 tag 可能是 tauri-action 生成的占位 `untagged-<sha>`（草稿允许无 tag），
-      # 直接转正式会留下没有 git tag 的 release（v0.1.3 就这样踩过，无法按 tag 溯源），
-      # 所以发布前先建真实 tag（打在草稿的 target commit 上），再把 release 指过去。
       - name: 刷正文、补 tag 并发布
         id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          V=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          # 只认**本版本**的草稿：原先取「列表里最新的任意草稿」，多版本草稿并存时
-          # 会把不相干的（可能没有资产的）草稿转正式 —— 0.3.1 首发就这样发布了一个
-          # 零资产的 Release（三端产物其实传上了草稿，转正式那一刻资产却是空的）。
-          RID=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            --jq "[.[] | select(.draft and .tag_name==\"v$V\")][0].id // empty")
-          if [ -z "$RID" ]; then
-            echo "没有草稿（版本号未变时就是这样），结束"
-            echo "released=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # 资产门禁：转正式前草稿必须带齐产物（latest.json + 各平台安装包，完整是 14 个，
-          # 这里按 ≥10 且不缺 latest.json 判），否则**拒绝发布**并红字报错。
-          # 零资产的 Release 一旦转正式：客户端「检查更新」拿不到任何包，R2 同步也会
-          # 在 gh release download 处扑空 —— 宁可 CI 红，不可发坏。
-          gh api "repos/$GITHUB_REPOSITORY/releases/$RID/assets?per_page=100" \
-            --jq 'if (length >= 10 and (map(.name) | index("latest.json"))) then "草稿资产齐备（\(length) 个）"
-                  else error("草稿 v$V 资产不完整（\(length) 个，latest.json \(map(.name) | if index("latest.json") then "在" else "缺" end)），拒绝转正式") end'
-          node scripts/release-notes.mjs --check > release-notes.md
-          RELEASE=$(gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RID" \
-            -F body="$(cat release-notes.md)")
-          TAG=$(jq -r .tag_name <<<"$RELEASE")
-          SHA=$(jq -r .target_commitish <<<"$RELEASE")
-          if [[ "$TAG" == untagged-* ]]; then
-            REAL="v$(node -p "require('./src-tauri/tauri.conf.json').version")"
-            gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/$REAL" >/dev/null 2>&1 \
-              || gh api repos/"$GITHUB_REPOSITORY"/git/refs \
-                   -f ref="refs/tags/$REAL" -f sha="$SHA" >/dev/null
-            RELEASE=$(gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RID" -F tag_name="$REAL")
-          fi
-          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RID" \
-            -F draft=false -F prerelease=false \
-            --jq '"已发布 \(.tag_name)  draft=\(.draft)  prerelease=\(.prerelease)"'
-          echo "released=true" >> "$GITHUB_OUTPUT"
+          node scripts/publish-release.mjs \
+            ${{ inputs.force_r2 == true && '--adopt-published' || '' }}
 
   # ★5 把发布产物同步到自建更新源（Cloudflare R2）
   #
@@ -254,13 +204,13 @@ jobs:
   # 实测国内直连（不走代理）拉 81MB 的 AppImage：GitHub release 下载返回 000（连不上），
   # 自建源 200、约 3.3MB/s —— 自建源的价值首先是「能用」，其次才是快。
   #
-  # 只在这一轮真的发布了新版本时才跑（版本号没变推 main → publish 是空跑 → 这里也跳过，
-  # 不然每次推 main 都要白下载白上传 118MB）。
-  # 未配置 R2 secrets 时整个作业自动跳过（打一条 warning），不影响发版。
-  # 需要的 secrets（仓库 Settings → Secrets and variables → Actions）：
-  #   R2_ACCOUNT_ID        Cloudflare 账号 ID
-  #   R2_ACCESS_KEY_ID     R2 API Token 的 Access Key ID
-  #   R2_SECRET_ACCESS_KEY R2 API Token 的 Secret Access Key
+  # 同步范围（0.3.1 起）：**GitHub Release 的全部资产 1:1 镜像**到
+  #   releases/v<版本>/<原文件名>（长缓存），外加更新器/下载页要的固定键
+  #   latest/<稳定键>?v=<版本> 与桶根 latest.json（no-cache）。
+  #
+  # 只在这一轮真的发布了新版本（或 force_r2）时才跑；未配置 R2 secrets 时整个作业
+  # 自动跳过（打一条 warning），不影响发版。需要的 secrets：
+  #   R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY（见 docs/RELEASING.md 第 1 节）
   publish-r2:
     needs: publish
     runs-on: ubuntu-22.04
@@ -270,12 +220,16 @@ jobs:
       # `src-tauri/src/update_check.rs` 的 R2_BASE、`site/src/lib/release.ts` 的 R2_BASE。
       # 只换一半是最坏情况：清单传进新桶、客户端仍在读旧桶，而旧桶那份陈旧清单依然「有效」
       # → 客户端判定「已是最新」，连 GitHub 兜底都走不到，等于静默卡死更新。
-      # 另：CI 用的 R2 API Token 必须把桶加进 Scope，否则上传 403（见 docs/RELEASING.md 第 1 节）。
+      # 另：CI 用的 R2 API Token 必须把桶加进 Scope，否则上传 403。
       R2_BUCKET: dsh-starter-release
       R2_PUBLIC_BASE: https://pub-576ca711d9cf4cfe96b58195dfe6ce81.r2.dev
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
     steps:
       - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
 
       - name: 是否配置了 R2
         id: cfg
@@ -289,55 +243,44 @@ jobs:
             echo "::warning::没有配置 R2_ACCESS_KEY_ID，跳过自建源同步 —— 注意：客户端默认走 R2，R2 清单会停在旧版本，需要手动补传（见 docs/RELEASING.md 第 7 节）"
           fi
 
-      - name: 下载本次发布的产物
+      # 拉**全部**资产 + 改写清单 + 生成完整上传清单（对象键已含 latest/ 与 releases/ 前缀）。
+      # 按 publish 给的 releaseId 读资产，从根上绕开 gh release download 的滞后副本坑。
+      - name: 拉取产物并生成上传清单
         if: steps.cfg.outputs.ready == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.publish.outputs.tag }}
         run: |
-          TAG="v$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
-          mkdir -p r2-upload
-          gh release download "$TAG" --dir r2-upload --clobber
+          node scripts/sync-r2.mjs \
+            --dir r2-upload \
+            --version "${VERSION#v}" \
+            --release-id "${{ needs.publish.outputs.releaseId }}"
           ls -la r2-upload | head -20
 
-      - name: 生成自建源清单（并把下载地址改写到 R2）
-        if: steps.cfg.outputs.ready == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view "$TAG" --json assets > r2-upload/assets.json
-          node scripts/r2-manifest.mjs \
-            --in r2-upload/latest.json \
-            --assets-map r2-upload/assets.json \
-            --check-dir r2-upload \
-            --base "$R2_PUBLIC_BASE" \
-            --list-files r2-upload/upload.tsv \
-            --out r2-upload/latest.json
-
-      - name: 上传到 R2（固定键覆盖，短缓存）
+      - name: 上传到 R2（固定键覆盖 + 全资产镜像，长缓存）
         if: steps.cfg.outputs.ready == 'true'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          # 清单里的地址是固定键（<base>/latest/<平台>.扩展名）+ 版本指纹 ?v=<版本>：
-          # 路径对人始终是「latest」，对 CDN 却是每个版本一个新对象 ——
-          # 所以对象可以放心用 immutable 长缓存（下载快），也不会下到与签名不符的旧包。
-          # 每次发布覆盖同名对象，桶里永远只有一份「当前最新」，不需要清理步骤。
-          #
-          # 固定键的副作用是「文件名丢了」：人类从直链下载时，浏览器会拿键的最后一段
-          # 当保存名，于是拿到的是 windows-x64-setup.exe（没版本、认不出是谁的包）。
-          # 所以每个对象都要带上 Content-Disposition —— 第三个字段就是脚本算好的
-          # 「attachment; filename="原始资产名"」。更新器不看这个头（它按文件头魔数
-          # 判类型、自己拼临时文件名），这个头纯粹是给人看的。
-          while IFS=$'\t' read -r local key disposition; do
+          # 两类对象键（upload.tsv 第 2 列，都是完整路径）：
+          # - latest/<稳定键>?… 更新器读的固定键：路径不带版本号、每次发布覆盖同名对象，
+          #   清单里的 ?v=<版本> 是缓存指纹 —— 对象可 immutable 长缓存，也不会下到与
+          #   签名不符的旧包；Content-Disposition 把「固定键丢了文件名」补回来
+          #   （人类直链下载拿到的还是 DSH.Starter_0.3.1_… 而不是 windows-x64-setup.exe）。
+          # - releases/v<版本>/<原文件名> GitHub 资产的完整镜像：文件名天然带版本，
+          #   不需要 disposition（tsv 里是 "-"），断 GitHub 时按原名直取。
+          # 桶里 latest/ 永远只有一份「当前最新」；releases/ 每个版本一份，不需要清理步骤。
+          while IFS=$'\t' read -r local key cd; do
             [ -z "$local" ] && continue
-            echo "→ latest/$key   (← $local, 下载名 $local)"
-            aws s3 cp "r2-upload/$local" "s3://$R2_BUCKET/latest/$key" \
+            extra=()
+            [ "$cd" != "-" ] && extra+=(--content-disposition "$cd")
+            echo "→ $key   (← $local)"
+            aws s3 cp "r2-upload/$local" "s3://$R2_BUCKET/$key" \
               --endpoint-url "$R2_ENDPOINT" \
               --content-type application/octet-stream \
-              --content-disposition "$disposition" \
+              "${extra[@]}" \
               --cache-control "public, max-age=31536000, immutable" \
               --no-progress
           done < r2-upload/upload.tsv
@@ -347,42 +290,11 @@ jobs:
             --content-type application/json \
             --cache-control "no-cache, max-age=0" \
             --no-progress
-          echo "--- 桶内容（应只有 latest.json + latest/ 下的固定键）---"
+          echo "--- 桶内容（latest.json + latest/ 固定键 + releases/v*/ 镜像）---"
           aws s3 ls "s3://$R2_BUCKET/" --endpoint-url "$R2_ENDPOINT"
           aws s3 ls "s3://$R2_BUCKET/latest/" --endpoint-url "$R2_ENDPOINT"
+          aws s3 ls "s3://$R2_BUCKET/releases/" --endpoint-url "$R2_ENDPOINT"
 
-      - name: 自检（公网地址能取到清单、指向 R2、且下载文件名没丢）
+      - name: 自检（清单版本与地址、全部对象公网可取、下载文件名没丢）
         if: steps.cfg.outputs.ready == 'true'
-        run: |
-          curl -fsS --max-time 30 "$R2_PUBLIC_BASE/latest.json" -o /tmp/r2-latest.json
-          node -e '
-            (async () => {
-              const fs = require("fs");
-              const m = JSON.parse(fs.readFileSync("/tmp/r2-latest.json", "utf8"));
-              const base = process.env.R2_PUBLIC_BASE;
-              const platforms = Object.entries(m.platforms ?? {});
-              if (!platforms.length) throw new Error("清单里没有平台键");
-              // upload.tsv: 本地文件名 <TAB> R2 键 <TAB> Content-Disposition
-              const tsv = fs.readFileSync("r2-upload/upload.tsv", "utf8").trim().split("\n");
-              const wantName = new Map(tsv.map((line) => {
-                const [local, key] = line.split("\t");
-                return [key, local];
-              }));
-              const byUrl = new Map();
-              for (const [k, v] of platforms) {
-                if (!v.url.startsWith(base + "/latest/")) throw new Error(`${k} 的地址不是固定键: ${v.url}`);
-                byUrl.set(v.url, decodeURIComponent(v.url.split("?")[0].split("/").pop()));
-              }
-              for (const [url, key] of byUrl) {
-                const res = await fetch(url, { method: "HEAD" });
-                if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
-                const cd = res.headers.get("content-disposition") ?? "";
-                const name = wantName.get(key) ?? key;
-                if (!cd.includes(`filename="${name}"`)) {
-                  throw new Error(`${key} 的 Content-Disposition 里没有原始文件名 ${name}（实际: ${cd || "缺失"})`);
-                }
-              }
-              console.log(`✔ 自建源清单 version=${m.version}，${platforms.length} 个平台键全部指向 ${base}`);
-              console.log(`✔ ${byUrl.size} 个对象都能取到，且下载文件名保留原始资产名`);
-            })().catch((e) => { console.error(`✖ 自检失败：${e.message}`); process.exit(1); });
-          '
+        run: node scripts/verify-r2.mjs --dir r2-upload --version "${{ needs.publish.outputs.tag }}"

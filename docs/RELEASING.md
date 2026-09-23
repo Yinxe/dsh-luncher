@@ -234,42 +234,52 @@ curl -sL https://github.com/Yinxe/dsh-starter/releases/latest/download/latest.js
 ### 每次发布自动发生什么
 
 `publish-r2` 作业（`needs: publish`，**只在这一轮真的发布了新版本时才跑**；版本号没变就推 main
-属于空跑，整个作业会跟着跳过，不会白下载白上传 118MB）：
+属于空跑，整个作业会跟着跳过，不会白下载白上传 118MB）。0.3.1 起重写为脚本，全部逻辑在
+`scripts/` 里（为什么不用 `gh release download`：见下）：
 
-1. `gh release download` 拉本次发布的全部资产；
-2. `node scripts/r2-manifest.mjs` 把 `latest.json` 里的下载地址从 GitHub 资产 API
+1. `node scripts/sync-r2.mjs --dir r2-upload --version <X.Y.Z> --release-id <id>`：
+   按 publish 作业输出的 **releaseId** 走 `/releases/<id>/assets` 专用端点轮询并下载
+   **本次发布的全部资产**。⚠️ 绝不走 `gh release download` / `releases/tags/*`：草稿转正式后
+   这两个接口会长时间返回**滞后的空副本**（0.3.1 连挂两轮的死因，实测 1 小时+ 仍报 0 资产，
+   而 id 端点始终是 14 个）；
+2. sync-r2 内部调 `node scripts/r2-manifest.mjs` 把 `latest.json` 里的下载地址从 GitHub 资产 API
    （`api.github.com/repos/…/releases/assets/<id>`）改写成**固定键**
    `<R2_PUBLIC_BASE>/latest/<平台>.扩展名?v=<版本>`，**签名原样保留**（安装包字节没变，
    客户端照常验签），并校验清单引用的文件都在本地；
-3. `aws s3 cp` 按 `upload.tsv`（`<本地文件> <TAB> <R2 键> <TAB> Content-Disposition>`）
-   逐行覆盖上传：对象用 `immutable` 长缓存 + `?v=<版本>` 指纹，**同时带上
-   `Content-Disposition: attachment; filename="<原始资产名>"`**（见下节）；
-   最后用 `no-cache` 覆盖 `latest.json`；
-4. 自检：从公网取回清单，确认每个平台地址都落在 `<基址>/latest/` 下，再逐个 HEAD，
-   确认 200 且 `Content-Disposition` 里确实带着原始文件名（少一个就红）。
+3. sync-r2 汇总出 `upload.tsv`（`<本地文件> <TAB> <对象键（完整路径）> <TAB> Content-Disposition`，
+   disposition 为 `-` 表示不加该头），workflow 用 `aws s3 cp` 逐行上传：
+   固定键（`latest/…`）与全资产镜像（`releases/v<版本>/<原文件名>`）都用 `immutable` 长缓存，
+   固定键同时带 `Content-Disposition: attachment; filename="<原始资产名>"`（见下节）；
+   最后用 `no-cache` 覆盖桶根的 `latest.json`；
+4. 自检 `node scripts/verify-r2.mjs`：从公网取回清单，确认**版本号就是本次发布**、每个平台地址
+   都落在 `<基址>/latest/` 下，再对 `upload.tsv` 里每个对象逐个 HEAD，确认 200；固定键还要确认
+   `Content-Disposition` 里确实带着原始文件名（少一个就红）。
 
 ### 桶里的布局（固定键，只有一份 latest）
 
 ```
 dsh-starter-release/
 ├── latest.json                        # 更新清单：每次覆盖（no-cache）
-└── latest/                            # 固定键（immutable + ?v=<版本> 指纹）
-    ├── windows-x64-setup.exe          # NSIS（windows-x86_64-nsis）→ 下载名 DSH.Starter_<版本>_x64-setup.exe
-    ├── windows-x64.msi                # MSI（windows-x86_64 / -msi）→ 下载名 DSH.Starter_<版本>_x64_en-US.msi
-    ├── darwin-universal.app.tar.gz    # macOS 三架构共用 universal 包
-    ├── linux-x86_64.AppImage
-    ├── linux-x86_64.deb
-    └── linux-x86_64.rpm
+├── latest/                            # 固定键（immutable + ?v=<版本> 指纹）
+│   ├── windows-x64-setup.exe          # NSIS（windows-x86_64-nsis）→ 下载名 DSH.Starter_<版本>_x64-setup.exe
+│   ├── windows-x64.msi                # MSI（windows-x86_64 / -msi）→ 下载名 DSH.Starter_<版本>_x64_en-US.msi
+│   ├── darwin-universal.app.tar.gz    # macOS 三架构共用 universal 包
+│   ├── linux-x86_64.AppImage
+│   ├── linux-x86_64.deb
+│   └── linux-x86_64.rpm
+└── releases/                          # 本次发布**全部** GitHub 资产的 1:1 镜像（自 0.3.1 起）
+    └── v<版本>/<原始资产名>            # 含 .sig 与 .dmg：GitHub 不可达时这里也有完整一套
 ```
 
 「键名」和「下载名」是两回事：键为了地址稳定、永远不变；下载名由 `Content-Disposition`
 给出，永远带版本号和产品名（见上一节）。
 
-- 地址**不带版本号**：每次发布覆盖同名对象，桶里永远只有一份「当前最新」，
-  旧版本自然消失、**不需要任何清理步骤**，占用稳定在约 118 MB；
+- 地址**不带版本号**：每次发布覆盖同名对象，`latest/` 下永远只有一份「当前最新」，
+  旧版本自然消失、**不需要任何清理步骤**；`releases/v<版本>/` 每版一份，占桶约 118 MB × 版本数
+  （R2 存储按量计费，但流量免费，先不用管回收）。
 - 顺带的好处：`<基址>/latest/windows-x64-setup.exe` 可以直接当「永久最新版下载链接」分享；
-- 只上传清单真正引用的包（AppImage / deb / rpm / app.tar.gz / msi / setup.exe）；
-  `.dmg` 不在更新清单里（它供首次下载），要镜像的话另外传。
+- **更新只认 `latest.json` 里出现的固定键**；`releases/v<版本>/` 是全量镜像，不参与清单，
+  `.dmg` 与 `.sig` 在这里都有，GitHub 不可达时人工也能取到完整一套。
 
 ### 固定键的代价：下载名 + Content-Disposition
 
@@ -305,21 +315,24 @@ dsh-starter-release/
 
 ### 手动补传（等价于 CI 那几步）
 
+首选其实是**手动触发 workflow 勾 `force_r2`**（不重新打包，认领已发布的 v<当前版本> 只做
+R2 全量补传）。要在本机跑的话：
+
 ```bash
-gh release download vX.Y.Z --dir r2-upload --clobber
-gh release view vX.Y.Z --json assets > r2-upload/assets.json
-node scripts/r2-manifest.mjs --in r2-upload/latest.json --assets-map r2-upload/assets.json \
-  --check-dir r2-upload --base "$R2_PUBLIC_BASE" --list-files r2-upload/upload.tsv \
-  --out r2-upload/latest.json
-# upload.tsv 每行是「本地文件 <TAB> R2 键 <TAB> Content-Disposition」；
-# 用本机 OAuth 登录态即可，无需 S3 凭据：
-while IFS=$'\t' read -r local key disposition; do
-  npx wrangler r2 object put "dsh-starter-release/latest/$key" --file "r2-upload/$local" \
-    --content-type application/octet-stream --content-disposition "$disposition" \
-    --cache-control "public, max-age=31536000, immutable" --remote
+export GITHUB_REPOSITORY=Yinxe/dsh-starter
+export R2_PUBLIC_BASE=https://pub-576ca711d9cf4cfe96b58195dfe6ce81.r2.dev
+# 按 tag 现查 releaseId 并下载**全部**资产 + 改写清单 + 算好 upload.tsv
+# （鉴权走 `gh auth token`；别用 gh release download —— 它读滞后的 tags 接口，见上文）
+node scripts/sync-r2.mjs --dir r2-upload --version X.Y.Z
+# upload.tsv: 本地文件 <TAB> 对象键（完整路径，latest/… 与 releases/v…/…） <TAB> Content-Disposition
+while IFS=$'\t' read -r local key cd; do
+  args=(--content-type application/octet-stream --cache-control "public, max-age=31536000, immutable")
+  [ "$cd" != "-" ] && args+=(--content-disposition "$cd")
+  npx wrangler r2 object put "dsh-starter-release/$key" --file "r2-upload/$local" "${args[@]}" --remote
 done < r2-upload/upload.tsv
 npx wrangler r2 object put dsh-starter-release/latest.json --file r2-upload/latest.json \
   --content-type application/json --cache-control "no-cache, max-age=0" --remote
+node scripts/verify-r2.mjs --dir r2-upload --version X.Y.Z   # 自检，等价 CI 最后一步
 ```
 
 ### 其它
@@ -344,10 +357,10 @@ npx wrangler r2 object put dsh-starter-release/latest.json --file r2-upload/late
   （允许 `https://yinxe.github.io` 的 GET/HEAD），把 `site/src/lib/release.ts` 的
   `R2_CORS_ENABLED` 改成 `true`，页面就会改读自建源清单并核对两条源是否同步。**没配 CORS 时不要
   打开这个常量** —— 那样每次加载页面都会在控制台留下一条 CORS 报错。
-- **`.dmg` 不在自建源上**：第 7 节的同步只上传 `latest.json` 里出现过的平台键（`STABLE_KEYS`），
-  macOS 的 DMG 只存在于 GitHub Release。所以下载页在自建源模式下会把 DMG 那行标成「自建源未托管」
-  并指向 GitHub。若要让 DMG 也走自建源，得给 `scripts/r2-manifest.mjs` 补一个固定的 dmg 键，
-  并在 `upload.tsv` 之外单独上传（当前未做）。
+- **`.dmg` 不在更新清单里**：更新器只认 `latest.json` 里的固定键（`STABLE_KEYS`），DMG 供首次
+  手动下载。0.3.1 起全量镜像会把 DMG 也传到 `<基址>/releases/v<版本>/`（按原始文件名直取），
+  但它仍不进清单、不占固定键；下载页在自建源模式下依旧把 DMG 那行指向 GitHub，
+  要改就得给 `scripts/r2-manifest.mjs` 补一个固定的 dmg 键（当前未做）。
 
 首次部署需要在仓库 **Settings → Pages** 把 Source 选成 *GitHub Actions*；工作流里的
 `configure-pages@v6` 带了 `enablement: true`，通常会自动打开。
@@ -360,6 +373,7 @@ npx wrangler r2 object put dsh-starter-release/latest.json --file r2-upload/late
 | CI 失败：`CHANGELOG.md 里没有 vX.Y.Z 的段落` | 先写 CHANGELOG（含 `## [X.Y.Z] - 日期`），再 push |
 | CI 失败：`段落没有任何条目` | 只写了标题没写内容，至少补一条 `- ` |
 | 客户端收不到更新 | Release 不能是草稿/pre-release；`releases/latest` 只认正式版本；确认 `latest.json` 能下载 |
+| `gh release download` 报 no assets，但 Release 页面明明有资产 | `releases/tags/*` 在草稿转正式后返回**滞后的读副本**（实测 1h+ 仍报 0 资产），`gh release download/view` 全走它。别等它自愈：用 `scripts/sync-r2.mjs`（按 releaseId 走 `/releases/<id>/assets`），或勾 `force_r2` 手动触发 workflow |
 | 发布后发现说明写错 | 直接编辑 GitHub Release 正文 + 修 `CHANGELOG.md`（`latest.json` 里的 notes 已经下发，改不了，除非重发/热修版本） |
 | 下载页版本号一直是旧的 | 页面不缓存清单，先硬刷新；仍不对就查 `latest.json` 与 GitHub Release 是否有一边没更新（Vite 产物本身有 hash，不是页面缓存问题） |
 | 下载页显示「自建源不可达」 | R2 桶被删/改名/桶名权限变了；自建源的固定键直链同时也会失效，需要按第 7 节重新上传 |
