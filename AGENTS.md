@@ -11,6 +11,15 @@
   `update_check` 自更新、`netports` 端口归属）。改了命令签名必须同步 `lib.rs` 的 `generate_handler!`。
 - **前端**（`src/`）：`App.tsx` 主界面与状态、`api.ts` 所有 `invoke` 封装、`types.ts` 与 Rust 结构体一一对应的类型、
   `components/` 业务组件、`components/ui/` shadcn 组件、`lib/` 主题等基础库。
+  「Profiles」页是**左右双栏工作台**：左列实例列表（`App.tsx` 的 `selectedProfile`），右列
+  `components/ProfileWorkspace.tsx`（Tabs：`ProfileQuickTab` / `ModelConfigView` / `PluginsTab` /
+  `ProfileFilesTab` / package.json 只读）；插件、模型、配置文件**不再是独立页面**，全部按「先定 profile 再配置」组织。
+- **配置归属（0.1.7 硬约定）**：≥0.1.7 的 profile 配置在其 `profiles/<p>/cordis.patch.yml`，<0.1.7 走全局
+  `settings.yaml`（迁移后被 dsh 改名 `settings.yaml.imported`，启动旧版前由 `restore_legacy_settings()` 还原）。
+  启动器写 patch 一律**行级 marker 注释块整块接管**（`profile_cfg.rs` 的 `MODELCFG_MARKER = "# dsh-starter: modelcfg"`，
+  快捷配置同理由 `# dsh-starter: web-quick` 接管），**绝不整文件 parse→serialize**：patch 含 `!!js` 自定义 tag，
+  round-trip 必坏数据；写后 `validate_yaml` + 原子写 + `*.starter-bak` 备份。`modelcfg.rs` 的
+  `read_for_profile/write_for_profile` 是唯一入口，前端别绕过 `get/set_model_config` 直接改 patch。
 - **下载页**（`site/`）：独立的 Vite + React + shadcn/ui + Tailwind 站点（GitHub Pages），**不参与主程序构建**。
   `lib/release.ts` 是唯一的数据层（平台清单、两条源的直链规则、R2/REPO 常量），页面上的版本号与体积都是
   打开时现拉的；`components/site/` 业务区块、`components/ui/` 同为 shadcn 组件。改平台清单或地址规则只改这里

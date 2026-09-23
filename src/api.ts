@@ -15,6 +15,7 @@ import type {
   ProfileInfo,
   ProfileInstance,
   ProfileVersionInfo,
+  ProfileConfigMode,
   ProfileDetail,
   PackageSearchItem,
   DshRelease,
@@ -223,9 +224,20 @@ export const api = {
   dshReleaseNotes: (force = false) => invoke<DshRelease[]>("dsh_release_notes", { force }),
   readGlobalConfig: () => invoke<string>("read_global_config"),
   writeGlobalConfig: (content: string) => invoke<void>("write_global_config", { content }),
-  getModelConfig: () => invoke<ModelConfigInfo>("get_model_config"),
-  setModelConfig: (config: ModelConfigInput) =>
-    invoke<void>("set_model_config", { config }),
+  /** 只读查看被 0.1.7 导入存档的旧全局配置（settings.yaml.imported） */
+  readImportedSettings: () => invoke<string>("read_imported_settings"),
+  /** 某个 profile 的配置归属（patch=0.1.7+ / legacy=旧版全局），驱动各 Tab 读写路由 */
+  getProfileConfigMode: (profile: string) =>
+    invoke<ProfileConfigMode>("get_profile_config_mode", { profile }),
+  /** 读取模型配置：profile 为空走全局 settings.yaml，否则按 profile 归属路由 */
+  getModelConfig: (profile?: string) =>
+    invoke<ModelConfigInfo>("get_model_config", { profile: profile ?? null }),
+  /** 保存模型配置：profile 为空走全局，否则写入该 profile 的 cordis.patch.yml */
+  setModelConfig: (config: ModelConfigInput, profile?: string) =>
+    invoke<void>("set_model_config", { profile: profile ?? null, config }),
+  /** 把模型配置同步写入多个 profile（仅 ≥0.1.7 有效）；返回失败清单，空数组=全部成功 */
+  syncModelConfig: (targets: string[], config: ModelConfigInput) =>
+    invoke<string[]>("sync_model_config", { targets, config }),
   fetchProviderModels: (baseUrl: string, api: string, apiKeyEnv: string, apiKey?: string) =>
     invoke<RemoteModelInfo[]>("fetch_provider_models", {
       baseUrl,

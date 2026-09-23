@@ -1,5 +1,5 @@
-/** 主内容区的视图标识（侧栏导航项与之对应） */
-export type View = "quick" | "versions" | "profiles" | "plugins" | "models" | "config" | "credentials" | "stats" | "logs";
+/** 主内容区的视图标识（侧栏导航项与之对应；插件/模型/配置已并入 profiles 工作台） */
+export type View = "quick" | "versions" | "profiles" | "credentials" | "stats" | "logs";
 
 export type InstallSource = "managed" | "global" | "path";
 
@@ -85,8 +85,12 @@ export interface Settings {
   closeToTray: boolean;
   /** Profile 启动方式：child=子进程（随启动器退出）| detached=独立进程（后台常驻） */
   launchMode: string;
+  /** 按 profile 的启动方式覆盖（未覆盖的 profile 走全局 launchMode） */
+  profileLaunchMode: Record<string, string>;
   /** Web UI 打开方式：window=应用内独立窗口 | browser=系统默认浏览器 */
   webOpenMode: string;
+  /** 按 profile 的打开方式覆盖（仅 Web 类型 profile 有意义；未覆盖走全局 webOpenMode） */
+  profileWebOpenMode: Record<string, string>;
   /** 可选 GitHub Token：只用于把 api.github.com 额度从 60/小时 提到 5000/小时 */
   githubToken: string;
   /** GitHub 加速：把 github 链接拼到测速选出的前缀代理上（只对 github 域名生效） */
@@ -317,6 +321,17 @@ export interface ProfileVersionInfo {
   updatedAt: number;
 }
 
+/** 一个 profile 的配置归属（0.1.7 起插件/模型配置按 profile 存进 cordis.patch.yml） */
+export interface ProfileConfigMode {
+  profile: string;
+  /** "patch" = ≥0.1.7（profile 隔离）| "legacy" = <0.1.7 或版本未知（全局 settings.yaml） */
+  mode: "patch" | "legacy";
+  /** 判定所用的生效版本：绑定版本，回落当前版本；可能为空 */
+  version: string;
+  /** settings.yaml.imported 存在 = 全局配置已被导入过一次（旧版启动前需还原） */
+  imported: boolean;
+}
+
 /** 启动时检测到的 dsh 版本变化，风险确认框的数据源 */
 export interface VersionChange {
   profile: string;
@@ -331,6 +346,8 @@ export interface VersionChange {
 export interface StartResult {
   proc: ProcInfo | null;
   versionChange: VersionChange | null;
+  /** 旧版（<0.1.7）启动前从 settings.yaml.imported 还原了全局配置时的文件路径；未发生为 null */
+  legacyRestored: string | null;
 }
 
 export interface BundleInfo {
@@ -625,7 +642,7 @@ export interface DefaultModelInfo {
   extra: Record<string, unknown> | null;
 }
 
-/** 模型配置整体读取结果（解析自 ~/.dsh/settings.yaml 的两个分节） */
+/** 模型配置整体读取结果（patch 模式解析自 profile 的 cordis.patch.yml；legacy 解析自 ~/.dsh/settings.yaml） */
 export interface ModelConfigInfo {
   path: string;
   exists: boolean;
@@ -633,6 +650,12 @@ export interface ModelConfigInfo {
   defaultModel: DefaultModelInfo | null;
   /** 文件存在但解析失败时置位：禁止结构化保存 */
   parseError: string | null;
+  /** "patch" = 0.1.7+ 按 profile 隔离 | "legacy" = 旧版全局 settings.yaml */
+  mode: string;
+  /** 判定所用的 dsh 版本（绑定版本，回落当前版本；可能为空） */
+  version: string;
+  /** patch 顶层出现多份同 id 模型条目时列出 id（后者生效，提醒清理） */
+  duplicateEntryIds: string[];
 }
 
 /** 模型配置保存载荷（后端只重写 llm-pi-ai / agent-default-model 两节） */

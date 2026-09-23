@@ -31,9 +31,13 @@ import {
 } from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
 import { api } from "../api";
-import type { ModelConfigInfo, ModelConfigInput, ModelEntryInput, RemoteModelInfo } from "../types";
+import type { ModelConfigInfo, ModelConfigInput, ModelEntryInput, ProfileConfigMode, RemoteModelInfo } from "../types";
 
 interface Props {
+  /** 工作台选中的 profile：读取/保存都路由到它的配置归属 */
+  profile: string;
+  /** 全部 profile 名（「同步到其他 profile」勾选清单的数据源） */
+  profiles: string[];
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
 }
 
@@ -288,10 +292,10 @@ const toDraft = (cfg: ModelConfigInfo): { provs: ProviderDraft[]; dm: DefaultDra
     : null,
 });
 
-/** 模型配置视图：参考 dsh 官方 provider 配置布局，结构化编辑 ~/.dsh/settings.yaml 的
- *  llm-pi-ai.providers 与 agent-default-model。保存只重写这两节，文件其余内容与
- *  节外注释由后端逐字节保留；手动输入的密钥回存到「凭据管理」。 */
-export default function ModelConfigView({ onToast }: Props) {
+/** 模型配置 Tab：结构化编辑当前 profile 的模型两节（providers / agent-default-model）。
+ *  ≥0.1.7 写入该 profile 的 cordis.patch.yml（marker 块整块接管），<0.1.7 仍写全局
+ *  ~/.dsh/settings.yaml。保存只重写这两节，其余内容由后端逐字节保留；手动输入的密钥回存到「凭据管理」。 */
+export default function ModelConfigView({ profile, profiles, onToast }: Props) {
   const [loaded, setLoaded] = useState<ModelConfigInfo | null>(null);
   const [provs, setProvs] = useState<ProviderDraft[]>([]);
   const [dm, setDm] = useState<DefaultDraft | null>(null);
@@ -323,24 +327,34 @@ export default function ModelConfigView({ onToast }: Props) {
     [provs, dm, baseline],
   );
 
+  // 切 profile 时旧请求可能后返回：ref 指向「当前选中」，过期响应直接丢弃
+  const latestProfileRef = useRef(profile);
+  latestProfileRef.current = profile;
+  const loadedRef = useRef<ModelConfigInfo | null>(null);
+
   const reload = useCallback(async () => {
     try {
       const [cfg, creds] = await Promise.all([
-        api.getModelConfig(),
+        api.getModelConfig(profile),
         api.getCredentials().catch(() => null),
       ]);
+      if (latestProfileRef.current !== profile) return;
       setCredNames(creds?.refs.map((r) => r.name) ?? []);
+      loadedRef.current = cfg;
       setLoaded(cfg);
       const d = toDraft(cfg);
       setProvs(d.provs);
       setDm(d.dm);
       setBaseline(JSON.stringify({ provs: d.provs, dm: d.dm }));
     } catch (e) {
+      if (latestProfileRef.current !== profile) return;
       onToast("err", `读取模型配置失败: ${e}`);
     }
-  }, [onToast]);
+  }, [profile, onToast]);
 
   useEffect(() => {
+    setLoaded(null);
+    loadedRef.current = null;
     reload();
   }, [reload]);
 
@@ -532,7 +546,38 @@ export default function ModelConfigView({ onToast }: Props) {
     }
   }, [fetchFor, fetched, fetchSel, onToast]);
 
-  // ── 保存 ──────────────────────────────────
+  // ── 保存 / 同步 ────────────────────────────
+  /** 当前草稿 → 后端保存载荷（save 与「同步到其他 profile」共用同一份输入） */
+  const collectInput = useCallback((): ModelConfigInput => ({
+    providers: provs.map((p): ModelConfigInput["providers"][number] => ({
+      id: p.id.trim(),
+      displayName: p.displayName.trim() || null,
+      api: p.api.trim() || null,
+      baseURL: p.baseURL.trim() || null,
+      apiKeyEnv: p.keyName.trim() || null,
+      headers: p.headers,
+      compat: p.compat,
+      models: p.models.map((m): ModelEntryInput => ({
+        id: m.id.trim(),
+        name: m.name.trim() || null,
+        contextWindow: parseTokenCount(m.contextWindow),
+        maxTokens: parseTokenCount(m.maxTokens),
+        input: m.input,
+        reasoningEfforts: kvToObj(m.reasoningEfforts),
+        extra: m.extra,
+      })),
+      extra: p.extra,
+    })),
+    defaultModel: dm
+      ? {
+          provider: dm.provider,
+          model: dm.model,
+          reasoningEffort: dm.reasoningEffort || null,
+          extra: dm.extra,
+        }
+      : null,
+  }), [provs, dm]);
+
   const save = useCallback(async () => {
     setBusy(true);
     try {
@@ -551,45 +596,58 @@ export default function ModelConfigView({ onToast }: Props) {
         }
         await api.writeCredentialRefs(refs, creds.fingerprint);
       }
-      // 2) 写 settings.yaml 两节（apiKeyEnv = 引用名）
-      const input: ModelConfigInput = {
-        providers: provs.map((p): ModelConfigInput["providers"][number] => ({
-          id: p.id.trim(),
-          displayName: p.displayName.trim() || null,
-          api: p.api.trim() || null,
-          baseURL: p.baseURL.trim() || null,
-          apiKeyEnv: p.keyName.trim() || null,
-          headers: p.headers,
-          compat: p.compat,
-          models: p.models.map((m): ModelEntryInput => ({
-            id: m.id.trim(),
-            name: m.name.trim() || null,
-            contextWindow: parseTokenCount(m.contextWindow),
-            maxTokens: parseTokenCount(m.maxTokens),
-            input: m.input,
-            reasoningEfforts: kvToObj(m.reasoningEfforts),
-            extra: m.extra,
-          })),
-          extra: p.extra,
-        })),
-        defaultModel: dm
-          ? {
-              provider: dm.provider,
-              model: dm.model,
-              reasoningEffort: dm.reasoningEffort || null,
-              extra: dm.extra,
-            }
-          : null,
-      };
-      await api.setModelConfig(input);
-      onToast("ok", "模型配置已保存（其余配置与节外注释原样保留）");
+      // 2) 写模型两节：patch 模式进该 profile 的 cordis.patch.yml，legacy 进全局 settings.yaml
+      await api.setModelConfig(collectInput(), profile);
+      onToast(
+        "ok",
+        loadedRef.current?.mode === "patch"
+          ? `模型配置已保存到「${profile}」的 cordis.patch.yml（其余条目与节外注释原样保留；live 模式即时生效，否则需重启实例）`
+          : "模型配置已保存到全局 settings.yaml（其余配置与节外注释原样保留）"
+      );
       await reload();
     } catch (e) {
       onToast("err", String(e));
     } finally {
       setBusy(false);
     }
-  }, [provs, dm, reload, onToast]);
+  }, [provs, collectInput, profile, reload, onToast]);
+
+  // 「同步到其他 profile」：勾选清单按各目标的配置归属过滤（<0.1.7 不可同步）
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncModes, setSyncModes] = useState<ProfileConfigMode[] | null>(null);
+  const [syncSel, setSyncSel] = useState<string[]>([]);
+  const [syncing, setSyncing] = useState(false);
+  const syncingRef = useRef(false);
+
+  const openSync = useCallback(() => {
+    setSyncOpen(true);
+    setSyncModes(null);
+    setSyncSel([]);
+    const others = profiles.filter((p) => p !== profile);
+    if (others.length === 0) {
+      setSyncModes([]);
+      return;
+    }
+    void Promise.all(others.map((p) => api.getProfileConfigMode(p).catch(() => null)))
+      .then((list) => setSyncModes(list.filter((m): m is ProfileConfigMode => m != null)));
+  }, [profiles, profile]);
+
+  const doSync = useCallback(async () => {
+    if (syncingRef.current || syncSel.length === 0) return;
+    syncingRef.current = true;
+    setSyncing(true);
+    try {
+      const failures = await api.syncModelConfig(syncSel, collectInput());
+      if (failures.length === 0) onToast("ok", `已同步 ${syncSel.length} 个 profile 的模型配置`);
+      else onToast("err", `同步完成，${failures.length} 个失败：${failures.join("；")}`);
+      if (failures.length < syncSel.length) setSyncOpen(false);
+    } catch (e) {
+      onToast("err", String(e));
+    } finally {
+      syncingRef.current = false;
+      setSyncing(false);
+    }
+  }, [syncSel, collectInput, onToast]);
 
   if (!loaded) {
     return (
@@ -602,12 +660,14 @@ export default function ModelConfigView({ onToast }: Props) {
   const newIdOk = newId.trim() !== "" && !/\s/.test(newId.trim()) && !provs.some((p) => p.id === newId.trim());
   const fetchProvider = fetchFor ? provs.find((p) => p.id === fetchFor) ?? null : null;
 
+  const isPatch = loaded.mode === "patch";
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-base font-semibold">模型配置</h2>
         <Badge variant="outline" className="font-mono" title={loaded.path}>
-          ~/.dsh/settings.yaml
+          {isPatch ? `profiles/${profile}/cordis.patch.yml` : "~/.dsh/settings.yaml"}
         </Badge>
         <Badge variant="secondary">{provs.length} 个 Provider</Badge>
         <Badge variant="secondary">{totalModels} 个模型</Badge>
@@ -616,6 +676,17 @@ export default function ModelConfigView({ onToast }: Props) {
         <Button size="sm" variant="outline" disabled={busy || !dirty} onClick={reload}>
           <RotateCcw /> 还原
         </Button>
+        {isPatch && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || issues.length > 0 || !!loaded.parseError}
+            title="把当前 Provider/模型/默认模型清单写入其他 0.1.7+ profile 的 cordis.patch.yml"
+            onClick={openSync}
+          >
+            同步到其他 profile…
+          </Button>
+        )}
         <Button
           size="sm"
           disabled={busy || !dirty || issues.length > 0 || !!loaded.parseError}
@@ -625,9 +696,23 @@ export default function ModelConfigView({ onToast }: Props) {
         </Button>
       </div>
       <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
-        编辑全局配置的模型两节：<span className="font-mono text-foreground">llm-pi-ai.providers</span> 与
-        <span className="font-mono text-foreground"> agent-default-model</span>
-        （默认模型），保存只重写这两节，其余内容与节外注释逐字节保留，写前自动备份。
+        {isPatch ? (
+          <>
+            编辑该 profile 的模型两节：<span className="font-mono text-foreground">llm-pi-ai.providers</span> 与
+            <span className="font-mono text-foreground"> agent-default-model</span>
+            （默认模型）。保存以带标记的条目块整块接管 <span className="font-mono">cordis.patch.yml</span>
+            中的同名条目，其余条目与注释逐字节保留，写前自动备份；其他 profile 的同名配置不受影响
+            （0.1.7 起配置按 profile 隔离），要一起改请用「同步到其他 profile」。
+          </>
+        ) : (
+          <>
+            该 profile 绑定 dsh <span className="font-mono text-foreground">{loaded.version || "?"}</span>
+            （&lt; 0.1.7）：此处编辑的是全局 <span className="font-mono text-foreground">~/.dsh/settings.yaml</span>
+            的模型两节，<strong className="font-medium text-foreground">对全部旧版 profile 生效</strong>。
+            全局配置这一能力将随 0.1.6 之前的版本支持一并弃用——升级到 0.1.7+ 后按 profile 独立。
+            保存只重写这两节，其余内容与节外注释逐字节保留，写前自动备份。
+          </>
+        )}
         API 密钥可选择已有凭据或手动输入——手动输入的密钥保存时回存到「凭据管理」；
         上下文窗口 / 最大输出可直接填数字，也可用 128K、1M 这类写法；
         模型的思考等级不填则不写入（保持 dsh 默认）。
@@ -636,9 +721,21 @@ export default function ModelConfigView({ onToast }: Props) {
       {loaded.parseError && (
         <Alert variant="destructive">
           <TriangleAlert />
-          <AlertTitle>settings.yaml 解析失败，已锁定保存</AlertTitle>
+          <AlertTitle>{isPatch ? "cordis.patch.yml" : "settings.yaml"} 解析失败，已锁定保存</AlertTitle>
           <AlertDescription>
-            {loaded.parseError}——请到「配置文件」页修复语法后回来重试。
+            {loaded.parseError}——请到「配置文件」Tab 修复语法后回来重试。
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {loaded.duplicateEntryIds.length > 0 && (
+        <Alert variant="destructive">
+          <TriangleAlert />
+          <AlertTitle>patch 里存在多份同名条目，后者生效</AlertTitle>
+          <AlertDescription>
+            {loaded.duplicateEntryIds.join("、")} 在该 profile 的 cordis.patch.yml 中出现了不止一次
+            （多半是 dsh 的设置表单又生成了一份未接管的条目）：dsh 按后者生效，保存本次编辑会合并为一份。
+            请核对哪一份才是想要的配置。
           </AlertDescription>
         </Alert>
       )}
@@ -646,9 +743,11 @@ export default function ModelConfigView({ onToast }: Props) {
       {!loaded.exists && (
         <Alert>
           <Bot />
-          <AlertTitle>settings.yaml 尚不存在</AlertTitle>
+          <AlertTitle>{isPatch ? "cordis.patch.yml 尚不存在" : "settings.yaml 尚不存在"}</AlertTitle>
           <AlertDescription>
-            dsh 首次运行后会自动创建；现在直接配置并保存，启动器会创建该文件（只含模型两节）。
+            {isPatch
+              ? "该 profile 还没有 patch 文件；现在直接配置并保存，启动器会创建该文件（只含模型两节条目）。"
+              : "dsh 首次运行后会自动创建；现在直接配置并保存，启动器会创建该文件（只含模型两节）。"}
           </AlertDescription>
         </Alert>
       )}
@@ -1096,7 +1195,7 @@ export default function ModelConfigView({ onToast }: Props) {
       })}
       {provs.length === 0 && (
         <Card className="p-10 text-center text-sm text-muted-foreground">
-          暂无 Provider——点下方按钮新建，或在「配置文件」页按
+          暂无 Provider——点下方按钮新建，或在「配置文件」Tab 按
           <span className="font-mono"> llm-pi-ai.providers </span>结构手写后回到这里继续编辑
           <div className="mt-3">
             <Button size="sm" variant="outline" disabled={!!loaded.parseError} onClick={() => setAddOpen(true)}>
@@ -1121,7 +1220,7 @@ export default function ModelConfigView({ onToast }: Props) {
               <Bot className="h-4 w-4" /> 添加 Provider
             </DialogTitle>
             <DialogDescription>
-              ID 是 settings.yaml 中的配置键（如 my-gateway），创建后不可改名；其余字段在卡片内编辑。
+              ID 是配置中的 provider 键名（如 my-gateway），创建后不可改名；其余字段在卡片内编辑。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -1264,6 +1363,75 @@ export default function ModelConfigView({ onToast }: Props) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* 同步到其他 profile：仅 ≥0.1.7（patch 归属）的目标可写，旧版在清单里禁用并说明 */}
+      <Dialog open={syncOpen} onOpenChange={(o) => !o && setSyncOpen(false)}>
+        <DialogContent className="grid-cols-[minmax(0,1fr)] sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Save className="h-4 w-4" /> 同步模型配置到其他 profile
+            </DialogTitle>
+            <DialogDescription>
+              把当前这份 Provider/模型/默认模型清单写入所选 profile 的
+              <span className="font-mono"> cordis.patch.yml</span>（各自 marker 块整块接管，
+              其余条目不动）。未保存的编辑也会随本次同步写入，但不会落盘到「{profile}」本身——
+              要保存本页请先点「保存」。
+            </DialogDescription>
+          </DialogHeader>
+          {syncModes == null ? (
+            <div className="flex h-24 items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> 正在检查各 profile 的配置归属…
+            </div>
+          ) : syncModes.length === 0 ? (
+            <div className="py-6 text-center text-sm text-muted-foreground">
+              没有其他 profile 可同步（0.1.7 之前的版本没有按 profile 的模型配置）
+            </div>
+          ) : (
+            <ToggleGroup
+              type="multiple"
+              orientation="vertical"
+              spacing={0}
+              variant="outline"
+              className="max-h-72 w-full flex-col overflow-y-auto"
+              value={syncSel}
+              onValueChange={setSyncSel}
+            >
+              {syncModes.map((m) => {
+                const ok = m.mode === "patch";
+                return (
+                  <ToggleGroupItem
+                    key={m.profile}
+                    value={m.profile}
+                    disabled={!ok}
+                    className="w-full justify-start gap-2 px-3 py-2 text-left"
+                  >
+                    {syncSel.includes(m.profile) && ok && (
+                      <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                    )}
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs">{m.profile}</span>
+                    {ok ? (
+                      <Badge variant="secondary" className="shrink-0 font-mono">dsh {m.version}</Badge>
+                    ) : (
+                      <Badge variant="outline" className="shrink-0" title="旧版只认全局 settings.yaml，同步会造成配置漂移">
+                        &lt; 0.1.7 · 跳过
+                      </Badge>
+                    )}
+                  </ToggleGroupItem>
+                );
+              })}
+            </ToggleGroup>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSyncOpen(false)}>取消</Button>
+            <Button
+              disabled={syncing || syncSel.length === 0 || !!loaded.parseError || issues.length > 0}
+              onClick={doSync}
+            >
+              {syncing && <Loader2 className="animate-spin" />} 同步到所选（{syncSel.length}）
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import {
-  BarChart3, Bot, Command, Copy, Download, ExternalLink, FileCog, Gauge, Home, KeyRound, MessageSquareText, Package, Puzzle, RefreshCw, Rocket, ScrollText, Terminal, X,
+  BarChart3, Command, Copy, Download, ExternalLink, Gauge, Home, KeyRound, MessageSquareText, Package, RefreshCw, Rocket, ScrollText, Terminal, X,
 } from "lucide-react";
 
 import {
@@ -149,7 +149,7 @@ export default function AppSidebar({
         onToast("ok", `${label}已复制：${text}`);
       } catch {
         // 剪贴板不可用时给出仍能拿到完整路径的下一步，而不是只说「复制失败」
-        onToast("err", `复制失败（剪贴板不可用）：到「配置文件」或设置里可以看到完整路径`);
+        onToast("err", `复制失败（剪贴板不可用）：完整路径可在「Profiles」工作台的「配置文件」Tab 与设置里看到`);
       }
     },
     [onToast],
@@ -158,10 +158,7 @@ export default function AppSidebar({
   const navItems: Array<[View, string, typeof Package, number | null, "warning" | "success" | null]> = [
     ["quick", "首页", Home, null, null],
     ["versions", "版本与安装", Package, upgradableCount > 0 ? upgradableCount : null, "warning"],
-    ["profiles", "Profile 实例", Rocket, runningInstanceCount > 0 ? runningInstanceCount : null, "success"],
-    ["plugins", "插件管理", Puzzle, null, null],
-    ["models", "模型配置", Bot, null, null],
-    ["config", "配置文件", FileCog, null, null],
+    ["profiles", "Profiles（实例与配置）", Rocket, runningInstanceCount > 0 ? runningInstanceCount : null, "success"],
     ["credentials", "凭据管理", KeyRound, null, null],
     ["stats", "统计", BarChart3, runningInstanceCount > 0 ? runningInstanceCount : null, "success"],
     ["logs", "系统日志", ScrollText, null, null],

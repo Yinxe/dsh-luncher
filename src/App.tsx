@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Puzzle, RefreshCw, Settings as SettingsIcon,
+  RefreshCw, Settings as SettingsIcon,
   ExternalLink, Play, Square, CheckCircle2, XCircle, Loader2, Sun, Moon,
-  TriangleAlert, ChevronDown, CopyPlus, Info, RotateCw, FileText, ScrollText,
+  TriangleAlert, SlidersHorizontal, CopyPlus, Info, RotateCw, FileText, ScrollText,
   Pencil, Trash2, ShieldPlus, Rocket, Wand2,
-  Home, Package, Bot, FileCog, KeyRound, BarChart3, Terminal, Monitor, Download,
+  Home, Package, KeyRound, BarChart3, Terminal, Monitor, Download,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, events } from "./api";
@@ -19,8 +19,6 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/s
 import { useSidebarOpen } from "@/hooks/use-layout";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import ProfileConfigPanel from "./components/ProfileConfigPanel";
 import CopyProfileDialog from "./components/CopyProfileDialog";
 import RenameProfileDialog from "./components/RenameProfileDialog";
 import TrashDialog from "./components/TrashDialog";
@@ -31,12 +29,10 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogMedia, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import InstallCard from "./components/InstallCard";
-import ConfigView from "./components/ConfigView";
-import ModelConfigView from "./components/ModelConfigView";
 import CredentialsView from "./components/CredentialsView";
 import StatsView from "./components/StatsView";
 import LogsView from "./components/LogsView";
-import PluginsView from "./components/PluginsView";
+import ProfileWorkspace from "./components/ProfileWorkspace";
 import QuickActionsView from "./components/QuickActionsView";
 import ProcessSidePanel from "./components/ProcessSidePanel";
 import VersionRow from "./components/VersionRow";
@@ -112,8 +108,8 @@ export default function App() {
   /** 更新日志对话框当前定位的 dsh 版本（null = 关闭） */
   const [notesVersion, setNotesVersion] = useState<string | null>(null);
   const [verType, setVerType] = useState<"all" | "stable" | "pre">("all");
-  /** 各 profile 配置折叠面板的展开状态 */
-  const [expandedProfiles, setExpandedProfiles] = useState<Record<string, boolean>>({});
+  /** 工作台右列当前打开的 profile；null = 未选中（左列点「配置」进入） */
+  const [selectedProfile, setSelectedProfile] = useState<string | null>(null);
   /** 正在重启的 profile（停止→等待消失→再拉起） */
   const [restartingProfile, setRestartingProfile] = useState<string | null>(null);
   /** 启动请求在途的 profile：按钮转圈并禁用，避免连点重复启动 */
@@ -139,8 +135,6 @@ export default function App() {
   /** 恢复模式创建确认 */
   const [recoveryOpen, setRecoveryOpen] = useState(false);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
-  /** 插件管理页的预选 profile（从 Profile 实例卡片跳转时种子化；导航进入时清空走默认） */
-  const [pluginsSeed, setPluginsSeed] = useState<string | null>(null);
   /** 命令面板（⌘K / Ctrl+K）是否打开 */
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -463,33 +457,39 @@ export default function App() {
     }
   }, [addToast]);
 
-  const doSetLaunchMode = useCallback(async (v: "child" | "detached") => {
+  /** 单个 profile 的启动方式：未单独设置时跟随全局默认（settings.launchMode）。只负责落盘 */
+  const applyProfileLaunchMode = useCallback(async (profile: string, v: "child" | "detached") => {
     const s = settingsRef.current;
-    if (!s || s.launchMode === v) return;
-    const next = { ...s, launchMode: v };
+    if (!s || (s.profileLaunchMode?.[profile] ?? s.launchMode) === v) return;
+    const next = { ...s, profileLaunchMode: { ...s.profileLaunchMode, [profile]: v } };
     setSettings(next);
+    // 同步写 ref：紧接着的「保存并重启」会在同一次事件里读到它，不能等下一帧渲染
+    settingsRef.current = next;
     try {
       await api.saveSettings(next);
       addToast(
         "ok",
-        v === "detached"
-          ? "启动方式已切换为独立进程（后台常驻，日志写入 ~/.dsh-starter/instance-logs）"
-          : "启动方式已切换为子进程（随启动器退出结束）"
+        `「${profile}」启动方式已切换为${v === "detached" ? "独立进程（后台常驻，日志写入 ~/.dsh-starter/instance-logs）" : "子进程（随启动器退出结束）"}`
       );
     } catch (e) {
       setSettings(s);
+      settingsRef.current = s;
       addToast("err", `切换失败: ${e}`);
     }
   }, [addToast]);
 
-  const doSetWebOpenMode = useCallback(async (v: "window" | "browser") => {
+  /** 运行中的 profile 改启动方式要先确认：确认后保存并立即重启，取消则什么都不变 */
+  const [launchModeAsk, setLaunchModeAsk] = useState<{ profile: string; mode: "child" | "detached" } | null>(null);
+
+  /** 单个 profile 的界面打开方式（仅 Web 类型有意义）：未单独设置时跟随全局默认 */
+  const doSetProfileWebOpenMode = useCallback(async (profile: string, v: "window" | "browser") => {
     const s = settingsRef.current;
-    if (!s || s.webOpenMode === v) return;
-    const next = { ...s, webOpenMode: v };
+    if (!s || (s.profileWebOpenMode?.[profile] ?? s.webOpenMode) === v) return;
+    const next = { ...s, profileWebOpenMode: { ...s.profileWebOpenMode, [profile]: v } };
     setSettings(next);
     try {
       await api.saveSettings(next);
-      addToast("ok", v === "window" ? "界面已改为在应用内独立窗口打开" : "界面已改为在系统默认浏览器打开");
+      addToast("ok", `「${profile}」界面已改为在${v === "window" ? "应用内独立窗口" : "系统默认浏览器"}打开`);
     } catch (e) {
       setSettings(s);
       addToast("err", `切换失败: ${e}`);
@@ -518,9 +518,11 @@ export default function App() {
     }
   }, [addToast]);
 
-  /** 按设置「打开方式」打开实例 Web UI：应用内独立窗口（同地址复用）或系统默认浏览器 */
-  const openDshWeb = useCallback((url: string, title?: string) => {
-    const p = settingsRef.current?.webOpenMode === "browser"
+  /** 按「打开方式」打开实例 Web UI：优先该 profile 自己的覆盖，未设置走全局默认 */
+  const openDshWeb = useCallback((url: string, title?: string, profile?: string | null) => {
+    const s = settingsRef.current;
+    const mode = (profile ? s?.profileWebOpenMode?.[profile] : undefined) ?? s?.webOpenMode;
+    const p = mode === "browser"
       ? api.openUrl(url)
       : api.openWebWindow(url, title, resolved);
     p.catch((e) => addToast("err", String(e)));
@@ -655,7 +657,8 @@ export default function App() {
     if (startingProfilesRef.current.has(profile)) return;
     startingProfilesRef.current.add(profile);
     setStartingProfile(profile);
-    const detached = settingsRef.current?.launchMode === "detached";
+    const s0 = settingsRef.current;
+    const detached = ((profile ? s0?.profileLaunchMode?.[profile] : undefined) ?? s0?.launchMode ?? "detached") === "detached";
     try {
       const res = await api.startEmbedded(null, profile, undefined, detached, ackVersionChange);
       // 版本变化闸门：这次没启动，把风险摆给用户，确认后再带 ack 重来一遍
@@ -667,6 +670,10 @@ export default function App() {
       if (!info) {
         addToast("err", `启动失败：profile「${profile}」没有返回实例信息，请重试`);
         return;
+      }
+      // 旧版 dsh（<0.1.7）只认全局 settings.yaml：后端在拉起前把它从 .imported 还原了回来
+      if (res.legacyRestored) {
+        addToast("info", `旧版 dsh：全局配置已从 settings.yaml.imported 还原到 ${res.legacyRestored}`);
       }
       if (detached) {
         // 独立进程没有日志管道：先刷新实例列表把它带进「实例终端」，再选中并展开，
@@ -726,6 +733,15 @@ export default function App() {
     },
     [addToast, doStartProfile]
   );
+
+  /** 重启确认框的「保存并重启」：先落盘新启动方式，再按新模式重启该实例 */
+  const confirmLaunchModeSwitch = useCallback(async () => {
+    const ask = launchModeAsk;
+    setLaunchModeAsk(null);
+    if (!ask) return;
+    await applyProfileLaunchMode(ask.profile, ask.mode);
+    void doRestartProfile(ask.profile);
+  }, [launchModeAsk, applyProfileLaunchMode, doRestartProfile]);
 
   /** 统一停止入口：已知 PID 就按 PID 停（内嵌/独立/外部都走这一条），
    *  否则退回按 profile 停。这样「按端口发现的外部实例」也一定有停止途径。 */
@@ -883,12 +899,16 @@ export default function App() {
     [profiles]
   );
 
+  // 选中的 profile 被删除/改名后自动收起工作台右列（重扫是异步的，用 effect 收口）
+  useEffect(() => {
+    if (selectedProfile && !profiles.some((p) => p.name === selectedProfile)) {
+      setSelectedProfile(null);
+    }
+  }, [profiles, selectedProfile]);
+
   // ── 命令面板（⌘K / Ctrl+K） ─────────────────
-  /** 统一导航：侧栏与命令面板共用（进插件页清掉 Profile 卡片带过来的预选） */
-  const navigate = useCallback((v: View) => {
-    if (v === "plugins") setPluginsSeed(null);
-    setView(v);
-  }, []);
+  /** 统一导航：侧栏与命令面板共用 */
+  const navigate = useCallback((v: View) => setView(v), []);
 
   // 开合快捷键监听（模式同侧栏 Ctrl+B，见 ui/sidebar.tsx）
   useEffect(() => {
@@ -908,22 +928,22 @@ export default function App() {
     const cmds: PaletteCommand[] = [
       { id: "nav-quick", group: "导航", label: "首页", icon: Home, keywords: "快捷操作", run: () => navigate("quick") },
       { id: "nav-versions", group: "导航", label: "版本与安装", icon: Package, keywords: "dsh 版本", run: () => navigate("versions") },
-      { id: "nav-profiles", group: "导航", label: "Profile 实例", icon: Rocket, keywords: "实例", run: () => navigate("profiles") },
-      { id: "nav-plugins", group: "导航", label: "插件管理", icon: Puzzle, keywords: "插件", run: () => navigate("plugins") },
-      { id: "nav-models", group: "导航", label: "模型配置", icon: Bot, keywords: "模型", run: () => navigate("models") },
-      { id: "nav-config", group: "导航", label: "配置文件", icon: FileCog, keywords: "yaml 配置", run: () => navigate("config") },
+      { id: "nav-profiles", group: "导航", label: "Profiles（实例与配置）", icon: Rocket, keywords: "实例 插件 模型 配置文件 工作台", run: () => navigate("profiles") },
       { id: "nav-credentials", group: "导航", label: "凭据管理", icon: KeyRound, keywords: "key token", run: () => navigate("credentials") },
       { id: "nav-stats", group: "导航", label: "统计", icon: BarChart3, keywords: "token 用量", run: () => navigate("stats") },
       { id: "nav-logs", group: "导航", label: "系统日志", icon: ScrollText, keywords: "log 排查 诊断 级别", run: () => navigate("logs") },
       {
         id: "open-web", group: "操作", label: "打开 DSH 主界面", icon: ExternalLink,
         hint: web?.webUrl ?? "无运行实例", disabled: !web?.webUrl, keywords: "ui web",
-        run: () => web?.webUrl && openDshWeb(web.webUrl),
+        run: () => web?.webUrl && openDshWeb(web.webUrl, undefined, web.profile),
       },
     ];
     for (const p of profiles) {
       const inst = instances.find((i) => i.profile === p.name && i.running);
       const busy = startingProfile === p.name || restartingProfile != null;
+      cmds.push(
+        { id: `config-${p.name}`, group: "操作", label: `打开 ${p.name} 工作台`, icon: SlidersHorizontal, keywords: "profile 插件 模型 配置", run: () => { setSelectedProfile(p.name); navigate("profiles"); } },
+      );
       if (inst) {
         cmds.push(
           { id: `restart-${p.name}`, group: "操作", label: `重启 ${p.name}`, icon: RotateCw, hint: "运行中", disabled: busy, keywords: "profile", run: () => void doRestartProfile(p.name) },
@@ -998,7 +1018,7 @@ export default function App() {
           {liveWebProcs.length > 0 && (
             <Button
               size="sm"
-              onClick={() => liveWebProcs[0].webUrl && openDshWeb(liveWebProcs[0].webUrl)}
+              onClick={() => liveWebProcs[0].webUrl && openDshWeb(liveWebProcs[0].webUrl, undefined, liveWebProcs[0].profile)}
               title={liveWebProcs.length === 1
                 ? `打开 dsh 主界面：${liveWebProcs[0].webUrl}`
                 : `${liveWebProcs.length} 个实例运行中，点击打开最新一个`}
@@ -1091,13 +1111,9 @@ export default function App() {
               onStart={(p) => void doStartProfile(p)}
               onStop={(row) => void doStopInstance(row)}
               onRestart={(p) => void doRestartProfile(p)}
-              onOpenWeb={(u) => openDshWeb(u)}
+              onOpenWeb={(u) => openDshWeb(u, undefined, "web")}
               onOpenDeepSeek={doOpenDeepSeek}
-              onNavigate={(v) => {
-                // 与侧栏一致：进入插件页清掉 Profile 卡片带过来的预选
-                if (v === "plugins") setPluginsSeed(null);
-                setView(v);
-              }}
+              onNavigate={navigate}
               onInitDsh={() => void doInitDsh()}
             />
           )}
@@ -1272,8 +1288,8 @@ export default function App() {
                   <AlertTitle>首次使用还差一步：初始化 dsh</AlertTitle>
                   <AlertDescription>
                     dsh 的数据目录（<span className="font-mono">{env?.dshNativeHome ?? "~/.dsh"}</span>
-                    ）是第一次运行 dsh 时才生成的，在那之前 profile、快捷配置、插件管理都不可用。
-                    到「Profile 实例」页点一下「初始化 dsh（首次启动 web）」即可（等价于跑一次{" "}
+                    ）是第一次运行 dsh 时才生成的，在那之前 profile、快捷配置、模型与插件都不可用。
+                    到「Profiles」页点一下「初始化 dsh（首次启动 web）」即可（等价于跑一次{" "}
                     <span className="font-mono">dsh web</span>）。
                   </AlertDescription>
                   <AlertAction>
@@ -1342,7 +1358,9 @@ export default function App() {
           )}
 
           {view === "profiles" && (
-            <div className="space-y-3">
+            <div className="flex flex-col items-start gap-4 xl:flex-row">
+              {/* 左列：实例列表（>= xl 双栏并排；窄屏选中 profile 后隐藏，让位给全屏工作台） */}
+              <div className={`min-w-0 grow space-y-3 xl:w-[480px] xl:shrink-0 xl:grow-0 ${selectedProfile ? "hidden xl:block" : ""}`}>
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-semibold">Profile 实例</h2>
                 <span className="text-xs text-muted-foreground">
@@ -1350,6 +1368,14 @@ export default function App() {
                   不同 profile 可并行，同一 profile 同时只能运行一个
                 </span>
                 <span className="flex-1" />
+                <Button
+                  size="sm"
+                  variant={drawerOpen ? "secondary" : "outline"}
+                  onClick={() => setDrawerOpen((v) => !v)}
+                  title="实例终端：查看各实例的实时日志与启停（子进程日志实时回传，独立进程读日志文件尾部）"
+                >
+                  <Terminal /> 实例终端
+                </Button>
                 <Button
                   size="sm"
                   variant="outline"
@@ -1374,7 +1400,7 @@ export default function App() {
                         <Badge variant="outline">还没有 profile</Badge>
                       </div>
                       <p className="text-[11.5px] leading-relaxed text-muted-foreground">
-                        启动器里的实例、快捷配置、插件管理都建立在{" "}
+                        启动器里的实例、快捷配置、模型与插件都建立在{" "}
                         <span className="font-mono">$DSH_HOME/profiles</span> 之上，而这个目录是{" "}
                         <strong className="font-medium text-foreground">dsh 第一次运行时</strong>才生成的
                         —— 也就是说需要先跑一次 <span className="font-mono">dsh web</span>。
@@ -1424,56 +1450,6 @@ export default function App() {
                   </div>
                 </Card>
               )}
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs text-muted-foreground">启动方式</span>
-                <Tabs
-                  value={settings.launchMode === "detached" ? "detached" : "child"}
-                  onValueChange={(v) => doSetLaunchMode(v as "child" | "detached")}
-                >
-                  <TabsList>
-                    <TabsTrigger value="child" className="text-xs">子进程</TabsTrigger>
-                    <TabsTrigger value="detached" className="text-xs">独立进程</TabsTrigger>
-                  </TabsList>
-                </Tabs>
-                <span className="text-[11px] text-muted-foreground">
-                  {settings.launchMode === "detached"
-                    ? "独立进程随系统常驻：关闭启动器后 DSH 继续运行，重启启动器后会自动扫描识别，日志写入 ~/.dsh-starter/instance-logs"
-                    : "子进程模式：日志回传「实例终端」，启动器退出时结束所有 DSH"}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs text-muted-foreground">打开方式</span>
-                <Tabs
-                  value={settings.webOpenMode === "browser" ? "browser" : "window"}
-                  onValueChange={(v) => doSetWebOpenMode(v as "window" | "browser")}
-                >
-                  <TabsList>
-                    <TabsTrigger value="window" className="text-xs">独立窗口</TabsTrigger>
-                    <TabsTrigger value="browser" className="text-xs">系统默认浏览器</TabsTrigger>
-                  </TabsList>
-                </Tabs>
-                <span className="text-[11px] text-muted-foreground">
-                  {settings.webOpenMode === "browser"
-                    ? "点「打开」跳系统默认浏览器"
-                    : "在应用内独立窗口打开 DSH 界面（无浏览器地址栏）；同一地址复用一个窗口，多个实例可各开一个"}
-                </span>
-              </div>
-              <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
-                <span className="text-foreground">Target 标签</span>
-                {" "}按各 profile 的 <span className="font-mono">package.json</span> 中
-                <span className="font-mono"> name </span>与
-                <span className="font-mono"> dsh.profile.bundles </span>
-                识别运行形态：
-                <Badge variant="info">Web</Badge>
-                含 <span className="font-mono"> @deepseek-ai/dsh-web-app </span>
-                插件，启动后从日志识别地址，按上方「打开方式」在独立窗口或浏览器打开界面；
-                <Badge variant="secondary">Desktop</Badge>
-                为桌面应用外壳（name 为
-                <span className="font-mono"> @deepseek-ai/dsh-desktop-runtime </span>）；
-                <Badge variant="outline">未识别</Badge>
-                暂无可用的启动方式。新 Target 的启动方式将在后续版本扩展。
-                若插件导致启动异常，到「插件管理」页停用可疑插件后重启实例。
-              </div>
               <div className="space-y-2">
                 {instanceRows.map((row) => {
                   const phaseText =
@@ -1490,195 +1466,212 @@ export default function App() {
                   const canOpen = !!row.webUrl && row.phase !== "failed" && row.phase !== "stopped";
                   const targetMeta = TARGET_META[row.target];
                   const canStart = targetMeta.launchable;
-                  const expanded = !!expandedProfiles[row.profile];
+                  const selected = !!row.profile && selectedProfile === row.profile;
                   return (
-                    <Card key={row.key} className="gap-0 py-0">
-                      <Collapsible
-                        open={expanded}
-                        onOpenChange={(o) => setExpandedProfiles((m) => ({ ...m, [row.profile]: o }))}
-                      >
-                        {/* 窄窗口：状态块独占一行，操作按钮整排换到第二行（否则会被卡片裁掉） */}
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 p-3">
-                          {row.phase === "starting" ? (
-                            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-amber-500" />
-                          ) : row.phase === "ready" ? (
-                            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
-                          ) : row.phase === "failed" ? (
-                            <XCircle className="h-4 w-4 shrink-0 text-red-500" />
-                          ) : (
-                            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${row.phase === "external" ? "bg-teal-500" : "bg-muted-foreground/30"}`} />
-                          )}
-                          <div className="min-w-0 grow basis-[calc(100%-1.75rem)] xl:basis-0">
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-mono text-[13px] font-semibold">
-                                {row.profile || (row.port != null ? `:${row.port}` : "（未命名实例）")}
-                              </span>
-                              <Badge variant={targetMeta.variant} title={targetMeta.desc}>
-                                {targetMeta.label}
+                    <Card
+                      key={row.key}
+                      className={`gap-0 py-0 transition-colors ${selected ? "border-primary/60 ring-1 ring-primary/20" : ""}`}
+                    >
+                      {/* 窄窗口：状态块独占一行，操作按钮整排换到第二行（否则会被卡片裁掉） */}
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 p-3">
+                        {row.phase === "starting" ? (
+                          <Loader2 className="h-4 w-4 shrink-0 animate-spin text-amber-500" />
+                        ) : row.phase === "ready" ? (
+                          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                        ) : row.phase === "failed" ? (
+                          <XCircle className="h-4 w-4 shrink-0 text-red-500" />
+                        ) : (
+                          <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${row.phase === "external" ? "bg-teal-500" : "bg-muted-foreground/30"}`} />
+                        )}
+                        <div className="min-w-0 grow basis-[calc(100%-1.75rem)]">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono text-[13px] font-semibold">
+                              {row.profile || (row.port != null ? `:${row.port}` : "（未命名实例）")}
+                            </span>
+                            <Badge variant={targetMeta.variant} title={targetMeta.desc}>
+                              {targetMeta.label}
+                            </Badge>
+                            {row.reserved && (
+                              <Badge
+                                variant="outline"
+                                title="dsh 内置保留 profile：不可重命名/删除，避免核心数据丢失"
+                              >
+                                内置
                               </Badge>
-                              {row.reserved && (
-                                <Badge
-                                  variant="outline"
-                                  title="dsh 内置保留 profile：不可重命名/删除，避免核心数据丢失"
-                                >
-                                  内置
-                                </Badge>
-                              )}
-                            </div>
-                            <div className="text-[11px] text-muted-foreground">
-                              {phaseText}
-                              {row.pid ? ` · PID ${row.pid}` : ""}
-                              {row.port != null ? ` · :${row.port}` : ""}
-                              {row.version ? ` · ${row.version}` : ""}
-                              {/* 没在跑的行：把它上次真正跑起来的版本亮出来，
-                                  也正是这条记录决定换版本启动时要不要先确认风险 */}
-                              {!row.version && row.boundVersion ? ` · 上次 dsh ${row.boundVersion}` : ""}
-                            </div>
+                            )}
                           </div>
-                          {canOpen && (
-                            <Button
-                              size="sm"
-                              onClick={() => row.webUrl && openDshWeb(row.webUrl, `DSH · ${row.profile}`)}
-                            >
-                              <ExternalLink /> 打开
-                            </Button>
-                          )}
-                          {/* 恢复模式入口：恢复模式以官方 web 模板新建（不再复制当前 web），
-                              入口仍挂在原版 dsh 内置的 web profile 行上；已存在就不再显示 */}
-                          {row.reserved && row.target === "web" && !recoveryExists && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              title={`用 dsh 的 --from-default-profile web 新建一份只含官方插件、换邻近端口的「${RECOVERY_PROFILE}」`}
-                              onClick={() => setRecoveryOpen(true)}
-                            >
-                              <ShieldPlus /> 恢复模式
-                            </Button>
-                          )}
-                          {canStop ? (
-                            <>
-                              {row.profile && (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={restartingProfile === row.profile}
-                                  onClick={() => doRestartProfile(row.profile)}
-                                  title="停止并按当前启动方式重新启动"
-                                >
-                                  {restartingProfile === row.profile ? (
-                                    <Loader2 className="animate-spin" />
-                                  ) : (
-                                    <RotateCw />
-                                  )}{" "}
-                                  重启
-                                </Button>
-                              )}
+                          <div className="text-[11px] text-muted-foreground">
+                            {phaseText}
+                            {row.pid ? ` · PID ${row.pid}` : ""}
+                            {row.port != null ? ` · :${row.port}` : ""}
+                            {row.version ? ` · ${row.version}` : ""}
+                            {/* 没在跑的行：把它上次真正跑起来的版本亮出来，
+                                也正是这条记录决定换版本启动时要不要先确认风险 */}
+                            {!row.version && row.boundVersion ? ` · 上次 dsh ${row.boundVersion}` : ""}
+                          </div>
+                        </div>
+                        {/* 无名实例（终端 `dsh web` 没带 --profile）没有对应 profile，不提供配置工作台 */}
+                        {row.profile && (
+                          <Button
+                            size="sm"
+                            variant={selected ? "secondary" : "outline"}
+                            className="shrink-0"
+                            title="打开该 profile 的配置工作台（快捷配置 / 模型 / 插件 / 配置文件）"
+                            onClick={() => setSelectedProfile(row.profile)}
+                          >
+                            <SlidersHorizontal /> 配置
+                          </Button>
+                        )}
+                        {canOpen && (
+                          <Button
+                            size="sm"
+                            onClick={() => row.webUrl && openDshWeb(row.webUrl, `DSH · ${row.profile}`, row.profile)}
+                          >
+                            <ExternalLink /> 打开
+                          </Button>
+                        )}
+                        {/* 恢复模式入口：恢复模式以官方 web 模板新建（不再复制当前 web），
+                            入口仍挂在原版 dsh 内置的 web profile 行上；已存在就不再显示 */}
+                        {row.reserved && row.target === "web" && !recoveryExists && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            title={`用 dsh 的 --from-default-profile web 新建一份只含官方插件、换邻近端口的「${RECOVERY_PROFILE}」`}
+                            onClick={() => setRecoveryOpen(true)}
+                          >
+                            <ShieldPlus /> 恢复模式
+                          </Button>
+                        )}
+                        {canStop ? (
+                          <>
+                            {row.profile && (
                               <Button
                                 size="sm"
-                                variant="destructive"
+                                variant="outline"
                                 disabled={restartingProfile === row.profile}
-                                onClick={() => doStopInstance(row)}
+                                onClick={() => doRestartProfile(row.profile)}
+                                title="停止并按当前启动方式重新启动"
                               >
-                                <Square /> 停止
+                                {restartingProfile === row.profile ? (
+                                  <Loader2 className="animate-spin" />
+                                ) : (
+                                  <RotateCw />
+                                )}{" "}
+                                重启
                               </Button>
-                            </>
-                          ) : (
+                            )}
                             <Button
                               size="sm"
-                              variant="outline"
-                              disabled={installed.length === 0 || !canStart || restartingProfile === row.profile || startingProfile === row.profile}
-                              title={installed.length === 0
-                                ? "请先在「版本与安装」页安装 dsh"
-                                : !canStart
-                                ? `${targetMeta.desc}——当前仅支持启动 Web 类型 profile`
-                                : row.boundVersion && row.boundVersion !== settings.activeVersion
-                                ? `上次用 dsh ${row.boundVersion} 跑起来，本次将用 ${settings.activeVersion}；版本变化可能导致该 profile 起不来，会先让你确认风险`
-                                : row.phase === "failed"
-                                ? "重新启动该 profile"
-                                : `基于当前版本（${settings.activeVersion}）启动 ${row.profile}`}
-                              onClick={() => doStartProfile(row.profile)}
+                              variant="destructive"
+                              disabled={restartingProfile === row.profile}
+                              onClick={() => doStopInstance(row)}
                             >
-                              {startingProfile === row.profile ? (
-                                <Loader2 className="animate-spin" />
-                              ) : (
-                                <Play />
-                              )}{" "}
-                              启动
+                              <Square /> 停止
                             </Button>
-                          )}
-                          {row.logFile && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              title={`打开日志文件夹：${row.logFile}`}
-                              onClick={() => revealPath(row.logFile!.replace(/[\\/][^\\/]*$/, ""))}
-                            >
-                              <FileText />
-                            </Button>
-                          )}
-                          {row.profile && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              title="复制实例：把该 profile 的配置目录拷贝为新实例"
-                              onClick={() => setCopySource(row.profile)}
-                            >
-                              <CopyPlus />
-                            </Button>
-                          )}
-                          {/* dsh 内置保留 profile（headless/web/desktop）不提供改名与删除 */}
-                          {row.profile && !row.reserved && (
-                            <>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                title="重命名 profile（只改目录名，配置原样保留）"
-                                onClick={() => setRenameTarget(row.profile)}
-                              >
-                                <Pencil />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                title="删除 profile（移入 ~/.dsh-starter/deleted-profiles，可找回）"
-                                onClick={() => setDeleteTarget(row.profile)}
-                              >
-                                <Trash2 />
-                              </Button>
-                            </>
-                          )}
+                          </>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={installed.length === 0 || !canStart || restartingProfile === row.profile || startingProfile === row.profile}
+                            title={installed.length === 0
+                              ? "请先在「版本与安装」页安装 dsh"
+                              : !canStart
+                              ? `${targetMeta.desc}——当前仅支持启动 Web 类型 profile`
+                              : row.boundVersion && row.boundVersion !== settings.activeVersion
+                              ? `上次用 dsh ${row.boundVersion} 跑起来，本次将用 ${settings.activeVersion}；版本变化可能导致该 profile 起不来，会先让你确认风险`
+                              : row.phase === "failed"
+                              ? "重新启动该 profile"
+                              : `基于当前版本（${settings.activeVersion}）启动 ${row.profile}`}
+                            onClick={() => doStartProfile(row.profile)}
+                          >
+                            {startingProfile === row.profile ? (
+                              <Loader2 className="animate-spin" />
+                            ) : (
+                              <Play />
+                            )}{" "}
+                            启动
+                          </Button>
+                        )}
+                        {row.logFile && (
                           <Button
                             variant="ghost"
                             size="icon"
-                            title="打开「插件管理」并选中该 profile"
-                            onClick={() => {
-                              setPluginsSeed(row.profile);
-                              setView("plugins");
-                            }}
+                            title={`打开日志文件夹：${row.logFile}`}
+                            onClick={() => revealPath(row.logFile!.replace(/[\\/][^\\/]*$/, ""))}
                           >
-                            <Puzzle />
+                            <FileText />
                           </Button>
-                          {/* 无名实例（终端 `dsh web` 没带 --profile）没有对应 profile，不提供配置面板 */}
-                          {row.profile && (
-                            <CollapsibleTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                title={expanded ? "收起配置面板" : "展开配置面板（快捷配置 / cordis.patch.yml / package.json）"}
-                              >
-                                <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? "rotate-180" : ""}`} />
-                              </Button>
-                            </CollapsibleTrigger>
+                        )}
+                        {row.profile && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="复制实例：把该 profile 的配置目录拷贝为新实例"
+                            onClick={() => setCopySource(row.profile)}
+                          >
+                            <CopyPlus />
+                          </Button>
+                        )}
+                        {/* dsh 内置保留 profile（headless/web/desktop）不提供改名与删除 */}
+                        {row.profile && !row.reserved && (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="重命名 profile（只改目录名，配置原样保留）"
+                              onClick={() => setRenameTarget(row.profile)}
+                            >
+                              <Pencil />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="删除 profile（移入 ~/.dsh-starter/deleted-profiles，可找回）"
+                              onClick={() => setDeleteTarget(row.profile)}
+                            >
+                              <Trash2 />
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                      {/* 每个 profile 独立控制启动方式与打开方式（打开方式仅 Web 界面有意义） */}
+                      {row.profile && (
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t px-3 py-2">
+                          <Tabs
+                            value={settings.profileLaunchMode?.[row.profile] ?? settings.launchMode}
+                            onValueChange={(v) => {
+                              const mode = v as "child" | "detached";
+                              const running = row.phase === "starting" || row.phase === "ready" || row.phase === "external";
+                              if (running) setLaunchModeAsk({ profile: row.profile, mode });
+                              else void applyProfileLaunchMode(row.profile, mode);
+                            }}
+                            title={(settings.profileLaunchMode?.[row.profile] ?? settings.launchMode) === "detached"
+                              ? "独立进程：关闭启动器后 DSH 继续运行，日志写入 ~/.dsh-starter/instance-logs（下次启动/重启生效）"
+                              : "子进程：日志实时进「实例终端」，退出启动器即结束该 DSH（下次启动/重启生效）"}
+                          >
+                            <TabsList className="h-6">
+                              <TabsTrigger value="child" className="h-5 px-2 text-[11px]">子进程</TabsTrigger>
+                              <TabsTrigger value="detached" className="h-5 px-2 text-[11px]">独立进程</TabsTrigger>
+                            </TabsList>
+                          </Tabs>
+                          {row.target === "web" && (
+                            <Tabs
+                              className="ml-2"
+                              value={settings.profileWebOpenMode?.[row.profile] ?? settings.webOpenMode}
+                              onValueChange={(v) => void doSetProfileWebOpenMode(row.profile, v as "window" | "browser")}
+                              title={(settings.profileWebOpenMode?.[row.profile] ?? settings.webOpenMode) === "browser"
+                                ? "点「打开」跳系统默认浏览器"
+                                : "在应用内独立窗口打开 DSH 界面（无地址栏），同一地址复用一个窗口"}
+                            >
+                              <TabsList className="h-6">
+                                <TabsTrigger value="window" className="h-5 px-2 text-[11px]">独立窗口</TabsTrigger>
+                                <TabsTrigger value="browser" className="h-5 px-2 text-[11px]">浏览器</TabsTrigger>
+                              </TabsList>
+                            </Tabs>
                           )}
                         </div>
-                        {row.profile && (
-                          <CollapsibleContent>
-                            <div className="border-t border-border px-3 pb-4 pt-3">
-                              <ProfileConfigPanel profile={row.profile} target={row.target} onToast={addToast} />
-                            </div>
-                          </CollapsibleContent>
-                        )}
-                      </Collapsible>
+                      )}
                     </Card>
                   );
                 })}
@@ -1688,21 +1681,36 @@ export default function App() {
                   </Card>
                 )}
               </div>
-              <div className="text-[11px] text-muted-foreground">
-                启停遇到插件问题时，到「插件管理」页停用可疑插件后重启实例。
+              <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-2.5 text-[11px] leading-relaxed text-muted-foreground">
+                <span className="text-foreground">Target 标签</span>
+                {" "}按各 profile 的 <span className="font-mono">package.json</span> 中
+                <span className="font-mono"> name </span>与
+                <span className="font-mono"> dsh.profile.bundles </span>
+                识别运行形态：
+                <Badge variant="info">Web</Badge>
+                含 <span className="font-mono">@deepseek-ai/dsh-web-app</span>
+                插件，启动后从日志识别地址，按卡片上的「打开方式」在独立窗口或浏览器打开界面；
+                <Badge variant="secondary">Desktop</Badge>
+                为桌面应用外壳；<Badge variant="outline">未识别</Badge>
+                暂无可用的启动方式。启动方式与打开方式都在各 profile 卡片上独立设置，未设置过的跟随默认值；
+                若插件导致启动异常，点该 profile 的「配置」进工作台，在「插件」Tab 停用可疑插件后重启实例。
+              </div>
+              </div>
+
+              {/* 右列：选中 profile 的配置工作台（快捷配置 / 模型 / 插件 / 配置文件 / package.json）。
+                  未选中时宽屏显示引导占位、窄屏整列隐藏（左列即列表页） */}
+              <div className={`min-w-0 grow xl:basis-0 ${selectedProfile ? "" : "hidden xl:block"}`}>
+                <ProfileWorkspace
+                  profile={selectedProfile}
+                  profiles={profiles.map((p) => p.name)}
+                  target={profiles.find((p) => p.name === selectedProfile)?.target ?? "unknown"}
+                  onToast={addToast}
+                  onBack={selectedProfile ? () => setSelectedProfile(null) : undefined}
+                />
               </div>
             </div>
           )}
 
-          {view === "plugins" && (
-            <PluginsView
-              profiles={profiles.map((p) => p.name)}
-              initialProfile={pluginsSeed}
-              onToast={addToast}
-            />
-          )}
-          {view === "models" && <ModelConfigView onToast={addToast} />}
-          {view === "config" && <ConfigView onToast={addToast} />}
           {view === "stats" && <StatsView onToast={addToast} appVersion={env?.appVersion ?? ""} />}
           {view === "logs" && (
             <LogsView
@@ -1743,7 +1751,7 @@ export default function App() {
         onStop={doStopProc}
         onReadLog={readInstanceLog}
         onReveal={revealPath}
-        onOpenWeb={(u) => openDshWeb(u)}
+        onOpenWeb={(u) => openDshWeb(u, undefined, activeProc != null ? procsRef.current[activeProc]?.profile : undefined)}
         onExport={() => {
           const p = activeProc != null ? procsRef.current[activeProc] : null;
           if (!p) return;
@@ -1808,6 +1816,24 @@ export default function App() {
           api.getSettings().then(setSettings).catch(() => undefined);
         }}
       />
+
+      {/* 运行中切换启动方式：确认后才保存并重启，取消则配置不变 */}
+      <AlertDialog open={launchModeAsk != null} onOpenChange={(o) => !o && setLaunchModeAsk(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>切换「{launchModeAsk?.profile}」的启动方式需要重启实例</AlertDialogTitle>
+            <AlertDialogDescription>
+              该 profile 正在运行，启动方式在进程拉起时决定，改完要重启才生效。
+              确认后将保存为{launchModeAsk?.mode === "detached" ? "「独立进程」（后台常驻，日志写入 ~/.dsh-starter/instance-logs）" : "「子进程」（随启动器退出结束）"}并立即重启；
+              取消则保持原样、不做任何更改。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void confirmLaunchModeSwitch()}>保存并重启</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* 删除 profile 确认（内置保留 profile 不会走到这里） */}
       <AlertDialog open={deleteTarget != null} onOpenChange={(o) => !o && setDeleteTarget(null)}>
