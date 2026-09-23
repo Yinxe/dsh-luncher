@@ -51,9 +51,14 @@
   --sidebar-accent-foreground: #1f2a24;
   --sidebar-border: #dbe3d7;
   --sidebar-ring: #2f8f46;
-  /* eyebrow 标签用信号绿（Levels 招牌细节）；页面底微渐变 */
+  /* eyebrow 标签用信号绿（Levels 招牌细节）；页面底微渐变收尾偏蓝（DeepSeek 品牌调） */
   --eyebrow: var(--primary);
-  --page-gradient: linear-gradient(135deg, #fbf7ef 0%, #e7f2e4 100%);
+  --page-gradient: linear-gradient(135deg, #fbf7ef 0%, #e9eff8 100%);
+  /* 主背景极光三色：启动器是 DeepSeek 的产品，底色偏品牌蓝（#4d6bfe 系）+ 天蓝/青收尾，
+     绿留给信号色（按钮/状态）做前景，不再霸占背景 */
+  --bg-orb-1: color-mix(in oklab, #4d6bfe 15%, transparent);
+  --bg-orb-2: color-mix(in oklab, #38bdf8 10%, transparent);
+  --bg-orb-3: color-mix(in oklab, var(--meter-2) 11%, transparent);
   /* 卡片层次：奶油底上靠极暖的墨绿投影拉开前后关系（纯描边太素） */
   --card-shadow:
     0 1px 2px oklch(0.35 0.05 150 / 5%),
@@ -113,6 +118,10 @@
   --sidebar-ring: oklch(0.556 0 0);
   --eyebrow: var(--muted-foreground);
   --page-gradient: none;
+  /* 暗色极光：同样以 DeepSeek 品牌蓝领头（深底上蓝比绿更透亮），紫罗兰收尾压住角落 */
+  --bg-orb-1: color-mix(in oklab, #4d6bfe 18%, transparent);
+  --bg-orb-2: color-mix(in oklab, #38bdf8 10%, transparent);
+  --bg-orb-3: color-mix(in oklab, var(--meter-6) 8%, transparent);
   --card-shadow:
     0 1px 2px oklch(0 0 0 / 35%),
     0 10px 28px -14px oklch(0 0 0 / 55%);
@@ -188,7 +197,7 @@ body {
   font-size: 13.5px;
   overflow: hidden;
   user-select: none;
-  /* 无边框窗口：body 必须保持透明，底色/点阵纹理搬到了 .app-frame（见文件末尾），
+  /* 无边框窗口：body 必须保持透明，底色/颗粒纹理搬到了 .app-frame（见文件末尾），
      否则窗口圆角之外会被 body 的实色底填成方块 */
   background: transparent;
 }
@@ -332,6 +341,8 @@ body {
    窗口控件不必再跟 Button 自带的高度/圆角/hover 打架。 */
 .app-frame {
   position: relative;
+  /* 独立层叠上下文：让极光子层的 z-index:-1 压在窗口底色/颗粒纹理之上、所有面板内容之下 */
+  isolation: isolate;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -339,17 +350,69 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--window-radius);
   background-color: var(--background);
-  /* 控制台点阵纹理 + Levels 式奶油底微渐变（亮色；暗色 --page-gradient: none） */
+  /* 纸感颗粒纹理（内联 SVG 噪声，140px 无缝平铺）替代原控制台点阵：
+     点阵在深底上几乎看不见、亮底上又太“工程图”；细颗粒在奶油底上是纸纹、
+     在暗底上是微噪点，两种主题都只在贴近看时才显形，配极光底更耐看。
+     彩色氛围由下方极光层（::before/::after）提供，这里只留中性底纹 */
   background-image:
-    radial-gradient(
-      color-mix(in oklch, var(--foreground) 7%, transparent) 1px,
-      transparent 1px
-    ),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)' opacity='0.05'/%3E%3C/svg%3E"),
     var(--page-gradient);
-  background-size: 22px 22px, 100% 100%;
+  background-size: 140px 140px, 100% 100%;
   /* 顶边一道极淡的高光，让窗口边缘看起来像一块玻璃（用主题 token，
      不依赖 color-mix，老 WebView 上也不会退化成一条实色线） */
   box-shadow: inset 0 1px 0 var(--border);
+}
+
+/* ── 主背景极光（Aurora mesh）──────────────────────────────────────
+   两团大色斑各配三个 orb、以不同周期相向缓慢漂移，叠加处颜色互相
+   溶出第三种色，形成「一直在变」的 mesh 渐变，替掉此前一眼看穿的
+   静态双辉光。颜色全部来自 --bg-orb-*（两主题各一档强度）；
+   inset 外扩 25% 保证漂移动画永远不会把边缘拉空。侧栏/标题栏/顶栏
+   的玻璃层 backdrop-filter 糊的就是这一层，色光透过去会跟着流动。
+   只用 transform 动画（合成器线程），不触发重排。 */
+.app-frame::before,
+.app-frame::after {
+  content: "";
+  position: absolute;
+  inset: -25%;
+  z-index: -1;
+  pointer-events: none;
+}
+.app-frame::before {
+  background-image:
+    radial-gradient(34% 42% at 16% 20%, var(--bg-orb-1), transparent 70%),
+    radial-gradient(30% 38% at 84% 10%, var(--bg-orb-2), transparent 70%),
+    radial-gradient(36% 44% at 72% 86%, var(--bg-orb-3), transparent 72%);
+  animation: orb-drift-a 56s ease-in-out infinite alternate;
+}
+.app-frame::after {
+  background-image:
+    radial-gradient(30% 38% at 88% 34%, var(--bg-orb-1), transparent 70%),
+    radial-gradient(34% 40% at 24% 88%, var(--bg-orb-2), transparent 72%),
+    radial-gradient(26% 32% at 58% 6%, var(--bg-orb-3), transparent 70%);
+  animation: orb-drift-b 72s ease-in-out infinite alternate;
+}
+@keyframes orb-drift-a {
+  from {
+    transform: translate3d(-2%, -1.5%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2.5%, 2%, 0) scale(1.08);
+  }
+}
+@keyframes orb-drift-b {
+  from {
+    transform: translate3d(2%, 1%, 0) scale(1.05);
+  }
+  to {
+    transform: translate3d(-2.5%, -1.5%, 0) scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-frame::before,
+  .app-frame::after {
+    animation: none;
+  }
 }
 
 /* 最大化/全屏：贴边显示，圆角、描边、高光全部收掉 */
@@ -371,9 +434,11 @@ body {
   flex-shrink: 0;
   padding-left: 10px;
   border-bottom: 1px solid var(--border);
-  /* 跟紧挨着的侧栏同一档实色，做出「窗口标签条」的层次：
-     直接用 token 而不是 color-mix，避免老 WebView 上退化成一条实色（白）带 */
-  background: var(--sidebar);
+  /* 与侧栏/终端栏同一套玻璃材质：半透明 sidebar 色 + 背后颗粒/极光模糊透出。
+     不再用实色 var(--sidebar)，避免标题栏在三块面板里显得最“闷” */
+  background: color-mix(in oklab, var(--sidebar) 78%, transparent);
+  backdrop-filter: blur(10px) saturate(1.3);
+  -webkit-backdrop-filter: blur(10px) saturate(1.3);
   cursor: default;
   user-select: none;
   -webkit-user-select: none;
@@ -438,5 +503,24 @@ body {
 [data-slot="sidebar-container"] {
   top: var(--titlebar-h);
   height: calc(100svh - var(--titlebar-h));
+  /* 左下角直角 bug 的根源：position:fixed 的后代不受 .app-frame 的
+     overflow:hidden + 圆角裁剪，侧栏底色会把窗口圆角盖成方的。
+     与遮罩/Sheet 同一手法——给逃逸裁剪的面板自己补窗口圆角。 */
+  border-bottom-left-radius: var(--window-radius);
+}
+/* 侧栏玻璃化：半透明 sidebar 色 + 模糊，让主背景的极光/颗粒透出来，
+   与标题栏、顶栏、终端栏共用一套材质；bg-sidebar 挂在 inner 上，
+   圆角也要跟着落在 inner（容器自身没有底色） */
+[data-slot="sidebar-inner"] {
+  background-color: color-mix(in oklab, var(--sidebar) 78%, transparent);
+  backdrop-filter: blur(10px) saturate(1.3);
+  -webkit-backdrop-filter: blur(10px) saturate(1.3);
+  border-bottom-left-radius: var(--window-radius);
+}
+/* 移动端抽屉式侧栏同样上玻璃（覆盖在内容上，模糊有实际层次作用） */
+[data-slot="sidebar"][data-mobile="true"] {
+  background-color: color-mix(in oklab, var(--sidebar) 82%, transparent);
+  backdrop-filter: blur(12px) saturate(1.3);
+  -webkit-backdrop-filter: blur(12px) saturate(1.3);
 }
 

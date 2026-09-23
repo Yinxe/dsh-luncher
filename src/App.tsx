@@ -1068,7 +1068,7 @@ export default function App() {
           顶栏只留「折叠侧栏 + 拖拽区 + 高频动作」：环境状态、终端面板、检查更新
           与仓库/下载页入口都收在侧栏底部的卡片里（见 AppSidebar）。 */}
       <SidebarInset className="min-w-0 overflow-hidden bg-transparent">
-        <header className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background/80 px-2 lg:gap-2 lg:px-4">
+        <header className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background/70 px-2 backdrop-blur-[10px] backdrop-saturate-[1.3] lg:gap-2 lg:px-4">
           <SidebarTrigger title="折叠 / 展开侧栏（Ctrl+B）" />
           {/* 抽屉态（< md）侧栏不可见，顶栏补上品牌标识 */}
           <img src="/dsh-logo.svg" alt="DSH" className="h-6 w-6 shrink-0 md:hidden" draggable={false} />

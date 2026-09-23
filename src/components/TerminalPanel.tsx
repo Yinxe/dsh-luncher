@@ -197,7 +197,8 @@ export default function TerminalPanel(props: Props) {
   const emptyList = procs.length + visiblePluginJobs.length + sysTasks.length === 0;
 
   const body = (
-    <div className="flex h-full min-h-0 flex-col bg-card">
+    /* 与左侧栏/标题栏同一套玻璃材质：半透明卡面 + 背后主背景模糊透出 */
+    <div className="flex h-full min-h-0 flex-col bg-card/75 backdrop-blur-[10px] backdrop-saturate-[1.3]">
       {/* 面板头 */}
       <div className="flex shrink-0 items-center gap-2.5 border-b border-border px-4 py-3">
         <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
