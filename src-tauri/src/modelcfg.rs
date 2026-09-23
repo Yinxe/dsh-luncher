@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use serde_yaml::{Mapping, Value as Yaml};
 
-use crate::profile_cfg::{backup, global_config_path};
+use crate::profile_cfg::{self, backup, global_config_path, ProfileConfigMode};
 
 const SECTION_PROVIDERS: &str = "llm-pi-ai";
 const SECTION_DEFAULT: &str = "agent-default-model";
@@ -90,6 +90,13 @@ pub struct ModelConfig {
     pub default_model: Option<DefaultModel>,
     /// 文件存在但解析失败时置位：前端禁止结构化保存（避免覆盖坏文件前的未知内容）
     pub parse_error: Option<String>,
+    /// 配置归属："patch"（0.1.7+，path 为该 profile 的 cordis.patch.yml）
+    /// | "legacy"（全局 settings.yaml）。由 get_model_config 的 profile 路由填充
+    pub mode: String,
+    /// 模式判定所用的 dsh 版本（绑定版本，回落当前版本；可能为空）
+    pub version: String,
+    /// patch 顶层出现多份同 id 模型条目时列出 id（YAML 语义后者覆盖前者，提醒清理）
+    pub duplicate_entry_ids: Vec<String>,
 }
 
 fn yaml_to_json(v: &Yaml) -> Option<Json> {
@@ -177,6 +184,9 @@ pub fn read() -> Result<ModelConfig, String> {
         providers: Vec::new(),
         default_model: None,
         parse_error: None,
+        mode: "legacy".into(),
+        version: String::new(),
+        duplicate_entry_ids: Vec::new(),
     };
     if !exists {
         return Ok(out);
@@ -208,17 +218,123 @@ pub fn read() -> Result<ModelConfig, String> {
         }
     }
     if let Some(dm) = get(Some(root), SECTION_DEFAULT).and_then(|d| d.as_mapping()) {
-        // provider / model 任一缺失即视为未设置默认（节内可能只剩透传的未知键）
-        let provider = as_string(get(Some(dm), "provider")).unwrap_or_default();
-        let model = as_string(get(Some(dm), "model")).unwrap_or_default();
-        if !provider.is_empty() && !model.is_empty() {
-            out.default_model = Some(DefaultModel {
-                provider,
-                model,
-                reasoning_effort: as_string(get(Some(dm), "reasoningEffort")),
-                extra: extra_of(Some(dm), KNOWN_DEFAULT_KEYS),
-            });
+        out.default_model = default_from_map(dm);
+    }
+    Ok(out)
+}
+
+/// `agent-default-model` 映射 → DefaultModel；provider / model 任一缺失即视为未设置
+/// （节内可能只剩透传的未知键）
+fn default_from_map(m: &Mapping) -> Option<DefaultModel> {
+    let provider = as_string(get(Some(m), "provider")).unwrap_or_default();
+    let model = as_string(get(Some(m), "model")).unwrap_or_default();
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some(DefaultModel {
+        provider,
+        model,
+        reasoning_effort: as_string(get(Some(m), "reasoningEffort")),
+        extra: extra_of(Some(m), KNOWN_DEFAULT_KEYS),
+    })
+}
+
+// ── profile 归属读取（0.1.7 patch / 旧版全局） ─────────────────
+
+/// patch 顶层条目里定位某 id 的**有效**模型条目：带 config 且未 disabled（与
+/// `profile_cfg::set_modelcfg_entries` 的接管防线同构）。返回条目整体映射（取
+/// name/config 用）与有效条目数（>1 即存在重复，YAML 合并语义后者生效）。
+fn patch_entry(seq: &[Yaml], id: &str) -> (Option<Mapping>, usize) {
+    let mut last = None;
+    let mut count = 0;
+    for item in seq {
+        let Some(m) = item.as_mapping() else { continue };
+        if m.get(Yaml::String("id".into()))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            != Some(id)
+        {
+            continue;
         }
+        if m.get(Yaml::String("disabled".into()))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if m.get(Yaml::String("config".into())).is_none() {
+            continue;
+        }
+        count += 1;
+        last = Some(m.clone());
+    }
+    (last, count)
+}
+
+fn entry_config(entry: Option<&Mapping>) -> Option<&Mapping> {
+    entry.and_then(|e| get(Some(e), "config")).and_then(|v| v.as_mapping())
+}
+
+/// 按 profile 配置归属读取模型配置：patch → 该 profile cordis.patch.yml 的
+/// `llm-pi-ai` / `agent-default-model` 条目；legacy → 全局 settings.yaml（旧版路径）。
+pub fn read_for_profile(profile: &str, mode: &ProfileConfigMode) -> Result<ModelConfig, String> {
+    if mode.mode != "patch" {
+        let mut out = read()?;
+        out.version = mode.version.clone();
+        return Ok(out);
+    }
+    let path = profile_cfg::user_patch_path(profile)?;
+    let exists = path.is_file();
+    let mut out = ModelConfig {
+        path: path.to_string_lossy().into_owned(),
+        exists,
+        providers: Vec::new(),
+        default_model: None,
+        parse_error: None,
+        mode: "patch".into(),
+        version: mode.version.clone(),
+        duplicate_entry_ids: Vec::new(),
+    };
+    if !exists {
+        return Ok(out);
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {e}"))?;
+    if raw.trim().is_empty() {
+        return Ok(out);
+    }
+    let doc: Yaml = match serde_yaml::from_str(&raw) {
+        Ok(d) => d,
+        Err(e) => {
+            crate::diag::warn(
+                "profile",
+                &format!("cordis.patch.yml 解析失败（模型配置不可用）：{}：{e}", path.display()),
+            );
+            out.parse_error = Some(e.to_string());
+            return Ok(out);
+        }
+    };
+    let Some(seq) = doc.as_sequence() else {
+        out.parse_error = Some("cordis.patch.yml 顶层不是条目列表".into());
+        return Ok(out);
+    };
+    let (llm, llm_n) = patch_entry(seq, SECTION_PROVIDERS);
+    if llm_n > 1 {
+        out.duplicate_entry_ids.push(SECTION_PROVIDERS.to_string());
+    }
+    if let Some(cfg) = entry_config(llm.as_ref()) {
+        if let Some(provs) = get(Some(cfg), KEY_PROVIDERS).and_then(|p| p.as_mapping()) {
+            for (k, v) in provs {
+                let Some(id) = k.as_str() else { continue };
+                out.providers.push(provider_from_yaml(id, v));
+            }
+        }
+    }
+    let (def, def_n) = patch_entry(seq, SECTION_DEFAULT);
+    if def_n > 1 {
+        out.duplicate_entry_ids.push(SECTION_DEFAULT.to_string());
+    }
+    if let Some(cfg) = entry_config(def.as_ref()) {
+        out.default_model = default_from_map(cfg);
     }
     Ok(out)
 }
@@ -519,11 +635,8 @@ fn apply_section_ops(raw: &str, ops: &[(String, Option<String>)]) -> Result<Stri
     Ok(text)
 }
 
-/// 保存模型配置：只重写 `llm-pi-ai`（providers 整体替换，该节其余子键保留）与
-/// `agent-default-model` 两节，文件其余内容与节外注释逐字节保留。写前备份 + 写后校验。
-pub fn write(input: &ModelConfigInput) -> Result<(), String> {
-    validate(input)?;
-
+/// 输入清洗：id 去空白、空串收敛为 None、空数组丢弃。两条保存路径共用。
+fn normalized(input: &ModelConfigInput) -> (Vec<ProviderInput>, Option<DefaultModelInput>) {
     let providers: Vec<ProviderInput> = input
         .providers
         .iter()
@@ -559,6 +672,14 @@ pub fn write(input: &ModelConfigInput) -> Result<(), String> {
             extra: d.extra.clone(),
         }
     });
+    (providers, default_model)
+}
+
+/// 保存模型配置：只重写 `llm-pi-ai`（providers 整体替换，该节其余子键保留）与
+/// `agent-default-model` 两节，文件其余内容与节外注释逐字节保留。写前备份 + 写后校验。
+pub fn write(input: &ModelConfigInput) -> Result<(), String> {
+    validate(input)?;
+    let (providers, default_model) = normalized(input);
 
     // 读原文件：存在但解析失败 / 顶层非映射 → 拒绝（防止覆盖未知内容）
     let path = global_config_path();
@@ -682,6 +803,148 @@ pub fn write(input: &ModelConfigInput) -> Result<(), String> {
             providers.len(),
             out.len(),
             providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", "),
+            default_model
+                .as_ref()
+                .map(|d| format!("{}/{}", d.provider, d.model))
+                .unwrap_or_else(|| "（清除）".into()),
+        ),
+    );
+    Ok(())
+}
+
+// ── profile 归属保存（0.1.7 patch / 旧版全局） ─────────────────
+
+/// patch 里模型条目的默认包名：与 dsh 导入产物的条目 `name:` 一致（已存在条目则沿用原值）
+const PATCH_LLM_NAME: &str = "@deepseek-ai/dsh-llm-pi-ai";
+const PATCH_DEFAULT_NAME: &str = "@deepseek-ai/dsh-agent-default-model";
+
+/// 渲染一个带 marker 的条目块文本：`- id / name / config`（单条 YAML 序列）。
+/// 已存在同名条目的 `name:` 原样沿用，避免改动用户换过的包名/版本引用。
+fn render_entry(
+    id: &str,
+    fallback_name: &str,
+    prev: Option<&Mapping>,
+    cfg: Mapping,
+) -> Result<String, String> {
+    let mut m = Mapping::new();
+    m.insert(Yaml::String("id".into()), Yaml::String(id.into()));
+    let name = prev
+        .and_then(|p| get(Some(p), "name"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| fallback_name.into());
+    m.insert(Yaml::String("name".into()), Yaml::String(name));
+    m.insert(Yaml::String("config".into()), Yaml::Mapping(cfg));
+    let body = serde_yaml::to_string(&Yaml::Sequence(vec![Yaml::Mapping(m)]))
+        .map_err(|e| format!("序列化失败: {e}"))?;
+    Ok(format!("{}\n{}", profile_cfg::modelcfg_marker_line(id), body))
+}
+
+/// 按 profile 配置归属保存模型配置：patch → 以 marker 块整块接管该 profile
+/// cordis.patch.yml 的两个模型条目（providers 整体替换、config 其余子键与条目
+/// name 保留）；legacy → 走旧全局 settings.yaml 路径。
+pub fn write_for_profile(
+    profile: &str,
+    mode: &ProfileConfigMode,
+    input: &ModelConfigInput,
+) -> Result<(), String> {
+    if mode.mode != "patch" {
+        return write(input);
+    }
+    validate(input)?;
+    let (providers, default_model) = normalized(input);
+
+    // 现有条目只用于取 name / config 透传子键；落盘由 set_modelcfg_entries 行级手术完成
+    let path = profile_cfg::user_patch_path(profile)?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(format!(
+                "读取 cordis.patch.yml 失败，已拒绝写入以免覆盖现有内容：{e}"
+            ))
+        }
+    };
+    let seq: Vec<Yaml> = if raw.trim().is_empty() {
+        Vec::new()
+    } else {
+        let doc: Yaml = serde_yaml::from_str(&raw).map_err(|e| {
+            format!(
+                "现有 cordis.patch.yml 不是合法 YAML，拒绝写入（请先在「配置文件」页修复）: {e}"
+            )
+        })?;
+        doc.as_sequence()
+            .ok_or("cordis.patch.yml 顶层不是条目列表，拒绝写入模型配置")?
+            .clone()
+    };
+    let (llm_prev, _) = patch_entry(&seq, SECTION_PROVIDERS);
+    let (def_prev, _) = patch_entry(&seq, SECTION_DEFAULT);
+
+    // llm-pi-ai 条目：providers 整体替换，config 其余子键原样保留
+    let mut llm_cfg = Mapping::new();
+    for (k, v) in entry_config(llm_prev.as_ref()).cloned().unwrap_or_default() {
+        if k.as_str() == Some(KEY_PROVIDERS) {
+            continue;
+        }
+        llm_cfg.insert(k, v);
+    }
+    let mut provs = Mapping::new();
+    for p in &providers {
+        provs.insert(Yaml::String(p.id.clone()), provider_to_yaml(p)?);
+    }
+    llm_cfg.insert(Yaml::String(KEY_PROVIDERS.into()), Yaml::Mapping(provs));
+    let llm_block = Some(render_entry(
+        SECTION_PROVIDERS,
+        PATCH_LLM_NAME,
+        llm_prev.as_ref(),
+        llm_cfg,
+    )?);
+
+    // agent-default-model 条目：三键覆盖写入；清除默认时只删三键，config 只剩透传
+    // 子键则写回剩余，全空则整条删除（与 legacy 路径「节空则整节移除」同语义）
+    let mut def_cfg = Mapping::new();
+    for (k, v) in entry_config(def_prev.as_ref()).cloned().unwrap_or_default() {
+        if k.as_str().is_some_and(|s| KNOWN_DEFAULT_KEYS.contains(&s)) {
+            continue;
+        }
+        def_cfg.insert(k, v);
+    }
+    if let Some(d) = &default_model {
+        if let Yaml::Mapping(nm) = default_to_yaml(d)? {
+            for (k, v) in nm {
+                def_cfg.insert(k, v);
+            }
+        }
+    }
+    let def_block = if def_cfg.is_empty() {
+        None
+    } else {
+        Some(render_entry(
+            SECTION_DEFAULT,
+            PATCH_DEFAULT_NAME,
+            def_prev.as_ref(),
+            def_cfg,
+        )?)
+    };
+
+    profile_cfg::set_modelcfg_entries(
+        profile,
+        &[
+            (SECTION_PROVIDERS, llm_block),
+            (SECTION_DEFAULT, def_block),
+        ],
+    )?;
+    // 只记 provider/model 名：patch 与 settings.yaml 同样可能带 apiKeyEnv 等引用信息
+    crate::diag::info(
+        "profile",
+        &format!(
+            "模型配置已保存（patch）：profile「{profile}」共 {} 个 provider providers=[{}] 默认={}",
+            providers.len(),
+            providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             default_model
                 .as_ref()
                 .map(|d| format!("{}/{}", d.provider, d.model))
@@ -1448,6 +1711,328 @@ dshp-token-meter:
             before.default_model.is_some()
         );
 
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    // ── patch 模式（0.1.7+，profile 归属读写） ─────────────────
+
+    fn patch_mode() -> ProfileConfigMode {
+        ProfileConfigMode {
+            profile: "web-try".into(),
+            mode: "patch",
+            version: "0.1.7-alpha.2".into(),
+            imported: true,
+        }
+    }
+
+    /// 在临时 DSH_HOME 下铺 profiles/web-try/cordis.patch.yml，返回 (临时家目录, patch 路径)
+    fn setup_profile_patch(tag: &str, content: Option<&str>) -> (PathBuf, PathBuf) {
+        let tmp = tmp_home(tag);
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof = tmp.join("profiles/web-try");
+        std::fs::create_dir_all(&prof).unwrap();
+        let patch = prof.join("cordis.patch.yml");
+        if let Some(c) = content {
+            std::fs::write(&patch, c).unwrap();
+        }
+        (tmp, patch)
+    }
+
+    /// dsh 0.1.7 导入产物的真实形态：无 marker 的模型条目 + !!js 表达式 + 无关条目
+    const IMPORTED_PATCH: &str = r#"- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3080
+    trustedHosts: !!js ctx.webStartup.trustedHosts
+
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai@2.0.0"
+  config:
+    providers:
+      openrouter:
+        apiKeyEnv: OPENROUTER_API_KEY
+        api: openai-completions
+        baseURL: https://openrouter.ai/api/v1
+        models:
+          - id: deepseek-v4
+            name: DeepSeek V4
+
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: openrouter
+    model: deepseek-v4
+
+- id: ui-theme
+  config:
+    preference: dark
+"#;
+
+    fn input_from_config(cfg: &ModelConfig) -> ModelConfigInput {
+        ModelConfigInput {
+            providers: cfg
+                .providers
+                .iter()
+                .map(|p| ProviderInput {
+                    id: p.id.clone(),
+                    display_name: p.display_name.clone(),
+                    api: p.api.clone(),
+                    base_url: p.base_url.clone(),
+                    api_key_env: p.api_key_env.clone(),
+                    headers: p.headers.clone(),
+                    compat: p.compat.clone(),
+                    models: p
+                        .models
+                        .iter()
+                        .map(|m| ModelEntryInput {
+                            id: m.id.clone(),
+                            name: m.name.clone(),
+                            context_window: m.context_window,
+                            max_tokens: m.max_tokens,
+                            input: Some(m.input.clone()).filter(|v| !v.is_empty()),
+                            reasoning_efforts: m.reasoning_efforts.clone(),
+                            extra: m.extra.clone(),
+                        })
+                        .collect(),
+                    extra: p.extra.clone(),
+                })
+                .collect(),
+            default_model: cfg.default_model.as_ref().map(|d| DefaultModelInput {
+                provider: d.provider.clone(),
+                model: d.model.clone(),
+                reasoning_effort: d.reasoning_effort.clone(),
+                extra: d.extra.clone(),
+            }),
+        }
+    }
+
+    #[test]
+    fn patch_read_parse_error_and_missing_file() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 文件不存在：exists=false 而不是报错（dsh 未跑过的新 profile）
+        let (tmp, _) = setup_profile_patch("patch-missing", None);
+        let cfg = read_for_profile("web-try", &patch_mode()).unwrap();
+        assert!(!cfg.exists);
+        assert!(cfg.providers.is_empty() && cfg.default_model.is_none());
+        std::fs::remove_dir_all(&tmp).ok();
+
+        // 顶层是映射（手写坏文件）：parse_error 置位而不是 panic
+        let (tmp, _) = setup_profile_patch("patch-bad", Some("llm-pi-ai:\n  providers: {}\n"));
+        let cfg = read_for_profile("web-try", &patch_mode()).unwrap();
+        assert!(cfg.parse_error.is_some());
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    #[test]
+    fn patch_write_creates_marker_blocks_on_missing_file() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tmp, patch) = setup_profile_patch("patch-new", None);
+        write_for_profile("web-try", &patch_mode(), &simple_input()).unwrap();
+        let raw = std::fs::read_to_string(&patch).unwrap();
+        assert_eq!(raw.matches("# dsh-starter: modelcfg").count(), 2);
+        assert!(raw.contains("- id: llm-pi-ai"));
+        assert!(raw.contains("dsh-llm-pi-ai"));
+        let back = read_for_profile("web-try", &patch_mode()).unwrap();
+        assert_eq!(back.mode, "patch");
+        assert_eq!(back.version, "0.1.7-alpha.2");
+        assert!(back.duplicate_entry_ids.is_empty());
+        assert_eq!(back.providers.len(), 1);
+        let p = &back.providers[0];
+        assert_eq!((p.id.as_str(), p.base_url.as_deref()), ("alpha", Some("https://a.example/v1")));
+        assert_eq!(p.models[0].id, "m1");
+        let d = back.default_model.unwrap();
+        assert_eq!(
+            (d.provider.as_str(), d.model.as_str(), d.reasoning_effort.as_deref()),
+            ("alpha", "m1", Some("low"))
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    #[test]
+    fn patch_write_takes_over_imported_entries_and_preserves_rest() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tmp, patch) = setup_profile_patch("patch-takeover", Some(IMPORTED_PATCH));
+        write_for_profile("web-try", &patch_mode(), &simple_input()).unwrap();
+        let raw = std::fs::read_to_string(&patch).unwrap();
+
+        // 无 marker 的导入块被整块接管：条目唯一 + 打上 marker；旧 provider 整体替换
+        assert_eq!(raw.matches("- id: llm-pi-ai").count(), 1);
+        assert_eq!(raw.matches("- id: agent-default-model").count(), 1);
+        assert_eq!(raw.matches("# dsh-starter: modelcfg").count(), 2);
+        assert!(!raw.contains("openrouter"), "导入的旧 providers 应被整体替换");
+        // 条目 name 沿用原值（用户可能钉了版本/dist-tag）
+        assert!(raw.contains("dsh-llm-pi-ai@2.0.0"));
+        // 无关条目与 !!js 表达式逐行保留
+        assert!(raw.contains("trustedHosts: !!js ctx.webStartup.trustedHosts"));
+        assert!(raw.contains("- id: webserver") && raw.contains("port: 3080"));
+        assert!(raw.contains("- id: ui-theme") && raw.contains("preference: dark"));
+
+        let back = read_for_profile("web-try", &patch_mode()).unwrap();
+        assert_eq!(back.providers[0].id, "alpha");
+        assert!(back.parse_error.is_none(), "{:?}", back.parse_error);
+
+        // 二次保存仍唯一（marker 块自身被再次接管，不叠块）
+        write_for_profile("web-try", &patch_mode(), &simple_input()).unwrap();
+        let raw2 = std::fs::read_to_string(&patch).unwrap();
+        assert_eq!(raw2.matches("- id: llm-pi-ai").count(), 1);
+        assert_eq!(raw2.matches("# dsh-starter: modelcfg").count(), 2);
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    #[test]
+    fn patch_clear_default_drops_entry_unless_extra_subkeys_remain() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tmp, patch) = setup_profile_patch("patch-clear", Some(IMPORTED_PATCH));
+        let mut input = simple_input();
+        input.default_model = None;
+        write_for_profile("web-try", &patch_mode(), &input).unwrap();
+        let raw = std::fs::read_to_string(&patch).unwrap();
+        // 默认条目 config 只有三键 → 整条移除；llm 条目照写
+        assert!(!raw.contains("- id: agent-default-model"));
+        assert!(raw.contains("- id: llm-pi-ai"));
+        assert!(read_for_profile("web-try", &patch_mode()).unwrap().default_model.is_none());
+        std::fs::remove_dir_all(&tmp).ok();
+
+        // config 带未知子键 → 只删三键，其余保留
+        let (tmp, patch) = setup_profile_patch(
+            "patch-clear2",
+            Some("- id: agent-default-model\n  config:\n    provider: a\n    model: m\n    cacheTtl: 60\n"),
+        );
+        let input = ModelConfigInput { providers: vec![], default_model: None };
+        write_for_profile("web-try", &patch_mode(), &input).unwrap();
+        let raw = std::fs::read_to_string(&patch).unwrap();
+        assert!(raw.contains("cacheTtl: 60"), "未知子键必须保留:\n{raw}");
+        assert!(!raw.contains("provider: a"));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    #[test]
+    fn patch_read_flags_duplicate_entries_last_wins_and_write_dedupes() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dup = "\
+- id: llm-pi-ai
+  config:
+    providers:
+      alpha:
+        models:
+          - id: a1
+- id: llm-pi-ai
+  config:
+    providers:
+      beta:
+        models:
+          - id: b1
+";
+        let (tmp, patch) = setup_profile_patch("patch-dup", Some(dup));
+        let cfg = read_for_profile("web-try", &patch_mode()).unwrap();
+        assert_eq!(cfg.duplicate_entry_ids, vec![SECTION_PROVIDERS.to_string()]);
+        assert_eq!(cfg.providers[0].id, "beta", "重复条目按后者生效读取");
+
+        let input = ModelConfigInput {
+            providers: vec![ProviderInput {
+                id: "gamma".into(),
+                display_name: None,
+                api: None,
+                base_url: None,
+                api_key_env: None,
+                headers: None,
+                compat: None,
+                models: vec![ModelEntryInput {
+                    id: "g1".into(),
+                    name: None,
+                    context_window: None,
+                    max_tokens: None,
+                    input: None,
+                    reasoning_efforts: None,
+                    extra: None,
+                }],
+                extra: None,
+            }],
+            default_model: None,
+        };
+        write_for_profile("web-try", &patch_mode(), &input).unwrap();
+        let raw = std::fs::read_to_string(&patch).unwrap();
+        assert_eq!(raw.matches("- id: llm-pi-ai").count(), 1, "重复条目保存后收敛为一条:\n{raw}");
+        assert!(!raw.contains("beta"));
+        let back = read_for_profile("web-try", &patch_mode()).unwrap();
+        assert!(back.duplicate_entry_ids.is_empty());
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    #[test]
+    fn profile_mode_legacy_routes_to_global_settings() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = setup("patch-legacy-route", Some(SAMPLE));
+        let mode = ProfileConfigMode {
+            profile: "web".into(),
+            mode: "legacy",
+            version: "0.1.6-alpha.2".into(),
+            imported: false,
+        };
+        let cfg = read_for_profile("web", &mode).unwrap();
+        assert_eq!((cfg.mode.as_str(), cfg.version.as_str()), ("legacy", "0.1.6-alpha.2"));
+        assert_eq!(cfg.path, cfg_path().to_string_lossy());
+        assert_eq!(cfg.providers.len(), 2);
+        write_for_profile("web", &mode, &simple_input()).unwrap();
+        let raw = std::fs::read_to_string(cfg_path()).unwrap();
+        assert!(raw.contains("llm-pi-ai:") && !raw.contains("dsh-starter: modelcfg"));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+    }
+
+    /// 真实数据冒烟：拷贝本机 ~/.dsh/profiles/web-try/cordis.patch.yml（含 !!js、
+    /// 导入的模型条目、启停管理块）到临时 DSH_HOME，结构化回写一遍，
+    /// 只允许模型条目区变化，其余内容逐行保真。
+    #[test]
+    fn patch_real_web_try_smoke() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(home) = std::env::var_os("HOME") else { return };
+        let real = PathBuf::from(home).join(".dsh/profiles/web-try/cordis.patch.yml");
+        let Ok(real_raw) = std::fs::read_to_string(&real) else {
+            return;
+        };
+        let (tmp, patch) = setup_profile_patch("patch-real", Some(&real_raw));
+        let before = read_for_profile("web-try", &patch_mode()).unwrap();
+        assert!(before.parse_error.is_none(), "真实 patch 必须可解析: {:?}", before.parse_error);
+
+        let input = input_from_config(&before);
+        write_for_profile("web-try", &patch_mode(), &input).unwrap();
+        let after_raw = std::fs::read_to_string(&patch).unwrap();
+
+        // 结构化语义不变
+        let after = read_for_profile("web-try", &patch_mode()).unwrap();
+        let ids = |c: &ModelConfig| {
+            c.providers
+                .iter()
+                .map(|p| (p.id.clone(), p.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&before), ids(&after));
+        assert_eq!(
+            after.default_model.as_ref().map(|d| (d.provider.clone(), d.model.clone())),
+            before.default_model.as_ref().map(|d| (d.provider.clone(), d.model.clone()))
+        );
+        // 非模型条目的 `!!js` 表达式行必须原样存活（模型条目内的会随 providers
+        // 整体替换而消失，属预期；行内容含 llm/模型包名的跳过不强求）
+        for l in real_raw.lines().filter(|l| l.contains("!!js") && !l.trim().starts_with('#')) {
+            if l.contains("llm") {
+                continue;
+            }
+            assert!(after_raw.contains(l.trim()), "!!js 行丢失: {l}");
+        }
+        // 其余顶层条目 id 一个不少
+        for id in ["ui-theme", "webserver", "web-runtime", "connection", "ui-chat"] {
+            if real_raw.contains(&format!("- id: {id}")) {
+                assert!(after_raw.contains(&format!("- id: {id}")), "{id} 条目丢失");
+            }
+        }
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");
     }

@@ -887,11 +887,231 @@ pub fn write_global_config(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── 0.1.7 配置模式判定与旧版全局配置还原 ─────────────────────
+
+/// 0.1.7 起 dsh 的插件设置与模型配置全部按 profile 存进该 profile 的 cordis.patch.yml；
+/// 旧全局 ~/.dsh/settings.yaml 只会被「首个以 ≥0.1.7 启动的 profile」导入一次并改名
+/// settings.yaml.imported（官方行为，见 @deepseek-ai/dsh-settings README）。
+pub const PATCH_CONFIG_MIN_VERSION: &str = "0.1.7";
+
+/// 该 dsh 版本是否已启用「按 profile 的 cordis.patch 配置体系」。
+/// 破坏性变更自 **0.1.7-alpha.x** 起生效，而严格 semver 里预发布号小于同号正式版
+///（`0.1.7-alpha.2 < 0.1.7`），故下界取 `0.1.7-0`：semver 规定数字预发布标识小于
+/// 任何字母标识，`-alpha/-rc` 等都排在它后面、`0.1.6-*` 整族排在它前面。
+/// 版本串解析不了时按旧版处理（维持改动前的行为）。
+pub fn uses_patch_config(version: &str) -> bool {
+    let v = version.trim();
+    if v.is_empty() {
+        return false;
+    }
+    crate::semver::compare(v, &format!("{PATCH_CONFIG_MIN_VERSION}-0")) != std::cmp::Ordering::Less
+}
+
+/// 一个 profile 的配置归属形态（驱动前端「模型/配置文件」走 patch 还是旧全局文件）
+#[derive(Clone, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileConfigMode {
+    pub profile: String,
+    /// "patch"（≥0.1.7）| "legacy"（<0.1.7 或版本未知）
+    pub mode: &'static str,
+    /// 判定所用的生效版本：绑定版本，缺省回落当前版本；可能为空
+    pub version: String,
+    /// settings.yaml.imported 存在 = 全局配置已被导入过一次（旧版启动前需还原）
+    pub imported: bool,
+}
+
+pub fn profile_config_mode(settings: &Settings, profile: &str) -> ProfileConfigMode {
+    let version = crate::profile_versions::bound(profile).or_else(|| {
+        let v = settings.active_version.trim().to_string();
+        (!v.is_empty()).then_some(v)
+    });
+    let patch = version.as_deref().is_some_and(uses_patch_config);
+    ProfileConfigMode {
+        profile: profile.trim().to_string(),
+        mode: if patch { "patch" } else { "legacy" },
+        version: version.unwrap_or_default(),
+        imported: imported_settings_path().is_file(),
+    }
+}
+
+pub fn imported_settings_path() -> PathBuf {
+    profiles::dsh_native_home().join("settings.yaml.imported")
+}
+
+/// 旧版 dsh（<0.1.7）只认 ~/.dsh/settings.yaml。若它已被 0.1.7 导入并改名
+///（settings.yaml 缺失、settings.yaml.imported 存在），复制还原一份供旧版启动。
+/// settings.yaml 已存在时 no-op（幂等，绝不覆盖）；.imported 本体保持不动，
+/// 已导入的 profile 不受影响。返回还原后的路径（未动作为 None）。
+pub fn restore_legacy_settings() -> Option<PathBuf> {
+    let cfg = global_config_path();
+    let imported = imported_settings_path();
+    if cfg.exists() || !imported.is_file() {
+        return None;
+    }
+    match std::fs::copy(&imported, &cfg) {
+        Ok(_) => {
+            crate::diag::info(
+                "profile",
+                &format!(
+                    "旧版兼容：已从 settings.yaml.imported 还原全局配置 {}（{} 字节）",
+                    cfg.display(),
+                    std::fs::metadata(&cfg).map(|m| m.len()).unwrap_or(0)
+                ),
+            );
+            Some(cfg)
+        }
+        Err(e) => {
+            crate::diag::warn(
+                "profile",
+                &format!("还原旧版全局配置失败：{}：{e}", imported.display()),
+            );
+            None
+        }
+    }
+}
+
+/// 生成一个 modelcfg 接管块的标记注释行（与 web-quick 标记同族，供整块替换时识别）
+pub fn modelcfg_marker_line(id: &str) -> String {
+    format!("{MODELCFG_MARKER} {id}（启动器管理：保存「模型配置」整块覆盖此条目）")
+}
+
+/// 整块替换 / 追加 / 删除 profile patch 顶层的模型配置条目。
+/// `blocks` = [(条目 id, Some(整块文本) | None = 移除该条目)]；
+/// 同 id 重复条目只在第一处落新块，其余丢弃（与 web 快捷配置同一策略）。
+/// 用户手写注释保留；顶层不是条目列表则拒绝写入；写前备份 + YAML 校验 + tmp/rename 原子写。
+pub fn set_modelcfg_entries(profile: &str, blocks: &[(&str, Option<String>)]) -> Result<(), String> {
+    let path = user_patch_path(profile)?;
+    // 只有「文件不存在」才当空 patch；权限/IO 失败必须拒绝写，否则会覆盖丢其它条目
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("读取 cordis.patch.yml 失败，已拒绝写入以免覆盖现有内容：{e}")),
+    };
+    // 顶层是映射（手写坏文件）则不接管——与快捷配置同一防线
+    if !raw.trim().is_empty() {
+        if let Ok(serde_yaml::Value::Mapping(_)) = serde_yaml::from_str::<serde_yaml::Value>(&raw) {
+            return Err("cordis.patch.yml 顶层不是条目列表，无法写入模型配置".into());
+        }
+    }
+    let lines: Vec<&str> = raw.lines().collect();
+    let has_append = blocks.iter().any(|(_, b)| b.is_some());
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 16);
+    let mut applied = vec![false; blocks.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].starts_with("- ") {
+            // 空 flow 占位行：只要还有新块要落盘就不能留（flow 与 block 序列不能混用）
+            if has_append && is_empty_flow_placeholder(lines[i]) {
+                i += 1;
+                continue;
+            }
+            out.push(lines[i].to_string());
+            i += 1;
+            continue;
+        }
+        // 顶层条目块 = 起始行 + 后续缩进行/空行（与 set_web_quick_config 同一区间语义）
+        let mut j = i + 1;
+        while j < lines.len() && (lines[j].starts_with(' ') || lines[j].trim().is_empty()) {
+            j += 1;
+        }
+        let item = yaml_item_of(&lines[i..j].join("\n"));
+        let id = item
+            .as_ref()
+            .and_then(|it| it.get("id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+        // 只接管带 config 且未禁用的条目（与快捷配置同一防线）：
+        // 「- id: <x> + disabled: true」是用户关插件的管理块，动了它就是擅自重新启用
+        let is_config = item.as_ref().is_some_and(|it| {
+            it.get("config").is_some()
+                && !it.get("disabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+        });
+        let k = is_config
+            .then(|| id.as_deref().and_then(|id| blocks.iter().position(|(bid, _)| *bid == id)))
+            .flatten();
+        if let Some(k) = k {
+            if !applied[k] {
+                drop_modelcfg_marker(&mut out);
+                if let Some(text) = blocks[k].1.as_deref() {
+                    out.extend(text.trim_end_matches('\n').split('\n').map(String::from));
+                }
+                applied[k] = true;
+            }
+            i = j;
+            continue;
+        }
+        out.extend(lines[i..j].iter().map(|l| l.to_string()));
+        i = j;
+    }
+    for (k, (_, text)) in blocks.iter().enumerate() {
+        if applied[k] {
+            continue;
+        }
+        // None 且本来就不存在：无事可做；Some：追加到条目列表末尾
+        let Some(text) = text.as_deref() else { continue };
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        out.extend(text.trim_end_matches('\n').split('\n').map(String::from));
+    }
+
+    let mut out_text = out.join("\n");
+    if !out_text.is_empty() {
+        out_text.push('\n');
+    }
+    validate_yaml(&out_text)?;
+    backup(&path)?;
+    write_patch_atomic(&path, &out_text)?;
+    crate::diag::info(
+        "profile",
+        &format!(
+            "模型配置条目已写入 profile「{profile}」cordis.patch.yml：[{}]（{} 字节）",
+            blocks
+                .iter()
+                .map(|(id, b)| format!("{id}:{}", if b.is_some() { "写" } else { "删" }))
+                .collect::<Vec<_>>()
+                .join(" "),
+            out_text.len()
+        ),
+    );
+    Ok(())
+}
+
+/// 清理紧邻上一行的 modelcfg 标记注释（用户注释保留），与 drop_web_quick_marker 同构
+fn drop_modelcfg_marker(out: &mut Vec<String>) {
+    let mut last = out.len();
+    while last > 0 && out[last - 1].trim().is_empty() {
+        last -= 1;
+    }
+    if last > 0 && out[last - 1].trim_start().starts_with(MODELCFG_MARKER) {
+        out.truncate(last - 1);
+    }
+}
+
+/// patch 文件原子写：同目录 tmp + rename（modelcfg.rs 对 settings.yaml 的同款防线，
+/// 半截 patch 会让 dsh 整个 profile 起不来）
+fn write_patch_atomic(path: &std::path::Path, text: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "cordis.patch.yml 路径缺少父目录".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    let tmp = parent.join("cordis.patch.yml.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("写入失败: {e}"))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("写入失败: {e}"));
+    }
+    Ok(())
+}
+
 // ── 基于 cordis.patch 的插件包启停 ─────────────────────
 
 const MANAGE_MARKER: &str = "# dsh-starter: disable";
+const MODELCFG_MARKER: &str = "# dsh-starter: modelcfg";
 
-fn user_patch_path(profile: &str) -> Result<PathBuf, String> {
+pub(crate) fn user_patch_path(profile: &str) -> Result<PathBuf, String> {
     Ok(profile_dir(profile)?.join("cordis.patch.yml"))
 }
 
@@ -3234,5 +3454,93 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");
         std::env::remove_var("DSH_STARTER_HOME");
+    }
+
+    /// 配置模式判定：绑定版本优先，回落当前版本；0.1.7 是分水岭，pre-release 归旧侧
+    #[test]
+    fn profile_config_mode_routes_by_version() {
+        let _env = crate::util::DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-cfgmode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("starter")).unwrap();
+        std::env::set_var("DSH_HOME", &tmp);
+        std::env::set_var("DSH_STARTER_HOME", tmp.join("starter"));
+
+        let mut s = Settings::default();
+        s.active_version = "0.1.7-alpha.2".into();
+        // 无绑定 → 回落当前版本 ≥0.1.7 → patch
+        let m = profile_config_mode(&s, "web");
+        assert_eq!((m.mode, m.version.as_str()), ("patch", "0.1.7-alpha.2"));
+
+        // 绑定旧版覆盖当前版本 → legacy
+        crate::profile_versions::record("web", "0.1.6");
+        assert_eq!(profile_config_mode(&s, "web").mode, "legacy");
+
+        // 恰为 0.1.7 与其 pre-release 都是新体系（破坏性变更自 0.1.7-alpha.x 起）
+        crate::profile_versions::record("web", "0.1.7");
+        assert_eq!(profile_config_mode(&s, "web").mode, "patch");
+        crate::profile_versions::record("web", "0.1.7-alpha.1");
+        assert_eq!(profile_config_mode(&s, "web").mode, "patch");
+        crate::profile_versions::record("web", "0.1.6-rc.9");
+        assert_eq!(profile_config_mode(&s, "web").mode, "legacy");
+
+        // 版本完全未知（无绑定 + 当前版本为空）→ 按 legacy 处理，维持旧行为
+        s.active_version = String::new();
+        let m = profile_config_mode(&s, "web");
+        assert_eq!((m.mode, m.version.as_str()), ("legacy", "0.1.6-rc.9"), "绑定仍在");
+        let m = profile_config_mode(&s, "never-bound");
+        assert_eq!((m.mode, m.version.as_str()), ("legacy", ""));
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+        std::env::remove_var("DSH_STARTER_HOME");
+    }
+
+    #[test]
+    fn profile_config_mode_reports_imported_flag() {
+        let _env = crate::util::DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-cfgmode-imp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("DSH_HOME", &tmp);
+        std::env::set_var("DSH_STARTER_HOME", tmp.join("starter"));
+        let s = Settings::default();
+        assert!(!profile_config_mode(&s, "web").imported);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(imported_settings_path(), "ui-theme:\n  preference: dark\n").unwrap();
+        assert!(profile_config_mode(&s, "web").imported);
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
+        std::env::remove_var("DSH_STARTER_HOME");
+    }
+
+    /// 旧版启动前的全局配置还原：只在 settings.yaml 缺失且有 .imported 时复制一份，
+    /// 绝不覆盖已有文件，.imported 本体保持不动。
+    #[test]
+    fn restore_legacy_settings_copies_only_when_missing() {
+        let _env = crate::util::DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("DSH_HOME", &tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let imported = "# 导入存档\nui-theme:\n  preference: dark\n";
+        std::fs::write(imported_settings_path(), imported).unwrap();
+
+        let restored = restore_legacy_settings().expect("缺 settings.yaml 时应还原");
+        assert_eq!(restored, global_config_path());
+        assert_eq!(std::fs::read_to_string(&restored).unwrap(), imported);
+        assert_eq!(std::fs::read_to_string(imported_settings_path()).unwrap(), imported);
+
+        // 幂等：settings.yaml 已存在时 no-op，且绝不覆盖用户改过的内容
+        std::fs::write(global_config_path(), "mine: 1\n").unwrap();
+        assert!(restore_legacy_settings().is_none());
+        assert_eq!(std::fs::read_to_string(global_config_path()).unwrap(), "mine: 1\n");
+
+        // 无 .imported 存档：无事可做
+        std::fs::remove_file(global_config_path()).unwrap();
+        std::fs::remove_file(imported_settings_path()).unwrap();
+        assert!(restore_legacy_settings().is_none());
+
+        std::fs::remove_dir_all(&tmp).ok();
+        std::env::remove_var("DSH_HOME");
     }
 }

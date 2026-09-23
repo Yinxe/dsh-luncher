@@ -41,9 +41,15 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// Profile 启动方式：child=子进程（随启动器退出）| detached=独立进程（后台常驻，默认）
     pub launch_mode: String,
+    /// 按 profile 的启动方式覆盖（键=profile 名，值 child|detached）；未覆盖的走全局 launch_mode
+    #[serde(default)]
+    pub profile_launch_mode: std::collections::HashMap<String, String>,
     /// Web UI 打开方式：window=应用内独立窗口（默认）| browser=系统默认浏览器
     #[serde(default = "default_web_open_mode")]
     pub web_open_mode: String,
+    /// 按 profile 的打开方式覆盖（键=profile 名，值 window|browser）；仅 Web 类型 profile 有意义
+    #[serde(default)]
+    pub profile_web_open_mode: std::collections::HashMap<String, String>,
     /// 可选的 GitHub Token：只用于提高 api.github.com 额度（匿名 60/小时 → 5000/小时）。
     /// 探测与更新检测走免额度通道（jsDelivr / git），留空也能正常用。
     pub github_token: String,
@@ -117,7 +123,15 @@ impl Settings {
             ("node_path".into(), self.node_path.clone()),
             ("node_mirror".into(), self.node_mirror.clone()),
             ("launch_mode".into(), self.launch_mode.clone()),
+            (
+                "profile_launch_mode".into(),
+                if self.profile_launch_mode.is_empty() { "（无覆盖）".into() } else { format!("{} 项覆盖", self.profile_launch_mode.len()) },
+            ),
             ("web_open_mode".into(), self.web_open_mode.clone()),
+            (
+                "profile_web_open_mode".into(),
+                if self.profile_web_open_mode.is_empty() { "（无覆盖）".into() } else { format!("{} 项覆盖", self.profile_web_open_mode.len()) },
+            ),
             ("log_level".into(), self.log_level.clone()),
             ("terminal".into(), self.terminal.clone()),
             ("close_to_tray".into(), b(self.close_to_tray)),
@@ -157,7 +171,9 @@ impl Default for Settings {
             node_mirror: "https://npmmirror.com/mirrors/node".into(),
             close_to_tray: true,
             launch_mode: "detached".into(),
+            profile_launch_mode: Default::default(),
             web_open_mode: default_web_open_mode(),
+            profile_web_open_mode: Default::default(),
             log_level: default_log_level(),
             github_token: String::new(),
             github_accel: true,
@@ -288,6 +304,45 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "含 token 的 settings.json 应仅本人可读写");
         }
+
+        std::env::remove_var("DSH_STARTER_HOME");
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// 按 profile 的启动/打开方式覆盖表要能落盘并读回；老 settings.json 没这两个键时默认空表
+    #[test]
+    fn profile_mode_maps_round_trip_and_default_to_empty() {
+        let _env = crate::util::DSH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-settings-modes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("DSH_STARTER_HOME", &tmp);
+
+        let mut s = Settings::default();
+        s.profile_launch_mode
+            .insert("web".into(), "child".into());
+        s.profile_web_open_mode
+            .insert("web-try".into(), "browser".into());
+        save_settings(&s).unwrap();
+        let back = load_settings();
+        assert_eq!(back.profile_launch_mode.get("web").map(String::as_str), Some("child"));
+        assert_eq!(
+            back.profile_web_open_mode.get("web-try").map(String::as_str),
+            Some("browser")
+        );
+
+        // 旧版本写出的 settings.json（没有这两个键）必须仍能解析，且得到空表
+        let path = settings_path();
+        let mut legacy: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("profileLaunchMode");
+        legacy.as_object_mut().unwrap().remove("profileWebOpenMode");
+        fs::write(&path, legacy.to_string()).unwrap();
+        let back = load_settings();
+        assert!(back.profile_launch_mode.is_empty());
+        assert!(back.profile_web_open_mode.is_empty());
+        assert_eq!(back.launch_mode, "detached");
 
         std::env::remove_var("DSH_STARTER_HOME");
         fs::remove_dir_all(&tmp).ok();

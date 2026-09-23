@@ -130,6 +130,13 @@ pub async fn save_settings(
     if !matches!(settings.web_open_mode.as_str(), "window" | "browser") {
         settings.web_open_mode = "window".into();
     }
+    // 按 profile 的覆盖表同样收敛：脏值直接丢弃（等价于该 profile 未覆盖）
+    settings
+        .profile_launch_mode
+        .retain(|_, v| matches!(v.as_str(), "child" | "detached"));
+    settings
+        .profile_web_open_mode
+        .retain(|_, v| matches!(v.as_str(), "window" | "browser"));
     // 有实例运行时禁止切换当前版本：所有 profile 实例都基于 active 版本启动。
     // 这个守卫要枚举系统进程（Windows 上要起 PowerShell，1s 级），必须离开主线程 ——
     // 同步命令跑在主线程上，会把界面冻住（与 GitHub issue #1 同一类问题）。
@@ -369,6 +376,11 @@ pub async fn launch_version(
         if let Err(msg) = ensure_profile_free(&proc_state, &profile) {
             return Err(msg.into());
         }
+        // 旧版兜底：目标 dsh < 0.1.7 时它只认全局 settings.yaml，若已被 0.1.7 导入
+        // 改名则先还原一份（幂等，绝不改 .imported；诊断日志由 restore 内部记录）。
+        if !crate::profile_cfg::uses_patch_config(&target.version) {
+            crate::profile_cfg::restore_legacy_settings();
+        }
         Ok(starter::launch(
             &settings,
             &target,
@@ -435,6 +447,9 @@ pub struct VersionChange {
 pub struct StartResult {
     pub proc: Option<crate::procs::ProcInfo>,
     pub version_change: Option<VersionChange>,
+    /// 旧版（<0.1.7）启动前从 settings.yaml.imported 还原了全局配置时带回其路径，
+    /// 前端 toast 明示；未发生还原为 null
+    pub legacy_restored: Option<String>,
 }
 
 fn version_change(profile: &str, from: &str, to: &str) -> VersionChange {
@@ -565,6 +580,7 @@ async fn start_instance(
             return Ok(StartResult {
                 proc: None,
                 version_change: Some(change),
+                legacy_restored: None,
             })
         }
         Prep::Go(target, profile, launch_args, confirmed_version) => {
@@ -574,6 +590,21 @@ async fn start_instance(
     let prep = (target, profile, launch_args);
     let profile_name = prep.1.clone();
 
+    // 旧版兜底（spawn 前）：本次要跑的 dsh < 0.1.7，而它只认全局 settings.yaml。
+    // 若那份文件已被 0.1.7 导入改名（只剩 settings.yaml.imported），先复制还原一份，
+    // 否则旧版读不到模型/凭据配置。幂等：settings.yaml 已存在则 no-op，绝不改 .imported。
+    let version_for_restore = prep.0.version.clone();
+    let legacy_restored = tauri::async_runtime::spawn_blocking(move || {
+        if crate::profile_cfg::uses_patch_config(&version_for_restore) {
+            None
+        } else {
+            crate::profile_cfg::restore_legacy_settings()
+                .map(|p| p.to_string_lossy().into_owned())
+        }
+    })
+    .await
+    .map_err(|e| format!("启动失败: {e}"))?;
+
     // 2) 独立进程：直接 spawn（无 keeper、无日志管道），实例由 /proc 扫描感知
     if detached {
         let rec = confirmed_version.clone();
@@ -582,7 +613,7 @@ async fn start_instance(
             if let Some(v) = rec {
                 crate::profile_versions::record(&prep.1, &v);
             }
-            Ok(started(info))
+            Ok(started(info, legacy_restored))
         })
         .await
         .map_err(|e| format!("启动失败: {e}"))?;
@@ -603,13 +634,14 @@ async fn start_instance(
         let p = profile_name;
         tauri::async_runtime::spawn_blocking(move || crate::profile_versions::record(&p, &v));
     }
-    Ok(started(info))
+    Ok(started(info, legacy_restored))
 }
 
-fn started(info: crate::procs::ProcInfo) -> StartResult {
+fn started(info: crate::procs::ProcInfo, legacy_restored: Option<String>) -> StartResult {
     StartResult {
         proc: Some(info),
         version_change: None,
+        legacy_restored,
     }
 }
 
@@ -1922,16 +1954,111 @@ pub fn write_global_config(content: String) -> Result<(), String> {
     crate::profile_cfg::write_global_config(&content)
 }
 
-/// 读取模型配置（settings.yaml 的 llm-pi-ai.providers 与 agent-default-model）
+/// 只读查看被 0.1.7 导入存档的旧全局配置（settings.yaml.imported）；不存在时 Err
 #[tauri::command]
-pub fn get_model_config() -> Result<crate::modelcfg::ModelConfig, String> {
-    crate::modelcfg::read()
+pub fn read_imported_settings() -> Result<String, String> {
+    let path = crate::profile_cfg::imported_settings_path();
+    if !path.is_file() {
+        return Err("~/.dsh/settings.yaml.imported 不存在：全局配置还没有被 0.1.7+ 导入过".into());
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {e}"))
 }
 
-/// 保存模型配置：仅重写上述两节（其余内容与节外注释逐字节保留，写前自动备份）
+/// profile 的配置归属判定（patch=0.1.7+ / legacy=旧版全局），驱动前端各 Tab 的读写路由
 #[tauri::command]
-pub fn set_model_config(config: crate::modelcfg::ModelConfigInput) -> Result<(), String> {
-    crate::modelcfg::write(&config)
+pub async fn get_profile_config_mode(
+    state: State<'_, AppState>,
+    profile: String,
+) -> Result<crate::profile_cfg::ProfileConfigMode, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let profile = profile.trim().to_string();
+    if profile.is_empty() {
+        return Err("未指定 profile".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(crate::profile_cfg::profile_config_mode(&settings, &profile))
+    })
+    .await
+    .map_err(|e| format!("判定失败: {e}"))?
+}
+
+/// 读取模型配置。profile 为 None → 全局 settings.yaml（旧入口，兼容首页跳转）；
+/// Some → 按该 profile 的归属路由：≥0.1.7 读 cordis.patch.yml，旧版读全局并标注 mode
+#[tauri::command]
+pub async fn get_model_config(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+) -> Result<crate::modelcfg::ModelConfig, String> {
+    let profile = profile.filter(|p| !p.trim().is_empty()).map(|p| p.trim().to_string());
+    let settings = state.settings.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(profile) = profile else {
+            return crate::modelcfg::read();
+        };
+        let mode = crate::profile_cfg::profile_config_mode(&settings, &profile);
+        crate::modelcfg::read_for_profile(&profile, &mode)
+    })
+    .await
+    .map_err(|e| format!("读取失败: {e}"))?
+}
+
+/// 保存模型配置：路由同 `get_model_config`。patch 模式以 marker 块整块接管该 profile
+/// cordis.patch.yml 的两个模型条目（其余条目逐字节保留，写前自动备份）
+#[tauri::command]
+pub async fn set_model_config(
+    state: State<'_, AppState>,
+    profile: Option<String>,
+    config: crate::modelcfg::ModelConfigInput,
+) -> Result<(), String> {
+    let profile = profile.filter(|p| !p.trim().is_empty()).map(|p| p.trim().to_string());
+    let settings = state.settings.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(profile) = profile else {
+            return crate::modelcfg::write(&config);
+        };
+        let mode = crate::profile_cfg::profile_config_mode(&settings, &profile);
+        crate::modelcfg::write_for_profile(&profile, &mode, &config)
+    })
+    .await
+    .map_err(|e| format!("保存失败: {e}"))?
+}
+
+/// 把模型配置同步写入多个 profile（仅 ≥0.1.7 的目标有效）。
+/// 返回失败清单（空 = 全部成功）；逐个目标写入，互不影响。
+#[tauri::command]
+pub async fn sync_model_config(
+    state: State<'_, AppState>,
+    targets: Vec<String>,
+    config: crate::modelcfg::ModelConfigInput,
+) -> Result<Vec<String>, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut failures: Vec<String> = Vec::new();
+        for t in targets.iter() {
+            let t = t.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let mode = crate::profile_cfg::profile_config_mode(&settings, t);
+            if mode.mode != "patch" {
+                let v = if mode.version.is_empty() {
+                    "未知".to_string()
+                } else {
+                    mode.version.clone()
+                };
+                failures.push(format!(
+                    "「{t}」绑定 dsh {v}（< 0.1.7），模型配置仍走全局 settings.yaml，已跳过"
+                ));
+                continue;
+            }
+            if let Err(e) = crate::modelcfg::write_for_profile(t, &mode, &config) {
+                failures.push(format!("「{t}」写入失败: {e}"));
+            }
+        }
+        Ok(failures)
+    })
+    .await
+    .map_err(|e| format!("同步失败: {e}"))?
 }
 
 /// 拉取服务方可用模型（GET {baseURL}/models；密钥：手动值 > 凭据 refs > 环境变量）
