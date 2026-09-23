@@ -1462,8 +1462,11 @@ export default function App() {
 
           {view === "profiles" && (
             /* @container：双栏判定按「内容区实际多宽」算而不是视口 ——
-               右侧终端面板打开时（尤其侧栏展开）内容会被挤掉 ~420px，视口口径会误判成还能双栏 */
-            <div className="@container flex flex-col items-start gap-4 @[60rem]:flex-row">
+               右侧终端面板打开时（尤其侧栏展开）内容会被挤掉 ~420px，视口口径会误判成还能双栏。
+               注意：容器查询对自己不生效（@[60rem]:flex-row 若挂在 @container 同一元素上永远不匹配），
+               所以外层只放 @container，flex 与断点类放内层。 */
+            <div className="@container">
+            <div className="flex flex-col items-start gap-4 @[60rem]:flex-row">
               {/* 左列：实例列表（内容够宽时双栏并排；窄屏选中 profile 后隐藏，让位给全屏工作台） */}
               <div className={`min-w-0 grow space-y-3 @[60rem]:w-[480px] @[60rem]:shrink-0 @[60rem]:grow-0 ${selectedProfile ? "hidden @[60rem]:block" : ""}`}>
               <div className="flex items-center gap-2">
@@ -1816,6 +1819,7 @@ export default function App() {
                   onOpenPluginTerminal={openPluginTerminal}
                 />
               </div>
+            </div>
             </div>
           )}
 
