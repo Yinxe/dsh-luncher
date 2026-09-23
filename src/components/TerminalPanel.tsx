@@ -201,7 +201,12 @@ export default function TerminalPanel(props: Props) {
       {/* 面板头 */}
       <div className="flex shrink-0 items-center gap-2.5 border-b border-border px-4 py-3">
         <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
-        <SheetTitle className="text-xs font-bold">终端</SheetTitle>
+        {/* SheetTitle 底层是 DialogTitle：只在 Sheet 宿主里合法，行内右栏用普通标题 */}
+        {inline ? (
+          <div className="text-xs font-bold">终端</div>
+        ) : (
+          <SheetTitle className="text-xs font-bold">终端</SheetTitle>
+        )}
         <Badge variant={running > 0 ? "success" : "secondary"}>{running} 运行中</Badge>
         <span className="flex-1" />
         <Button size="sm" variant="ghost" onClick={props.onClearFinished} disabled={!hasFinished} title="移除已退出的实例与已结束的安装任务">
