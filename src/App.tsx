@@ -41,10 +41,12 @@ import UpdateBanner from "./components/UpdateBanner";
 import AppSidebar from "./components/AppSidebar";
 import DshChangelogDialog from "./components/DshChangelogDialog";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
+import { useTerminalJobs } from "./hooks/use-terminal-jobs";
 import type {
   EnvironmentInfo, InstalledVersion, StarterUpdateStatus, ProcEntry,
   ProcExitEvent, ProcLogEvent, ProfileInfo, ProfileInstance, ProfileTarget,
   RegistryInfo, Settings as SettingsT, View, VersionChange, ProfileVersionInfo,
+  InstallFinishedEvent, RuntimeFinishedEvent,
 } from "./types";
 
 /** 恢复模式 profile 名（与后端 profile_cfg::RECOVERY_PROFILE 保持一致） */
@@ -85,7 +87,6 @@ export default function App() {
   const [remoteErr, setRemoteErr] = useState<string | null>(null);
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [installed, setInstalled] = useState<InstalledVersion[]>([]);
-  const [installJob, setInstallJob] = useState<{ version: string; logs: string[] } | null>(null);
   const [update, setUpdate] = useState<StarterUpdateStatus | null>(null);
   const [updateApplying, setUpdateApplying] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<{ received: number; total: number } | null>(null);
@@ -95,7 +96,6 @@ export default function App() {
   const [procs, setProcs] = useState<Record<number, ProcEntry>>({});
   const [activeProc, setActiveProc] = useState<number | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [runtimeJob, setRuntimeJob] = useState<{ received: number; total: number; log: string[] } | null>(null);
   const runtimeBusy = useRef(false);
   const [instances, setInstances] = useState<ProfileInstance[]>([]);
   const [view, setView] = useState<View>("quick");
@@ -189,6 +189,44 @@ export default function App() {
       setBoundVersions(Object.fromEntries(versions.map((v) => [v.profile, v.version])));
     } catch { /* ignore */ }
   }, []);
+
+  // ── 系统任务（dsh 版本安装 / Node 安装）：事件流统一进 useTerminalJobs，
+  //    日志与终态记录供通用终端面板展示；toast/设当前版本等副作用留在下面回调里 ──
+  const onInstallFinished = useCallback(async (e: InstallFinishedEvent) => {
+    if (!e.success) {
+      addToast("err", `dsh ${e.version} 安装失败：${e.message.split("\n")[0]}`);
+      return;
+    }
+    await refreshInstalled();
+    const s = settingsRef.current;
+    if (!s || s.activeVersion === e.version) {
+      addToast("ok", `dsh ${e.version} 安装完成，已设为当前版本`);
+    } else if (instancesRef.current.some((i) => i.running)) {
+      // 与手动切换同样的限制：有实例运行时不切换，只安装
+      addToast(
+        "err",
+        `dsh ${e.version} 安装完成，但有 Profile 实例正在运行，未自动切换为当前版本。请先停止所有实例，再手动切换`
+      );
+    } else {
+      const next = { ...s, activeVersion: e.version };
+      setSettings(next);
+      try {
+        await api.saveSettings(next);
+        addToast("ok", `dsh ${e.version} 安装完成，已设为当前版本`);
+      } catch (err) {
+        setSettings(s);
+        addToast("err", `dsh ${e.version} 已安装，但自动设为当前版本失败: ${err}`);
+      }
+    }
+  }, [addToast, refreshInstalled]);
+  const onRuntimeFinished = useCallback((e: RuntimeFinishedEvent) => {
+    addToast(e.ok ? "ok" : "err", e.message);
+  }, [addToast]);
+  const {
+    installTask, nodeTask,
+    startInstall, startNode,
+    fail: failSystemTask,
+  } = useTerminalJobs({ onInstallFinished, onRuntimeFinished });
 
   // ── 首次初始化（dsh 还没生成 $DSH_HOME 时） ────────────────
   // dsh 的数据目录是「第一次运行 dsh」才生成的；在那之前没有任何 profile，
@@ -287,10 +325,10 @@ export default function App() {
       }
       try {
         const running = await api.installRunning();
-        if (running) setInstallJob({ version: running, logs: [] });
+        if (running) startInstall(running);
       } catch { /* ignore */ }
     })();
-  }, [refreshRemote, refreshInstances, addToast]);
+  }, [refreshRemote, refreshInstances, addToast, startInstall]);
 
   // Profile 实例状态轮询（外部终端启动的进程也要能感知）
   useEffect(() => {
@@ -307,39 +345,6 @@ export default function App() {
     let alive = true;
     const track = (p?: Promise<() => void>) =>
       p?.then((u) => { if (alive) unlisteners.push(u); else u(); }).catch(() => undefined);
-    track(events.onInstallLog?.((e) => {
-      setInstallJob((job) =>
-        job && job.version === e.version ? { ...job, logs: [...job.logs.slice(-400), e.line] } : job
-      );
-    }));
-    track(events.onInstallFinished?.(async (e) => {
-      setInstallJob((job) => (job && job.version === e.version ? null : job));
-      if (e.success) {
-        await refreshInstalled();
-        const s = settingsRef.current;
-        if (!s || s.activeVersion === e.version) {
-          addToast("ok", `dsh ${e.version} 安装完成，已设为当前版本`);
-        } else if (instancesRef.current.some((i) => i.running)) {
-          // 与手动切换同样的限制：有实例运行时不切换，只安装
-          addToast(
-            "err",
-            `dsh ${e.version} 安装完成，但有 Profile 实例正在运行，未自动切换为当前版本。请先停止所有实例，再手动切换`
-          );
-        } else {
-          const next = { ...s, activeVersion: e.version };
-          setSettings(next);
-          try {
-            await api.saveSettings(next);
-            addToast("ok", `dsh ${e.version} 安装完成，已设为当前版本`);
-          } catch (err) {
-            setSettings(s);
-            addToast("err", `dsh ${e.version} 已安装，但自动设为当前版本失败: ${err}`);
-          }
-        }
-      } else {
-        addToast("err", `dsh ${e.version} 安装失败：${e.message.split("\n")[0]}`);
-      }
-    }));
     track(events.onStarterUpdate?.((s) => {
       setUpdate(s);
       // 静默自动更新：后端已经在下载了，这里把进度条顶起来。
@@ -385,16 +390,6 @@ export default function App() {
       } else if (e.code === 0) addToast("ok", `dsh ${e.version}${tag} 正常退出`);
       else addToast("err", `dsh ${e.version}${tag} 已退出，退出码 ${e.code}`);
     }));
-    track(events.onRuntimeLog?.((line) =>
-      setRuntimeJob((j) => (j ? { ...j, log: [...j.log.slice(-20), line] } : j))
-    ));
-    track(events.onRuntimeProgress?.((e) =>
-      setRuntimeJob((j) => (j ? { ...j, received: e.received, total: e.total } : j))
-    ));
-    track(events.onRuntimeFinished?.((e) => {
-      addToast(e.ok ? "ok" : "err", e.message);
-      if (!e.ok) setRuntimeJob(null);
-    }));
     track(events.onToast?.((text) => addToast("err", text)));
     return () => { for (const u of unlisteners) u(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -402,14 +397,14 @@ export default function App() {
 
   // ── 动作 ───────────────────────────────────
   const doInstall = useCallback(async (version: string, force: boolean) => {
-    setInstallJob((job) => (job ? job : { version, logs: [] }));
+    startInstall(version);
     try {
       await api.install(version, force);
     } catch (e) {
-      setInstallJob(null);
+      failSystemTask("dshInstall", version, String(e));
       addToast("err", `安装失败: ${e}`);
     }
-  }, [addToast]);
+  }, [addToast, startInstall, failSystemTask]);
 
   /** 实例终端的停止：内嵌/独立/外部统一按 PID 走 stop_process */
   const doStopProc = useCallback(async (id: number) => {
@@ -429,18 +424,19 @@ export default function App() {
   const doInstallRuntime = useCallback(async () => {
     if (runtimeBusy.current) return;
     runtimeBusy.current = true;
-    setRuntimeJob({ received: 0, total: 0, log: [] });
+    startNode();
     try {
       const msg = await api.installRuntime();
       addToast("ok", msg);
       setEnv(await api.getEnvironment());
     } catch (e) {
+      // 后端失败路径也会 emit runtime-finished；fail 只动在途任务，双保险
+      failSystemTask("nodeInstall", "node", String(e));
       addToast("err", String(e));
     } finally {
       runtimeBusy.current = false;
-      setRuntimeJob(null);
     }
-  }, [addToast]);
+  }, [addToast, startNode, failSystemTask]);
 
   const doSetNodeSource = useCallback(async (v: "auto" | "system" | "runtime") => {
     const s = settingsRef.current;
@@ -1057,26 +1053,26 @@ export default function App() {
         {env && !env.node && (
           <Alert
             variant="destructive"
-            className={`shrink-0 animate-in gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px] fade-in slide-in-from-top-2 duration-300 ${runtimeJob ? "" : "pr-40"}`}
+            className={`shrink-0 animate-in gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px] fade-in slide-in-from-top-2 duration-300 ${nodeTask ? "" : "pr-40"}`}
           >
             <XCircle />
-            {runtimeJob ? (
+            {nodeTask ? (
               <>
                 <AlertTitle className="font-normal">
                   正在安装内置 Node…
-                  {runtimeJob.total > 0 &&
-                    ` ${Math.round((runtimeJob.received / runtimeJob.total) * 100)}% (${(runtimeJob.received / 1048576).toFixed(1)}/${(runtimeJob.total / 1048576).toFixed(1)} MB)`}
+                  {nodeTask.total > 0 &&
+                    ` ${Math.round((nodeTask.received / nodeTask.total) * 100)}% (${(nodeTask.received / 1048576).toFixed(1)}/${(nodeTask.total / 1048576).toFixed(1)} MB)`}
                 </AlertTitle>
-                {runtimeJob.total > 0 && (
+                {nodeTask.total > 0 && (
                   <AlertDescription>
                     <Progress
-                      value={(runtimeJob.received / runtimeJob.total) * 100}
+                      value={(nodeTask.received / nodeTask.total) * 100}
                       className="h-1.5 max-w-md bg-red-500/20"
                     />
                   </AlertDescription>
                 )}
                 <AlertDescription className="truncate font-mono text-[11px]">
-                  {runtimeJob.log[runtimeJob.log.length - 1] ?? "连接镜像站…"}
+                  {nodeTask.lines[nodeTask.lines.length - 1] ?? "连接镜像站…"}
                 </AlertDescription>
               </>
             ) : (
@@ -1164,15 +1160,15 @@ export default function App() {
                       内置运行时已就绪：{env.runtimeDir}
                     </div>
                   )}
-                  {runtimeJob && (
+                  {nodeTask && (
                     <div className="mt-2.5 space-y-1.5 text-xs text-muted-foreground">
-                      {runtimeJob.total > 0 && (
-                        <Progress value={(runtimeJob.received / runtimeJob.total) * 100} className="h-1.5" />
+                      {nodeTask.total > 0 && (
+                        <Progress value={(nodeTask.received / nodeTask.total) * 100} className="h-1.5" />
                       )}
                       <div className="flex items-center gap-1.5">
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        {runtimeJob.total > 0
-                          ? `${Math.round((runtimeJob.received / runtimeJob.total) * 100)}% (${(runtimeJob.received / 1048576).toFixed(1)}/${(runtimeJob.total / 1048576).toFixed(1)} MB)`
+                        {nodeTask.total > 0
+                          ? `${Math.round((nodeTask.received / nodeTask.total) * 100)}% (${(nodeTask.received / 1048576).toFixed(1)}/${(nodeTask.total / 1048576).toFixed(1)} MB)`
                           : "连接镜像站…"}
                       </div>
                     </div>
@@ -1218,8 +1214,8 @@ export default function App() {
                 </Card>
               </div>
 
-              {installJob && (
-                <InstallCard version={installJob.version} logs={installJob.logs} onCancel={doCancelInstall} />
+              {installTask && (
+                <InstallCard version={installTask.id} logs={installTask.lines} onCancel={doCancelInstall} />
               )}
 
               {remoteErr && !remoteLoading && (
@@ -1326,7 +1322,7 @@ export default function App() {
                           key={`${r.version}-${r.installed?.source ?? "remote"}`}
                           row={r}
                           isLatestTag={latestVersion === r.version}
-                          busy={installJob !== null}
+                          busy={installTask !== null}
                           upgradeTo={
                             !hasLatestInstalled &&
                             r.installed && r.installed.version !== "unknown" && latestVersion &&

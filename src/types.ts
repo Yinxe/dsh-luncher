@@ -296,6 +296,32 @@ export interface RuntimeFinishedEvent {
   message: string;
 }
 
+/** ── 通用终端右侧栏：统一任务模型（纯前端状态，无对应 Rust 结构体） ── */
+export type TerminalTaskKind = "instance" | "plugin" | "dshInstall" | "nodeInstall";
+
+/** 面板内任务寻址：id = 实例 pid / 插件 jobId / dshInstall 版本号 / nodeInstall 固定 "node" */
+export interface TerminalTaskRef {
+  kind: TerminalTaskKind;
+  id: string;
+}
+
+/** dsh 版本安装 / Node 安装的前端生命周期记录（结束后保留终态，供面板回看） */
+export interface SystemTask {
+  kind: "dshInstall" | "nodeInstall";
+  id: string;
+  label: string;
+  running: boolean;
+  ok: boolean | null;
+  message: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+  /** 下载进度（仅 nodeInstall）；total=0 表示未知 */
+  received: number;
+  total: number;
+  lines: string[];
+  dropped: number;
+}
+
 export interface ProfileInstance {
   profile: string;
   running: boolean;
