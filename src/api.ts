@@ -239,9 +239,10 @@ export const api = {
   listProfiles: () => invoke<ProfileInfo[]>("list_profiles"),
   reveal: (path: string) => invoke<void>("reveal_folder", { path }),
   openUrl: (url: string) => invoke<void>("open_external", { url }),
-  /** 应用内独立窗口打开实例 Web UI；同一地址复用同一窗口，多实例可各开一个 */
-  openWebWindow: (url: string, title?: string, theme?: "dark" | "light") =>
-    invoke<void>("open_web_window", { url, title: title ?? null, theme: theme ?? null }),
+  /** 应用内独立窗口打开实例 Web UI；同一地址复用同一窗口，多实例可各开一个。
+   *  multi=true 时不复用，每次调用都新开一个窗口（如 DeepSeek 官方对话） */
+  openWebWindow: (url: string, title?: string, theme?: "dark" | "light", multi?: boolean) =>
+    invoke<void>("open_web_window", { url, title: title ?? null, theme: theme ?? null, multi: multi ? true : null }),
   installRuntime: () => invoke<string>("install_runtime"),
   checkStarterUpdate: () => invoke<StarterUpdateStatus>("check_starter_update"),
   /** 下载并安装启动器新版本；非 Windows 上成功后进程会直接重启，不返回 */

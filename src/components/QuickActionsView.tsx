@@ -1,5 +1,5 @@
 import {
-  CheckCircle2, ExternalLink, Loader2, Play, Rocket, RotateCw, Square, XCircle,
+  CheckCircle2, ExternalLink, Loader2, MessageSquare, Play, Rocket, RotateCw, Square, XCircle,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -38,6 +38,7 @@ interface Props {
   onStop: (row: { profile: string; pid: number | null }) => void;
   onRestart: (profile: string) => void;
   onOpenWeb: (url: string) => void;
+  onOpenDeepSeek: () => void;
   onNavigate: (v: View) => void;
   onInitDsh: () => void;
 }
@@ -50,6 +51,30 @@ const PHASE_TEXT: Record<QuickInstanceRow["phase"], string> = {
   external: "运行中",
 };
 
+/** 首页的 DeepSeek 官方对话入口：应用内独立窗口打开，支持同时开多个窗口 */
+function DeepSeekCard({ onOpen }: { onOpen: () => void }) {
+  return (
+    <Card className="p-5">
+      <div className="flex flex-wrap items-center gap-x-3.5 gap-y-3">
+        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+          <MessageSquare className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 grow basis-[calc(100%-3.5rem)] xl:basis-0">
+          <div className="text-[15px] font-semibold">DeepSeek 对话</div>
+          <div className="truncate text-xs text-muted-foreground">
+            在应用内独立窗口打开官方 chat.deepseek.com，可开多个窗口并行会话
+          </div>
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <Button variant="outline" onClick={onOpen} title="打开 https://chat.deepseek.com/（每次新开一个窗口）">
+            <ExternalLink /> <span className="hidden sm:inline">打开 DeepSeek</span>
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 /**
  * 「首页」：只做一件事 —— 内置 web profile 的一键起停。
  * 状态、地址、动作全部收在一张卡里，其余功能各页自管。
@@ -57,7 +82,7 @@ const PHASE_TEXT: Record<QuickInstanceRow["phase"], string> = {
 export default function QuickActionsView(props: Props) {
   const {
     row, activeVersion, hasNode, hasInstalled, starting, restarting, initBusy,
-    onStart, onStop, onRestart, onOpenWeb, onNavigate, onInitDsh,
+    onStart, onStop, onRestart, onOpenWeb, onOpenDeepSeek, onNavigate, onInitDsh,
   } = props;
 
   // dsh 还没初始化：先给引导，否则这里没有任何可操作的对象
@@ -93,6 +118,7 @@ export default function QuickActionsView(props: Props) {
             </div>
           </div>
         </Card>
+        <DeepSeekCard onOpen={onOpenDeepSeek} />
       </div>
     );
   }
@@ -183,6 +209,7 @@ export default function QuickActionsView(props: Props) {
           </p>
         )}
       </Card>
+      <DeepSeekCard onOpen={onOpenDeepSeek} />
     </div>
   );
 }

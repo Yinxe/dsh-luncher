@@ -2032,6 +2032,8 @@ try {
 
 /// 在应用内为实例的 Web UI 开一个独立窗口（无浏览器地址栏，像桌面端一样）。
 /// 同一地址复用同一窗口（已开则前置聚焦），多个实例可以同时各开一个窗口。
+/// `multi=true` 时不复用：每次点击都新开一个窗口（同地址多个会话并行的场景，
+/// 如 DeepSeek 官方对话），label 在基础名后追加最小未占用序号。
 ///
 /// 窗口装饰完全交给系统（标题栏、拖动、缩放都是原生的），启动器不插手：
 /// 自绘标题栏要么依赖各平台各自的窗口能力（Linux 的 Wayland 会话下直接不成立，
@@ -2042,6 +2044,7 @@ pub fn open_web_window(
     url: String,
     title: Option<String>,
     theme: Option<String>,
+    multi: Option<bool>,
 ) -> Result<(), String> {
     let parsed: tauri::Url = url
         .parse()
@@ -2067,13 +2070,29 @@ pub fn open_web_window(
         })
         .collect();
     let port = parsed.port().map(|p| format!("-{p}")).unwrap_or_default();
-    let label = format!("dsh-web-{}-{host}{port}", parsed.scheme());
+    let base_label = format!("dsh-web-{}-{host}{port}", parsed.scheme());
+    let multi = multi.unwrap_or(false);
+    let label = if multi {
+        // 基础名空闲就用基础名（首个窗口与非 multi 形态一致），否则找最小未占用序号
+        if app.get_webview_window(&base_label).is_some() {
+            (2u32..)
+                .map(|i| format!("{base_label}-{i}"))
+                .find(|l| app.get_webview_window(l).is_none())
+                .ok_or_else(|| "打开的窗口太多了，请先关闭一些再试".to_string())?
+        } else {
+            base_label
+        }
+    } else {
+        base_label
+    };
     let win_title = title.unwrap_or_else(|| "DSH Web".into());
-    if let Some(win) = app.get_webview_window(&label) {
-        let _ = win.unminimize();
-        win.show().map_err(|e| format!("恢复窗口失败: {e}"))?;
-        win.set_focus().map_err(|e| format!("聚焦窗口失败: {e}"))?;
-        return Ok(());
+    if !multi {
+        if let Some(win) = app.get_webview_window(&label) {
+            let _ = win.unminimize();
+            win.show().map_err(|e| format!("恢复窗口失败: {e}"))?;
+            win.set_focus().map_err(|e| format!("聚焦窗口失败: {e}"))?;
+            return Ok(());
+        }
     }
     // 白屏刺眼的修复：外部页面要等网络/JS 就绪，先按主题铺好窗口底色，
     // 并以隐藏方式创建，首屏加载完成（或 5 秒兜底）再显示。

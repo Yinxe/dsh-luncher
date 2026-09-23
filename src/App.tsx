@@ -526,6 +526,17 @@ export default function App() {
     p.catch((e) => addToast("err", String(e)));
   }, [addToast, resolved]);
 
+  /** 首页 DeepSeek 入口：始终用应用内独立窗口打开官方对话，每次点击新开一个窗口；
+   *  在途守卫只防误触连发，不限制用户有意地多次打开 */
+  const deepSeekOpeningRef = useRef(false);
+  const doOpenDeepSeek = useCallback(() => {
+    if (deepSeekOpeningRef.current) return;
+    deepSeekOpeningRef.current = true;
+    api.openWebWindow("https://chat.deepseek.com/", "DeepSeek", resolved, true)
+      .catch((e) => addToast("err", String(e)))
+      .finally(() => { deepSeekOpeningRef.current = false; });
+  }, [addToast, resolved]);
+
   const doSetActiveVersion = useCallback(async (v: string) => {
     const s = settingsRef.current;
     if (!s || s.activeVersion === v) return;
@@ -1081,6 +1092,7 @@ export default function App() {
               onStop={(row) => void doStopInstance(row)}
               onRestart={(p) => void doRestartProfile(p)}
               onOpenWeb={(u) => openDshWeb(u)}
+              onOpenDeepSeek={doOpenDeepSeek}
               onNavigate={(v) => {
                 // 与侧栏一致：进入插件页清掉 Profile 卡片带过来的预选
                 if (v === "plugins") setPluginsSeed(null);
