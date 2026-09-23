@@ -126,7 +126,7 @@ export const api = {
   getPatchReload: (profile: string) => invoke<string>("get_patch_reload", { profile }),
   setBundleEnabled: (profile: string, name: string, enabled: boolean) =>
     invoke<void>("set_bundle_enabled", { profile, name, enabled }),
-  // ── 插件管理：全部走官方 dsh plugin 命令，输出实时回流到内置终端 ──
+  // ── 插件管理：全部走官方 dsh plugin 命令，输出实时回流到通用终端面板 ──
   /** 安装/升级插件（dsh plugin add，可一次多个规格），返回任务 id */
   pluginInstall: (profile: string, specs: string[], mode: "install" | "upgrade" = "install") =>
     invoke<number>("plugin_install", { profile, specs, mode }),

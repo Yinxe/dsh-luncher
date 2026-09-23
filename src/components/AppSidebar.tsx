@@ -171,7 +171,7 @@ export default function AppSidebar({
   };
 
   /**
-   * 「运行状态」详情：环境状态灯 + 实例终端入口 + 目录与源路径。
+   * 「运行状态」详情：环境状态灯 + 终端面板入口 + 目录与源路径。
    * 展开态与收起态共用同一份内容，点按钮后在侧栏旁边以 Popover 展示，
    * 不再常驻一张大卡片占掉侧栏底部空间。
    */
@@ -435,7 +435,7 @@ export default function AppSidebar({
         </div>
 
         {/* 收起态：状态灯收成一个按钮（保留灯做概览），点击同样弹出详情 Popover；
-            实例终端 / 仓库入口保持独立按钮（tooltip 兜底） */}
+            终端面板 / 仓库入口保持独立按钮（tooltip 兜底） */}
         <div className="hidden flex-col items-center gap-2 py-1 group-data-[collapsible=icon]:flex">
           <Popover>
             <PopoverTrigger asChild>

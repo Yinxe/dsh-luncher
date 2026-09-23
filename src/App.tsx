@@ -452,7 +452,7 @@ export default function App() {
     }
   }, [addToast, startInstall, failSystemTask]);
 
-  /** 实例终端的停止：内嵌/独立/外部统一按 PID 走 stop_process */
+  /** 终端面板实例任务的停止：内嵌/独立/外部统一按 PID 走 stop_process */
   const doStopProc = useCallback(async (id: number) => {
     try {
       const hit = await api.stopProcess(id);
@@ -749,7 +749,7 @@ export default function App() {
         addToast("info", `旧版 dsh：全局配置已从 settings.yaml.imported 还原到 ${res.legacyRestored}`);
       }
       if (detached) {
-        // 独立进程没有日志管道：先刷新实例列表把它带进「实例终端」，再选中并展开，
+        // 独立进程没有日志管道：先刷新实例列表把它带进「终端面板」，再选中并展开，
         // 否则用户启动完看不到任何反馈（只能去 Profile 实例页找）
         addToast(
           "ok",
@@ -877,7 +877,7 @@ export default function App() {
     [installed, settings]
   );
 
-  // 实例终端抽屉的数据源：内嵌子进程（实时管道）+ 独立/外部实例（无管道，
+  // 终端面板实例任务的数据源：内嵌子进程（实时管道）+ 独立/外部实例（无管道，
   // 独立进程按需 tail 日志文件，外部实例只提示「日志在启动它的终端里」）
   const panelProcs = useMemo<ProcEntry[]>(() => {
     const list: ProcEntry[] = Object.values(procs).map((p) => ({ ...p, external: false }));
@@ -1080,7 +1080,7 @@ export default function App() {
       />
 
       {/* 内容侧：顶栏 / 视图放在 SidebarInset 内，随侧栏收放一起让位。
-          顶栏只留「折叠侧栏 + 拖拽区 + 高频动作」：环境状态、实例终端、检查更新
+          顶栏只留「折叠侧栏 + 拖拽区 + 高频动作」：环境状态、终端面板、检查更新
           与仓库/下载页入口都收在侧栏底部的卡片里（见 AppSidebar）。 */}
       <SidebarInset className="min-w-0 overflow-hidden bg-transparent">
         <header className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background/80 px-2 lg:gap-2 lg:px-4">
@@ -1753,7 +1753,7 @@ export default function App() {
                             }}
                             title={(settings.profileLaunchMode?.[row.profile] ?? settings.launchMode) === "detached"
                               ? "独立进程：关闭启动器后 DSH 继续运行，日志写入 ~/.dsh-starter/instance-logs（下次启动/重启生效）"
-                              : "子进程：日志实时进「实例终端」，退出启动器即结束该 DSH（下次启动/重启生效）"}
+                              : "子进程：日志实时进「终端面板」，退出启动器即结束该 DSH（下次启动/重启生效）"}
                           >
                             <TabsList className="h-6">
                               <TabsTrigger value="child" className="h-5 px-2 text-[11px]">子进程</TabsTrigger>

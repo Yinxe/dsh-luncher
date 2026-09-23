@@ -499,7 +499,7 @@ export interface PluginUpdateInfo {
   note: string | null;
 }
 
-/** 插件管理任务（内置终端里的一条记录） */
+/** 插件管理任务（通用终端面板里的一条插件任务） */
 export interface PluginJob {
   id: number;
   profile: string;
@@ -531,7 +531,7 @@ export interface PluginLogLine {
   at: number;
 }
 
-/** 一条流式输出（内置终端实时追加） */
+/** 一条流式输出（终端面板实时追加） */
 export interface PluginLogEvent {
   jobId: number;
   profile: string;

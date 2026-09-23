@@ -205,7 +205,7 @@ export default function QuickActionsView(props: Props) {
         </div>
         {row.phase === "failed" && (
           <p className="mt-3 border-t border-border pt-3 text-[11.5px] leading-relaxed text-muted-foreground">
-            启动失败：可在「实例终端」查看日志尾部；若是插件导致，到「Profiles」页选中 web 工作台，在「插件」Tab 停用可疑插件后重试。
+            启动失败：可在「终端面板」查看日志尾部；若是插件导致，到「Profiles」页选中 web 工作台，在「插件」Tab 停用可疑插件后重试。
           </p>
         )}
       </Card>
