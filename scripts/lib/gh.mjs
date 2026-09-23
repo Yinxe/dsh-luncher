@@ -13,7 +13,8 @@
 
 import { execFileSync } from "node:child_process";
 import { appendFileSync, createWriteStream, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -133,8 +134,9 @@ export function fatal(e) {
   process.exit(1);
 }
 
-/** 仓库根（scripts/ 的上一级），版本文件按它解析，cwd 在哪都行 */
-const ROOT = new URL("../..", import.meta.url).pathname;
+/** 仓库根（scripts/ 的上一级），版本文件按它解析，cwd 在哪都行。
+ *  必须 fileURLToPath：Windows 上 URL.pathname 是 `/D:/…`，拼出来就是坏路径（CI 实测踩过）。 */
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** 读取 src-tauri/tauri.conf.json 的版本号（全流水线唯一版本事实源） */
 export function appVersion() {
