@@ -2157,6 +2157,62 @@ try {
 } catch (_) {}
 "#;
 
+/// dsh WebUI 是 SPA：HTML 加载完 ≠ 渲染完，中间有一段页面自身的白屏。
+/// 注入同主题的加载遮罩（进度条 + 提示），轮询到 body 里出现真实内容
+/// （遮罩之外的元素有文字或可交互控件）再淡出移除；10 秒兜底强制撤，
+/// 保证导航失败时用户能看到实际错误而不是永远盖着加载页。
+fn loading_overlay_js(dark: bool) -> String {
+    let (bg, fg, track, bar) = if dark {
+        ("#171717", "#a1a1aa", "#27272a", "#5b9dff")
+    } else {
+        ("#fbf7ef", "#78716c", "#e7dfd2", "#3b82f6")
+    };
+    format!(
+        r#"
+(function () {{
+  if (window.__dshStarterLoading) return;
+  window.__dshStarterLoading = true;
+  var o = document.createElement('div');
+  o.setAttribute('data-dsh-starter-loading', '1');
+  o.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;'
+    + 'align-items:center;justify-content:center;gap:14px;background:{bg};color:{fg};'
+    + "font:13px -apple-system,system-ui,sans-serif;transition:opacity .35s";
+  o.innerHTML = '<div style="width:200px;height:3px;border-radius:9999px;overflow:hidden;background:{track}">'
+    + '<div style="width:45%;height:100%;border-radius:9999px;background:{bar};animation:__dsl 1.15s ease-in-out infinite"></div></div>'
+    + '<div>正在加载…</div>'
+    + '<style>@keyframes __dsl{{0%{{transform:translateX(-110%)}}100%{{transform:translateX(330%)}}}}</style>';
+  function mount() {{ (document.body || document.documentElement).appendChild(o); }}
+  if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount, {{ once: true }});
+  var t0 = Date.now(), done = false;
+  function hide() {{
+    if (done) return; done = true;
+    o.style.opacity = '0';
+    setTimeout(function () {{ o.remove(); }}, 400);
+  }}
+  function pageHasContent() {{
+    if (!document.body) return false;
+    var kids = document.body.children;
+    for (var i = 0; i < kids.length; i++) {{
+      var n = kids[i];
+      if (n === o || n.hasAttribute('data-dsh-starter-loading')) continue;
+      if ((n.textContent || '').trim().length > 0 || n.querySelector('canvas,svg,button,input,a')) return true;
+    }}
+    return false;
+  }}
+  var iv = setInterval(function () {{
+    var ready = false;
+    try {{ ready = pageHasContent(); }} catch (_) {{ ready = true; }}
+    if (ready || Date.now() - t0 > 10000) {{ clearInterval(iv); hide(); }}
+  }}, 150);
+}})();
+"#,
+        bg = bg,
+        fg = fg,
+        track = track,
+        bar = bar
+    )
+}
+
 /// 在应用内为实例的 Web UI 开一个独立窗口（无浏览器地址栏，像桌面端一样）。
 /// 同一地址复用同一窗口（已开则前置聚焦），多个实例可以同时各开一个窗口。
 /// `multi=true` 时不复用：每次点击都新开一个窗口（同地址多个会话并行的场景，
@@ -2244,7 +2300,10 @@ pub fn open_web_window(
         }))
         .background_color(bg)
         .visible(false)
-        .initialization_script(PURGE_DSH_STORAGE_JS)
+        .initialization_script(format!(
+            "{PURGE_DSH_STORAGE_JS}{}",
+            loading_overlay_js(dark)
+        ))
         .on_page_load(move |win, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Finished
                 && !shown_on_load.swap(true, std::sync::atomic::Ordering::SeqCst)
