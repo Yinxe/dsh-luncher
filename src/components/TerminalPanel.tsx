@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Eraser, Layers, Loader2, Package, Terminal, X, XCircle } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Eraser, Layers, Loader2, Package, Terminal, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -8,6 +8,7 @@ import {
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import InstanceTaskView, { labelOf } from "./terminal/InstanceTaskView";
 import PluginTaskView from "./terminal/PluginTaskView";
+import SystemTaskView from "./terminal/SystemTaskView";
 import { cn } from "@/lib/utils";
 import type { InstanceLog, PluginJob, ProcEntry, SystemTask, TerminalTaskRef } from "../types";
 
@@ -35,39 +36,13 @@ interface Props {
   onReadLog: (pid: number) => Promise<InstanceLog | null>;
   onReveal: (path: string) => void;
   onToast: (kind: "ok" | "err" | "info", text: string) => void;
+  /** 取消在途的 dsh 版本安装（面板内系统任务视图的取消按钮） */
+  onCancelInstall: () => void;
   /** 清理全部已结束任务（退出的实例 + 终态插件任务 + 终态系统任务） */
   onClearFinished: () => void;
 }
 
 const refKey = (r: TerminalTaskRef) => `${r.kind}:${r.id}`;
-
-/** 系统任务日志区：状态行 + 滚动日志（Step 4 会补进度条与取消） */
-function SystemTaskLog({ t }: { t: SystemTask }) {
-  const logRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [t.lines.length]);
-  return (
-    <>
-      <div
-        ref={logRef}
-        className="mx-4 mt-3 min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-background p-3 font-mono text-[11px] leading-relaxed text-muted-foreground select-text"
-      >
-        {t.lines.length === 0 ? "（暂无输出…）" : t.lines.join("\n")}
-      </div>
-      <div className="flex flex-wrap items-center gap-2 border-t border-border px-4 py-3 text-[11px] text-muted-foreground">
-        <span className="font-mono">{t.label}</span>
-        {t.running && <span className="inline-flex items-center gap-1">进行中… <Loader2 className="h-3 w-3 animate-spin" /></span>}
-        {t.running === false && t.ok && <Badge variant="success">完成</Badge>}
-        {t.running === false && !t.ok && (
-          <span className="inline-flex items-center gap-1 text-red-500">
-            <XCircle className="h-3 w-3" /> {t.message ?? "失败"}
-          </span>
-        )}
-      </div>
-    </>
-  );
-}
 
 /**
  * 通用终端面板：实例日志 / 插件任务 / dsh 与 Node 安装任务统一在此展示。
@@ -269,7 +244,7 @@ export default function TerminalPanel(props: Props) {
           onToast={props.onToast}
         />
       )}
-      {activeSys && <SystemTaskLog t={activeSys} />}
+      {activeSys && <SystemTaskView task={activeSys} onCancelInstall={props.onCancelInstall} />}
       {!task && !emptyList && (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center text-muted-foreground">
           <Package className="h-5 w-5 opacity-40" />

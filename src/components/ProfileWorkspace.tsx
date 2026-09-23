@@ -124,7 +124,7 @@ export default function ProfileWorkspace({
           <Button
             variant="ghost"
             size="sm"
-            className="xl:hidden"
+            className="@[60rem]:hidden"
             title="返回实例列表"
             onClick={onBack}
           >

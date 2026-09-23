@@ -1141,7 +1141,7 @@ export default function App() {
         {env && !env.node && (
           <Alert
             variant="destructive"
-            className={`shrink-0 animate-in gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 text-[13px] fade-in slide-in-from-top-2 duration-300 ${nodeTask ? "" : "pr-40"}`}
+            className="shrink-0 animate-in gap-1.5 rounded-none border-x-0 border-t-0 border-red-500/30 bg-red-500/10 px-4 py-2 pr-40 text-[13px] fade-in slide-in-from-top-2 duration-300"
           >
             <XCircle />
             {nodeTask ? (
@@ -1159,9 +1159,19 @@ export default function App() {
                     />
                   </AlertDescription>
                 )}
-                <AlertDescription className="truncate font-mono text-[11px]">
-                  {nodeTask.lines[nodeTask.lines.length - 1] ?? "连接镜像站…"}
-                </AlertDescription>
+                <AlertDescription>实时输出在右侧终端面板</AlertDescription>
+                <AlertAction>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setTerminalTask({ kind: "nodeInstall", id: "node" });
+                      setTerminalOpen(true);
+                    }}
+                  >
+                    在终端中查看
+                  </Button>
+                </AlertAction>
               </>
             ) : (
               <>
@@ -1305,7 +1315,14 @@ export default function App() {
               </div>
 
               {installTask && (
-                <InstallCard version={installTask.id} logs={installTask.lines} onCancel={doCancelInstall} />
+                <InstallCard
+                  version={installTask.id}
+                  onCancel={doCancelInstall}
+                  onOpenTerminal={() => {
+                    setTerminalTask({ kind: "dshInstall", id: installTask.id });
+                    setTerminalOpen(true);
+                  }}
+                />
               )}
 
               {remoteErr && !remoteLoading && (
@@ -1444,9 +1461,11 @@ export default function App() {
           )}
 
           {view === "profiles" && (
-            <div className="flex flex-col items-start gap-4 xl:flex-row">
-              {/* 左列：实例列表（>= xl 双栏并排；窄屏选中 profile 后隐藏，让位给全屏工作台） */}
-              <div className={`min-w-0 grow space-y-3 xl:w-[480px] xl:shrink-0 xl:grow-0 ${selectedProfile ? "hidden xl:block" : ""}`}>
+            /* @container：双栏判定按「内容区实际多宽」算而不是视口 ——
+               右侧终端面板打开时（尤其侧栏展开）内容会被挤掉 ~420px，视口口径会误判成还能双栏 */
+            <div className="@container flex flex-col items-start gap-4 @[60rem]:flex-row">
+              {/* 左列：实例列表（内容够宽时双栏并排；窄屏选中 profile 后隐藏，让位给全屏工作台） */}
+              <div className={`min-w-0 grow space-y-3 @[60rem]:w-[480px] @[60rem]:shrink-0 @[60rem]:grow-0 ${selectedProfile ? "hidden @[60rem]:block" : ""}`}>
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-semibold">Profile 实例</h2>
                 <span className="text-xs text-muted-foreground">
@@ -1785,7 +1804,7 @@ export default function App() {
 
               {/* 右列：选中 profile 的配置工作台（快捷配置 / 模型 / 插件 / 配置文件 / package.json）。
                   未选中时宽屏显示引导占位、窄屏整列隐藏（左列即列表页） */}
-              <div className={`min-w-0 grow xl:basis-0 ${selectedProfile ? "" : "hidden xl:block"}`}>
+              <div className={`min-w-0 grow @[60rem]:basis-0 ${selectedProfile ? "" : "hidden @[60rem]:block"}`}>
                 <ProfileWorkspace
                   profile={selectedProfile}
                   profiles={profiles.map((p) => p.name)}
@@ -1835,6 +1854,7 @@ export default function App() {
             onReadLog={readInstanceLog}
             onReveal={revealPath}
             onToast={addToast}
+            onCancelInstall={doCancelInstall}
             onOpenWeb={(u) => openDshWeb(u, undefined, activeProc != null ? procsRef.current[activeProc]?.profile : undefined)}
             onExport={() => {
               const p = activeProc != null ? procsRef.current[activeProc] : null;
