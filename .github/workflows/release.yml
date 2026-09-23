@@ -213,13 +213,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          V=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          # 只认**本版本**的草稿：原先取「列表里最新的任意草稿」，多版本草稿并存时
+          # 会把不相干的（可能没有资产的）草稿转正式 —— 0.3.1 首发就这样发布了一个
+          # 零资产的 Release（三端产物其实传上了草稿，转正式那一刻资产却是空的）。
           RID=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            --jq '[.[] | select(.draft)][0].id // empty')
+            --jq "[.[] | select(.draft and .tag_name==\"v$V\")][0].id // empty")
           if [ -z "$RID" ]; then
             echo "没有草稿（版本号未变时就是这样），结束"
             echo "released=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # 资产门禁：转正式前草稿必须带齐产物（latest.json + 各平台安装包，完整是 14 个，
+          # 这里按 ≥10 且不缺 latest.json 判），否则**拒绝发布**并红字报错。
+          # 零资产的 Release 一旦转正式：客户端「检查更新」拿不到任何包，R2 同步也会
+          # 在 gh release download 处扑空 —— 宁可 CI 红，不可发坏。
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RID/assets?per_page=100" \
+            --jq 'if (length >= 10 and (map(.name) | index("latest.json"))) then "草稿资产齐备（\(length) 个）"
+                  else error("草稿 v$V 资产不完整（\(length) 个，latest.json \(map(.name) | if index("latest.json") then "在" else "缺" end)），拒绝转正式") end'
           node scripts/release-notes.mjs --check > release-notes.md
           RELEASE=$(gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RID" \
             -F body="$(cat release-notes.md)")
