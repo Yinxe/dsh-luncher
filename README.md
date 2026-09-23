@@ -1,6 +1,22 @@
 # DSH Starter
 
-跨平台的 [@deepseek-ai/dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（DeepSeek Harness CLI）启动器。
+**跨平台（Windows / macOS / Linux）的 [DeepSeek Harness（dsh）](https://www.npmjs.com/package/@deepseek-ai/dsh) 桌面启动器。**
+
+dsh 是 DeepSeek 官方的 AI Agent CLI —— 能力很强，但它是个活在终端里的 Node 程序：
+多版本安装切换、多 profile 并行、模型与插件配置手写 YAML、日志排查……每一步都要跟命令行打交道。
+DSH Starter 把这套日常运维全部搬进图形界面：
+
+- **版本管理**：npm 官方版本列表一键装/卸/切，自动识别已有安装（启动器目录 / npm 全局 / PATH），
+  逐版本查看 dsh 更新日志；启动器自身带签名校验的自动更新通道。
+- **实例管理**：每个 profile 一张卡片——启动/停止/重启、访问地址、独立进程后台常驻；
+  换版本启动前先做绑定校验与风险提示，怕踩坑可以「复制 profile 试用启动」。
+- **配置管理**：模型 Provider、凭据、插件（npm / GitHub / 本地 clone 三种来源）、`cordis.patch.yml`
+  全部按 profile 图形化编辑；写前自动备份、语法错误当场拦，底层一律走官方 `dsh plugin` 命令。
+- **观测与排查**：实例日志、插件任务、版本安装统一进右侧终端面板；会话 Token 用量统计与分享图；
+  分类系统日志与一键诊断包。
+
+适合谁：想在桌面上一路点着把 dsh 用起来、管好它的用户，以及需要让 dsh 长期常驻、
+多 profile 并行运行的人 —— 不需要会 npm，也不需要懂 YAML。
 
 技术栈：**Tauri 2**（Rust 系统层 + 托盘/窗口）+ **React 18 + TypeScript**（界面）+ **Node.js / npm**（构建工具链，dsh 本身也是 Node 程序）。
 
@@ -14,7 +30,34 @@
 > （GitHub Pages，自建源 / GitHub 源可切换，版本号与体积由页面现拉）。
 > 页面源码在 [`site/`](site/)，push 到 `main` 自动部署（见 [.github/workflows/pages.yml](.github/workflows/pages.yml)）。
 
+## 快速开始
+
+1. **下载安装包**：打开 [下载页](https://yinxe.github.io/dsh-starter/)，按系统取对应安装包
+   （Windows `.exe` / `.msi`，Linux `.AppImage` / `.deb` / `.rpm`，macOS `.dmg`）。
+2. **首启引导**：装好 Node 与 dsh 的机器直接进下一步；缺什么启动器会引导一键补齐
+   （内置 Node LTS 与 dsh 版本都是用户级安装，不污染系统环境）。
+3. **初始化 dsh**：首次启动会提示「还差一步」——在首页点「一键初始化」，
+   以内置 `web` profile 完成 `$DSH_HOME` 的生成。
+4. **启动与配置**：首页的 **DeepSeek Harness** 卡片一键启动/停止/打开界面；
+   模型 Provider、API 凭据、插件在「Profiles」工作台里按 profile 图形化配置。
+
+全程不需要 npm 命令、不需要手写 YAML。更细的领域知识（数据目录、配置文件归属、启动方式、
+插件来源）见下面的「功能」详解与「配置体系」一节。
+
 ## 功能
+
+侧栏共 6 个页面，各自的定位：
+
+| 页面 | 干什么 |
+| --- | --- |
+| **首页** | 内置 `web` profile 一键启停、打开 DSH 界面与 DeepSeek Chat、环境信息 |
+| **版本与安装** | dsh 全版本列表、装/卸/切、更新日志浏览器、启动器自更新 |
+| **Profiles** | 实例管理 + 工作台：快捷配置、模型、插件、配置文件（按 profile） |
+| **统计** | 会话 Token 用量、在线时长、分享图导出 |
+| **系统日志** | 启动器自身分类日志、级别过滤、诊断包 |
+| **设置** | registry / GitHub 加速 / 凭据、凭据管理、通道自检、外观与更新 |
+
+各页细节：
 
 - **官方版本列表**：直接从 npm registry 拉取 `@deepseek-ai/dsh` 已发布的全部版本（含 `latest` / `next` / `alpha` dist-tags、发布日期、体积），支持切换 registry 镜像。列表按卡片实际宽度响应：窄窗口下把次要操作收进行尾「更多」菜单、按宽度收起「发布日期 / 大小」两列，行长与列宽都不会换行或横向溢出。
 - **识别已安装版本**：三个来源自动合并识别——
