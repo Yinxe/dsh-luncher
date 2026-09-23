@@ -35,6 +35,7 @@ import LogsView from "./components/LogsView";
 import ProfileWorkspace from "./components/ProfileWorkspace";
 import QuickActionsView from "./components/QuickActionsView";
 import TerminalPanel from "./components/TerminalPanel";
+import { useTerminalInline } from "./hooks/use-terminal-host";
 import VersionRow from "./components/VersionRow";
 import SettingsDrawer from "./components/SettingsDrawer";
 import UpdateBanner from "./components/UpdateBanner";
@@ -99,6 +100,7 @@ export default function App() {
   const [terminalOpen, setTerminalOpen] = useState(false);
   /** 通用终端面板当前聚焦的任务；null = 未选（面板显示引导占位） */
   const [terminalTask, setTerminalTask] = useState<TerminalTaskRef | null>(null);
+  const terminalInline = useTerminalInline();
   const runtimeBusy = useRef(false);
   const [instances, setInstances] = useState<ProfileInstance[]>([]);
   const [view, setView] = useState<View>("quick");
@@ -1837,6 +1839,7 @@ export default function App() {
 
           <TerminalPanel
             open={terminalOpen}
+            inline={terminalInline}
             onOpenChange={setTerminalOpen}
             task={terminalTask}
             onSelectTask={selectTerminalTask}

@@ -19,7 +19,7 @@
   Node 安装四类任务按 `TerminalTaskRef {kind,id}` 寻址，选择状态是 `App.tsx` 的 `terminalTask`（别在面板内部再存一份）；
   任务数据源是挂在 App 层的 `hooks/use-plugin-jobs.ts` 与 `hooks/use-terminal-jobs.ts`（事件流→缓冲聚合，
   80ms flush + alive 守卫防 StrictMode 双订阅），**页面里不要再嵌自己的输出块**——需要状态就用
-  `pluginRunningCount`/`pluginJobsTick` 这类 props 或回调。任何窗口宽度下都是与内容并排的右侧常驻栏（width 过渡滑入），**不做抽屉/Sheet 降级**。
+  `pluginRunningCount`/`pluginJobsTick` 这类 props 或回调。宽屏（≥1280px）为与内容并排的右侧常驻栏，小屏自动切为侧边抽屉（`hooks/use-terminal-host.ts`）。
 - **配置归属（0.1.7 硬约定）**：≥0.1.7 的 profile 配置在其 `profiles/<p>/cordis.patch.yml`，<0.1.7 走全局
   `settings.yaml`（迁移后被 dsh 改名 `settings.yaml.imported`，启动旧版前由 `restore_legacy_settings()` 还原）。
   启动器写 patch 一律**行级 marker 注释块整块接管**（`profile_cfg.rs` 的 `MODELCFG_MARKER = "# dsh-starter: modelcfg"`，

@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { Eraser, Layers, Loader2, Package, Terminal, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Sheet, SheetContent, SheetTitle,
+} from "@/components/ui/sheet";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import InstanceTaskView, { labelOf } from "./terminal/InstanceTaskView";
 import PluginTaskView from "./terminal/PluginTaskView";
@@ -14,6 +17,8 @@ export const TERMINAL_PANEL_W = 420;
 
 interface Props {
   open: boolean;
+  /** true = 与内容区并排的行内右栏；false = 窄屏 Sheet 覆盖式 */
+  inline: boolean;
   onOpenChange: (v: boolean) => void;
   task: TerminalTaskRef | null;
   onSelectTask: (ref: TerminalTaskRef | null) => void;
@@ -41,10 +46,11 @@ const refKey = (r: TerminalTaskRef) => `${r.kind}:${r.id}`;
 
 /**
  * 通用终端面板：实例日志 / 插件任务 / dsh 与 Node 安装任务统一在此展示。
- * 始终是右侧常驻栏（与内容区并排、width 过渡滑入），不是抽屉。
+ * 宽屏作为右侧常驻栏（与内容并排、width 过渡滑入），窄屏降级为 Sheet 抽屉；
+ * 两种宿主共用同一个 body。
  */
 export default function TerminalPanel(props: Props) {
-  const { open, onOpenChange, task, onSelectTask, procs, pluginJobs, pluginProfile, sysTasks } = props;
+  const { open, inline, onOpenChange, task, onSelectTask, procs, pluginJobs, pluginProfile, sysTasks } = props;
   const running = procs.filter((p) => !p.exited).length;
   const hasFinished =
     procs.some((p) => p.exited) || pluginJobs.some((j) => !j.running) || sysTasks.some((t) => !t.running);
@@ -195,7 +201,12 @@ export default function TerminalPanel(props: Props) {
       {/* 面板头 */}
       <div className="flex shrink-0 items-center gap-2.5 border-b border-border px-4 py-3">
         <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
-        <div className="text-xs font-bold">终端</div>
+        {/* SheetTitle 底层是 DialogTitle：只在 Sheet 宿主里合法，行内右栏用普通标题 */}
+        {inline ? (
+          <div className="text-xs font-bold">终端</div>
+        ) : (
+          <SheetTitle className="text-xs font-bold">终端</SheetTitle>
+        )}
         <Badge variant={running > 0 ? "success" : "secondary"}>{running} 运行中</Badge>
         <span className="flex-1" />
         <Button size="sm" variant="ghost" onClick={props.onClearFinished} disabled={!hasFinished} title="移除已退出的实例与已结束的安装任务">
@@ -254,18 +265,32 @@ export default function TerminalPanel(props: Props) {
     </div>
   );
 
-  return (
-    <div
-      aria-hidden={!open}
-      className={cn(
-        "shrink-0 overflow-hidden transition-[width] duration-300 ease-out motion-reduce:transition-none",
-        open ? "w-[var(--tw-terminal-w)] border-l border-border" : "w-0 border-l border-transparent"
-      )}
-      style={{ "--tw-terminal-w": `${TERMINAL_PANEL_W}px` } as React.CSSProperties}
-    >
-      <div className="h-full" style={{ width: TERMINAL_PANEL_W }}>
-        {body}
+  if (inline) {
+    return (
+      <div
+        aria-hidden={!open}
+        className={cn(
+          "shrink-0 overflow-hidden transition-[width] duration-300 ease-out motion-reduce:transition-none",
+          open ? "w-[var(--tw-terminal-w)] border-l border-border" : "w-0 border-l border-transparent"
+        )}
+        style={{ "--tw-terminal-w": `${TERMINAL_PANEL_W}px` } as React.CSSProperties}
+      >
+        <div className="h-full" style={{ width: TERMINAL_PANEL_W }}>
+          {body}
+        </div>
       </div>
-    </div>
+    );
+  }
+  return (
+    <Sheet open={open} onOpenChange={(o) => onOpenChange(o)}>
+      <SheetContent
+        side="right"
+        showCloseButton={false}
+        aria-describedby={undefined}
+        className="w-full max-w-[420px] gap-0 border-l border-border bg-card p-0 shadow-2xl"
+      >
+        {body}
+      </SheetContent>
+    </Sheet>
   );
 }
