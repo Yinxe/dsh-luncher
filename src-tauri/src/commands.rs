@@ -1199,7 +1199,9 @@ pub fn plugin_install(
     )
 }
 
-/// 卸载插件：`dsh plugin --profile <p> remove <name>`（可选顺带删除本地克隆目录）
+/// 卸载插件：`dsh plugin --profile <p> remove <name>`（可选顺带删除本地克隆目录）。
+/// 成功标准 = 官方命令把包从依赖与 bundles 里卸干净；`clean_config`（默认开）
+/// 再追加一步：把该插件在 cordis.patch.yml 里的数据按行清掉（仅 0.1.7+，旧版自动跳过）。
 #[tauri::command]
 pub fn plugin_uninstall(
     app: AppHandle,
@@ -1208,6 +1210,7 @@ pub fn plugin_uninstall(
     profile: String,
     name: String,
     purge_clone_dir: Option<String>,
+    clean_config: Option<bool>,
 ) -> Result<u64, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -1218,16 +1221,27 @@ pub fn plugin_uninstall(
         return Err(crate::profile_cfg::inbox_bundle_reject(&name, "卸载"));
     }
     let settings = state.settings.lock().unwrap().clone();
+    let clean = clean_config.unwrap_or(true);
     let mut steps = vec![
         crate::plugin::Step::Note {
             text: format!(
-                "卸载 {name}：dsh plugin remove（同时从 dsh.profile.bundles 与依赖声明移除）"
+                "卸载 {name}：dsh plugin remove（同时从 dsh.profile.bundles 与依赖声明移除）{}",
+                if clean { "；卸成后清理 cordis.patch.yml 中该插件的条目" } else { "" }
             ),
         },
         crate::plugin::Step::Dsh {
             args: vec!["remove".into(), name.clone()],
         },
     ];
+    if clean {
+        // 包声明的插件 id 只在包还存在时查得到：起任务前先从 node_modules 读出来固化进步骤
+        let dir = crate::profile_cfg::profile_dir(&profile)?;
+        let ids = crate::verify::declared_ids(&dir.join("node_modules").join(&name));
+        steps.push(crate::plugin::Step::CleanPatch {
+            name: name.clone(),
+            ids,
+        });
+    }
     let mut label = format!("卸载 {name}");
     if let Some(dir) = purge_clone_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let path = crate::plugin::clone_dir_path(dir)?;

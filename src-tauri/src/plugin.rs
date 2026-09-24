@@ -141,6 +141,10 @@ pub enum Step {
     FixHead { dir: PathBuf },
     /// 内部步骤：删除目录（克隆出的本地仓库）
     RmDir { path: PathBuf },
+    /// 内部步骤：卸载成功后，把该插件包在 profile `cordis.patch.yml` 里的条目逐行清掉
+    /// （官方 remove 只维护依赖与 bundles，不会动 cordis 用户补丁层的插件数据）。
+    /// 只对 0.1.7+ 生效；失败不推翻卸载结论，只提示手动清理。
+    CleanPatch { name: String, ids: Vec<String> },
     /// 内部步骤：只写一行提示
     Note { text: String },
 }
@@ -839,6 +843,77 @@ pub fn start_job<R: Runtime>(
                         }
                     }
                 }
+                Step::CleanPatch { name, ids } => {
+                    let profile = handle.meta.lock().unwrap().profile.clone();
+                    let dir = profiles::profiles_dir().join(&profile);
+                    match crate::profile_cfg::strip_plugin_patches(&profile, name, ids) {
+                        Ok(None) => emit_line(
+                            &app,
+                            &handle,
+                            id,
+                            "info",
+                            &format!(
+                                "ℹ 跳过配置清理：profile「{profile}」没有 cordis.patch.yml（<0.1.7 的配置在全局 settings.yaml，由 dsh 自己维护，卸载不触碰）"
+                            ),
+                        ),
+                        Ok(Some(list)) => {
+                            if list.is_empty() {
+                                emit_line(
+                                    &app,
+                                    &handle,
+                                    id,
+                                    "info",
+                                    &format!("ℹ cordis.patch.yml 里没有 {name} 的条目，无需清理"),
+                                );
+                            } else {
+                                emit_line(
+                                    &app,
+                                    &handle,
+                                    id,
+                                    "info",
+                                    &format!(
+                                        "✔ 已从 cordis.patch.yml 移除 {} 处条目：{}（原件备份为 cordis.patch.starter-bak）",
+                                        list.len(),
+                                        list.join("、")
+                                    ),
+                                );
+                            }
+                            // 复核：flow 写法 / 解析不动的块可能删不干净，如实告知而不是假装完成
+                            match crate::verify::user_patch_references(&dir, name, ids) {
+                                Some(hits) if !hits.is_empty() => {
+                                    let msg = format!(
+                                        "⚠ cordis.patch.yml 仍解析出对 {} 的引用（flow 写法等按行删不动的形态）：请在「配置文件」Tab 手动确认后删除",
+                                        hits.join("、")
+                                    );
+                                    emit_line(&app, &handle, id, "info", &msg);
+                                    remember_hint(&handle, &msg);
+                                }
+                                None => emit_line(
+                                    &app,
+                                    &handle,
+                                    id,
+                                    "info",
+                                    "⚠ cordis.patch.yml 无法整体解析（含自定义 tag 等），清理结果请对照 cordis.patch.starter-bak 手动复核",
+                                ),
+                                _ => {}
+                            }
+                        }
+                        Err(e) => {
+                            // 插件本体已由官方命令卸掉：清理失败不推翻卸载结论，只把下一步说清楚
+                            emit_line(
+                                &app,
+                                &handle,
+                                id,
+                                "stderr",
+                                &format!("⚠ 插件已卸载，但 cordis.patch.yml 配置清理未完成：{e}"),
+                            );
+                            remember_hint(
+                                &handle,
+                                "配置清理未完成：请在「配置文件」Tab 手动删除该插件在 cordis.patch.yml 中的条目",
+                            );
+                        }
+                    }
+                }
                 Step::Cmd { program, args, cwd, label, soft } => {
                     emit_line(&app, &handle, id, "info", &format!("$ {label}"));
                     match run_streamed(&app, &handle, id, program, args, cwd.as_deref(), &[], &settings, &accel_envs) {
@@ -993,10 +1068,14 @@ pub fn start_job<R: Runtime>(
                         }
                     }
 
-                    // 卸载前检查（对齐 dshmarket 的 uninstall 路由）：
-                    // 用户自己的 cordis.patch.yml 若仍 insert 着这个包，卸载会让下次启动缺模块；
-                    // 启动器不替用户改他的补丁文件，所以这里直接拒绝并指出要删哪几行。
+                    // 卸载前情报（不再是闸门）：官方 remove 只管依赖声明与 bundles，
+                    // 用户 cordis.patch.yml 里对该包的引用由 CleanPatch 步骤接管清理；
+                    // 没带清理步骤时只提醒「下次启动报缺模块该去哪改」，不拦卸载。
                     if base_argv.first().map(String::as_str) == Some("remove") {
+                        let has_clean = req
+                            .steps
+                            .iter()
+                            .any(|s| matches!(s, Step::CleanPatch { .. }));
                         for name in base_argv
                             .iter()
                             .skip(1)
@@ -1006,14 +1085,21 @@ pub fn start_job<R: Runtime>(
                             let ids = crate::verify::declared_ids(&pkg_dir);
                             match crate::verify::user_patch_references(&dir, name, &ids) {
                                 Some(hits) if !hits.is_empty() => {
-                                    let msg = format!(
-                                        "无法卸载 {name}：profile 的 cordis.patch.yml 仍通过补丁引用 {}。\n                                         请先在自己的补丁文件里删掉这些引用（启动器不会替你改写用户补丁），然后重试。",
-                                        hits.join("、")
+                                    emit_line(
+                                        &app,
+                                        &handle,
+                                        id,
+                                        "info",
+                                        &format!(
+                                            "ℹ cordis.patch.yml 仍通过补丁引用 {}：{}。",
+                                            hits.join("、"),
+                                            if has_clean {
+                                                "卸载成功后会按行清掉这些条目（原件备份为 cordis.patch.starter-bak）"
+                                            } else {
+                                                "本次不清理补丁；下次启动若报缺模块，请在「配置文件」Tab 删掉这些引用"
+                                            }
+                                        ),
                                     );
-                                    emit_line(&app, &handle, id, "stderr", &msg);
-                                    remember_hint(&handle, &msg);
-                                    ok = false;
-                                    break;
                                 }
                                 None => {
                                     emit_line(
@@ -1300,7 +1386,8 @@ fn describe_first_step(steps: &[Step]) -> String {
             Step::Note { .. }
             | Step::ProbeRemote { .. }
             | Step::FixRemote { .. }
-            | Step::FixHead { .. } => continue,
+            | Step::FixHead { .. }
+            | Step::CleanPatch { .. } => continue,
         }
     }
     String::new()

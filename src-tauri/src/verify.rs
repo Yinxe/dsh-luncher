@@ -1060,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn user_patch_reference_blocks_uninstall() {
+    fn user_patch_references_are_detected() {
         let dir = tmp("upatch");
         std::fs::write(
             dir.join("cordis.patch.yml"),

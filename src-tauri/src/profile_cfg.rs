@@ -66,7 +66,7 @@ pub struct ProfileDetail {
     pub patch_entries: Vec<PatchEntryInfo>,
 }
 
-fn profile_dir(profile: &str) -> Result<PathBuf, String> {
+pub(crate) fn profile_dir(profile: &str) -> Result<PathBuf, String> {
     let name = profile.trim();
     if name.is_empty()
         || name.contains('/')
@@ -810,6 +810,252 @@ fn rebuild_insert_block(
         k += 1;
     }
     res
+}
+
+/// 卸载清理：把该插件包在 profile 自己的 `cordis.patch.yml` 里的条目逐行删掉。
+///
+/// 官方 `dsh plugin remove` 只维护 package.json 的依赖与 `dsh.profile.bundles`，
+/// 用户补丁层的插件数据（启动器禁用块、按 id 挂配置的条目、`insert` 挂载子项）
+/// 不由它负责，卸载成功后要我们接管。与启停同一套纪律：**逐行操作、绝不整文件
+/// parse→serialize**（补丁里可能有 `!!js` 自定义 tag 和用户注释，round-trip 必坏数据）。
+/// 只作用于 0.1.7+ 的 profile（配置在其 `cordis.patch.yml`）；旧版没有这个文件
+/// → `Ok(None)`，全局 settings.yaml 归 dsh 自己管，这里绝不触碰。
+pub fn strip_plugin_patches(
+    profile: &str,
+    name: &str,
+    ids: &[String],
+) -> Result<Option<Vec<String>>, String> {
+    let path = user_patch_path(profile)?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!(
+                "读取 cordis.patch.yml 失败，已拒绝清理以免覆盖现有内容：{e}"
+            ))
+        }
+    };
+    let mut targets: std::collections::BTreeSet<String> = ids
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    targets.insert(name.to_string());
+
+    let lines: Vec<&str> = raw.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut removed: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].starts_with("- ") {
+            out.push(lines[i].to_string());
+            i += 1;
+            continue;
+        }
+        // 顶层条目块：起始行 + 后续缩进行/空行
+        let mut j = i + 1;
+        while j < lines.len() && (lines[j].starts_with(' ') || lines[j].trim().is_empty()) {
+            j += 1;
+        }
+        let block = &lines[i..j];
+        let item = yaml_item_of(&block.join("\n"));
+        let desc = entry_desc(item.as_ref(), block[0]);
+        let top_hit = item
+            .as_ref()
+            .map(|it| value_targets(it, &targets))
+            // 解析不动的块（含自定义 tag 等）退回首行键值比对：整块删除按列 0 边界切，不依赖解析
+            .unwrap_or_else(|| first_line_targets(block[0], &targets));
+        if top_hit {
+            drop_block_with_marker(&mut out);
+            removed.push(desc);
+            i = j;
+            continue;
+        }
+        if item
+            .as_ref()
+            .and_then(|it| it.get("insert"))
+            .is_some_and(|v| v.is_sequence())
+        {
+            let (kept, hit_children, all_children) = strip_insert_children(block, &targets);
+            if hit_children > 0 {
+                if all_children && item.as_ref().is_some_and(|it| only_insert(it)) {
+                    // 整条就是一个纯挂载壳：子项全命中则连壳移除
+                    drop_block_with_marker(&mut out);
+                } else if all_children {
+                    // 条目还带着别的配置：insert 被掏空后收成行内空数组，保持 YAML 有效
+                    for l in kept {
+                        out.push(match blank_insert_line(&l) {
+                            Some(r) => r,
+                            None => l,
+                        });
+                    }
+                } else {
+                    out.extend(kept);
+                }
+                removed.push(format!("{desc}（insert 子项 ×{hit_children}）"));
+                i = j;
+                continue;
+            }
+        }
+        out.extend(block.iter().map(|l| l.to_string()));
+        i = j;
+    }
+
+    if removed.is_empty() {
+        return Ok(Some(removed));
+    }
+    let mut out_text = out.join("\n");
+    if !out_text.is_empty() {
+        out_text.push('\n');
+    }
+    // 和启停同一份契约：条目删空后放回模板的 `[]` 占位，顶层仍是合法的补丁列表
+    if !has_patch_content(&out_text) {
+        out_text.push_str("[]\n");
+    }
+    validate_yaml(&out_text).map_err(|e| {
+        format!(
+            "{e}\n提示：该补丁文件存在无法按行安全删除的形态（如 flow 写法、自定义 tag），\
+             已放弃清理且**原文件未改动**；请在「配置文件」Tab 手动删除相关条目。"
+        )
+    })?;
+    backup(&path)?;
+    std::fs::write(&path, out_text).map_err(|e| format!("写入失败: {e}"))?;
+    Ok(Some(removed))
+}
+
+/// 顶层条目的 id/name 是否命中目标集合（包名也并入 targets）
+fn value_targets(item: &serde_yaml::Value, targets: &std::collections::BTreeSet<String>) -> bool {
+    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    (!id.is_empty() && targets.contains(id)) || (!name.is_empty() && targets.contains(name))
+}
+
+/// 解析不动时的兜底：只看条目起始行 `- id: X` / `- name: X` 的键值
+fn first_line_targets(first: &str, targets: &std::collections::BTreeSet<String>) -> bool {
+    let Some(rest) = first.trim_start().strip_prefix("- ") else {
+        return false;
+    };
+    for key in ["id:", "name:"] {
+        if let Some(v) = rest.strip_prefix(key) {
+            if targets.contains(unquote_scalar(v)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn unquote_scalar(v: &str) -> &str {
+    let v = v.trim();
+    let b = v.as_bytes();
+    if b.len() >= 2
+        && ((b[0] == b'"' && b[b.len() - 1] == b'"') || (b[0] == b'\'' && b[b.len() - 1] == b'\''))
+    {
+        return &v[1..v.len() - 1];
+    }
+    v
+}
+
+/// 供终端显示用的条目描述：优先 id，其次 name，最后起始行原文
+fn entry_desc(item: Option<&serde_yaml::Value>, first: &str) -> String {
+    if let Some(it) = item {
+        if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
+            return format!("id={id}");
+        }
+        if let Some(n) = it.get("name").and_then(|v| v.as_str()) {
+            return format!("name={n}");
+        }
+    }
+    first.trim().to_string()
+}
+
+/// 条目是否只有 insert 一个键（纯挂载壳，子项全删后可整块移除）
+fn only_insert(item: &serde_yaml::Value) -> bool {
+    item.as_mapping().is_some_and(|m| {
+        !m.is_empty()
+            && m.keys()
+                .all(|k| k.as_str().is_some_and(|s| s == "insert"))
+    })
+}
+
+/// `insert:` 键被掏空时的行内改写（`insert:` → `insert: []`，`- insert:` → `- insert: []`）
+fn blank_insert_line(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    let indent = &line[..line.len() - t.len()];
+    if t == "insert:" {
+        return Some(format!("{indent}insert: []"));
+    }
+    if t.strip_prefix("- ").map(str::trim_end) == Some("insert:") {
+        return Some(format!("{indent}- insert: []"));
+    }
+    None
+}
+
+/// 移除 insert 块中 id/name 命中 targets 的子项；返回（保留行、命中数、是否全部命中）
+fn strip_insert_children(
+    block: &[&str],
+    targets: &std::collections::BTreeSet<String>,
+) -> (Vec<String>, usize, bool) {
+    let inner_indent = block
+        .iter()
+        .skip(1)
+        .find(|l| !l.trim().is_empty())
+        .map(|l| leading_spaces(l))
+        .unwrap_or(0);
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut k = 1;
+    while k < block.len() {
+        let line = block[k];
+        if line.trim().is_empty()
+            || leading_spaces(line) != inner_indent
+            || !line.trim_start().starts_with("- ")
+        {
+            k += 1;
+            continue;
+        }
+        let mut e = k + 1;
+        while e < block.len()
+            && (block[e].trim().is_empty() || leading_spaces(block[e]) > inner_indent)
+        {
+            e += 1;
+        }
+        ranges.push((k, e));
+        k = e;
+    }
+    if ranges.is_empty() {
+        // flow 写法（insert: [{id: x}]）等按行切不出子项：交给调用方后的复检提示人工处理
+        return (block.iter().map(|l| l.to_string()).collect(), 0, false);
+    }
+    let hits: Vec<bool> = ranges
+        .iter()
+        .map(|(s, e)| {
+            match yaml_item_of(&block[*s..*e].join("\n")) {
+                Some(it) => value_targets(&it, targets),
+                None => first_line_targets(block[*s], targets),
+            }
+        })
+        .collect();
+    let hit_children = hits.iter().filter(|h| **h).count();
+    if hit_children == 0 {
+        return (block.iter().map(|l| l.to_string()).collect(), 0, false);
+    }
+    let all = hit_children == ranges.len();
+    let mut kept: Vec<String> = Vec::with_capacity(block.len());
+    let mut k = 0;
+    while k < block.len() {
+        if let Some(pos) = ranges.iter().position(|(s, _)| *s == k) {
+            let (s, e) = ranges[pos];
+            if !hits[pos] {
+                kept.extend(block[s..e].iter().map(|l| l.to_string()));
+            }
+            k = e;
+            continue;
+        }
+        kept.push(block[k].to_string());
+        k += 1;
+    }
+    (kept, hit_children, all)
 }
 
 /// 解析用于插件命令的 dsh 可执行入口（当前版本优先）
@@ -2828,6 +3074,131 @@ mod tests {
 
         std::fs::remove_dir_all(&tmp).ok();
         std::env::remove_var("DSH_HOME");
+    }
+
+    /// 卸载清理：`strip_plugin_patches` 必须逐行删掉该插件包在 patch 里的一切条目
+    /// （启动器禁用块、按 name/id 挂配置的条目、insert 挂载子项），其余用户条目原样保留；
+    /// 条目全删光时回到模板的 `[]` 占位，且写盘前留有 starter-bak。
+    #[test]
+    fn strip_plugin_patches_removes_entries_line_level() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-strip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        let patch = prof_dir.join("cordis.patch.yml");
+        std::fs::write(
+            &patch,
+            concat!(
+                "# my notes\n",
+                "- id: keepme\n",
+                "  config:\n",
+                "    open: true\n",
+                "\n",
+                "# dsh-starter: disable @dshp-inx/qqbot/dshp-inx-qqbot（启动器管理）\n",
+                "- id: dshp-inx-qqbot\n",
+                "  disabled: true\n",
+                "- name: '@dshp-inx/qqbot'\n",
+                "  config:\n",
+                "    x: 1\n",
+                "- insert:\n",
+                "  - id: qqbot-cmd\n",
+                "    name: '@dshp-inx/qqbot'\n",
+                "  - id: keep-entry\n",
+                "    name: '@dshp/other'\n",
+                "- id: other\n",
+                "  insert:\n",
+                "  - id: dshp-inx-qqbot\n",
+            ),
+        )
+        .unwrap();
+
+        let removed = strip_plugin_patches(
+            "web",
+            "@dshp-inx/qqbot",
+            &["dshp-inx-qqbot".into(), "qqbot-cmd".into()],
+        )
+        .unwrap()
+        .expect("patch 文件存在");
+        assert_eq!(removed.len(), 4, "{removed:?}");
+        let after = std::fs::read_to_string(&patch).unwrap();
+        serde_yaml::from_str::<serde_yaml::Value>(&after).expect("清理后仍是合法 YAML");
+        // 用户自己的条目原样保留
+        assert!(after.contains("# my notes") && after.contains("- id: keepme"), "{after}");
+        assert!(after.contains("keep-entry"), "{after}");
+        assert!(after.contains("id=other") || after.contains("- id: other"), "{after}");
+        // insert 被掏空但父条目还有别的键 → 收成行内空数组
+        assert!(after.contains("insert: []"), "{after}");
+        // 目标包的一切痕迹都没了（含启动器标记注释）
+        assert!(!after.contains("qqbot"), "{after}");
+        assert!(!after.contains("# dsh-starter: disable"), "{after}");
+        assert!(prof_dir.join("cordis.patch.starter-bak").is_file(), "必须有写盘前备份");
+
+        std::env::remove_var("DSH_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 只剩目标条目时：删空后文件回到 `[]` 占位（顶层数组契约），而不是空文档/null。
+    #[test]
+    fn strip_plugin_patches_restores_empty_placeholder() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-strip-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        let patch = prof_dir.join("cordis.patch.yml");
+        std::fs::write(&patch, "# Your patch layer…\n- id: mypkg-entry\n  disabled: true\n")
+            .unwrap();
+
+        let removed = strip_plugin_patches("web", "@dshp/mypkg", &["mypkg-entry".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed.len(), 1);
+        let after = std::fs::read_to_string(&patch).unwrap();
+        assert!(after.contains("# Your patch layer"), "注释保留:\n{after}");
+        assert_eq!(
+            serde_yaml::from_str::<serde_yaml::Value>(&after).unwrap(),
+            serde_yaml::Value::Sequence(vec![]),
+            "空补丁层应回到 `[]`:\n{after}"
+        );
+
+        // 没有 patch 文件（旧版/未初始化）→ Ok(None)，绝不无中生有
+        std::fs::remove_dir_all(&prof_dir).unwrap();
+        assert!(strip_plugin_patches("web", "@dshp/mypkg", &[]).unwrap().is_none());
+
+        std::env::remove_var("DSH_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 含 `!!js` 自定义 tag 的块 serde_yaml 解析不动：目标条目按「起始行键值」兜底识别，
+    /// 整块删除仍按列 0 边界切，不依赖解析；无关块保持原样、内容不被 round-trip 弄坏。
+    #[test]
+    fn strip_plugin_patches_handles_unparsable_js_block() {
+        let _env = DSH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-strip-js-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("DSH_HOME", &tmp);
+        let prof_dir = tmp.join("profiles/web");
+        std::fs::create_dir_all(&prof_dir).unwrap();
+        let patch = prof_dir.join("cordis.patch.yml");
+        std::fs::write(
+            &patch,
+            "- id: mypkg-entry\n  factory: !!js/function |\n    function(){return 1}\n- id: keepme\n",
+        )
+        .unwrap();
+
+        let removed = strip_plugin_patches("web", "@dshp/mypkg", &["mypkg-entry".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        let after = std::fs::read_to_string(&patch).unwrap();
+        assert!(!after.contains("mypkg-entry") && !after.contains("!!js"), "{after}");
+        assert!(after.contains("- id: keepme"), "{after}");
+
+        std::env::remove_var("DSH_HOME");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Windows 用户实测报错：全新 profile 的 cordis.patch.yml 是「一串注释 + 一行 `[]`」

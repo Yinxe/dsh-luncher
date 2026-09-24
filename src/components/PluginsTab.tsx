@@ -75,6 +75,8 @@ export default function PluginsTab({
     { name: string; isBundle: boolean; cloneName: string | null } | null
   >(null);
   const [purgeClone, setPurgeClone] = useState(false);
+  /** 卸载时顺带清理 cordis.patch.yml 里该插件的条目（0.1.7+；官方 remove 不管这部分） */
+  const [cleanPatch, setCleanPatch] = useState(true);
 
   // 始终指向「当前选中」的 profile，用于丢弃过期的 reload 响应
   const latestProfileRef = useRef(profile);
@@ -137,9 +139,9 @@ export default function PluginsTab({
   );
 
   const uninstall = useCallback(
-    (name: string, cloneDir: string | null) => {
+    (name: string, cloneDir: string | null, cleanConfig: boolean) => {
       api
-        .pluginUninstall(profile, name, cloneDir)
+        .pluginUninstall(profile, name, cloneDir, cleanConfig)
         .then(() => onToast("info", `已开始卸载 ${name}（输出见终端面板）`))
         .catch((e) => onToast("err", String(e)));
     },
@@ -381,6 +383,7 @@ export default function PluginsTab({
                 disabled={busy || b.official}
                 onClick={() => {
                   setPurgeClone(false);
+                  setCleanPatch(true);
                   setPendingUninstall({
                     name: b.name,
                     isBundle: true,
@@ -452,6 +455,7 @@ export default function PluginsTab({
                   disabled={busy}
                   onClick={() => {
                     setPurgeClone(false);
+                  setCleanPatch(true);
                     setPendingUninstall({
                       name: p.name,
                       isBundle: false,
@@ -496,6 +500,25 @@ export default function PluginsTab({
                 : `「${pendingUninstall?.name}」在 package.json 依赖中但未声明为插件 bundle，可能是误装或残留依赖。将从 profile「${profile}」中移除，其他插件若依赖它则会受影响。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <div className="flex items-start gap-2.5 rounded-lg border border-border px-3 py-2.5">
+            <Switch
+              id="clean-patch"
+              checked={cleanPatch}
+              onCheckedChange={setCleanPatch}
+              className="mt-0.5"
+            />
+            <div className="min-w-0 flex-1">
+              <label htmlFor="clean-patch" className="text-[11.5px] font-medium">
+                同时清理插件在 cordis.patch.yml 中的配置
+              </label>
+              <p className="text-[10.5px] leading-relaxed text-muted-foreground">
+                官方卸载命令只维护 package.json 依赖与 bundles，不会清掉补丁里该插件的数据
+                （禁用块、配置条目、insert 挂载）。开启后卸载成功会按行移除这些条目
+                （原件备份为 cordis.patch.starter-bak）；仅影响 0.1.7+ 的 profile 配置，
+                旧版的全局 settings.yaml 不会被触碰。
+              </p>
+            </div>
+          </div>
           {pendingUninstall?.cloneName && (
             <div className="flex items-start gap-2.5 rounded-lg border border-border px-3 py-2.5">
               <Switch
@@ -521,8 +544,9 @@ export default function PluginsTab({
               variant="destructive"
               onClick={() => {
                 const target = pendingUninstall;
+                const clean = cleanPatch;
                 setPendingUninstall(null);
-                if (target) uninstall(target.name, purgeClone ? target.cloneName : null);
+                if (target) uninstall(target.name, purgeClone ? target.cloneName : null, clean);
               }}
             >
               卸载

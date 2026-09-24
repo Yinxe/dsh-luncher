@@ -130,12 +130,18 @@ export const api = {
   /** 安装/升级插件（dsh plugin add，可一次多个规格），返回任务 id */
   pluginInstall: (profile: string, specs: string[], mode: "install" | "upgrade" = "install") =>
     invoke<number>("plugin_install", { profile, specs, mode }),
-  /** 卸载插件（dsh plugin remove），可选顺带删除本地克隆目录 */
-  pluginUninstall: (profile: string, name: string, purgeCloneDir?: string | null) =>
+  /** 卸载插件（dsh plugin remove）；cleanConfig=卸成后顺带清理 cordis.patch.yml 里该插件的条目（默认开，仅 0.1.7+ 生效）；purgeCloneDir=顺带删除本地克隆目录 */
+  pluginUninstall: (
+    profile: string,
+    name: string,
+    purgeCloneDir?: string | null,
+    cleanConfig = true,
+  ) =>
     invoke<number>("plugin_uninstall", {
       profile,
       name,
       purgeCloneDir: purgeCloneDir ?? null,
+      cleanConfig,
     }),
   /** 升级本地克隆插件：git pull →（可选）构建 → dsh plugin add link:… */
   pluginPullUpdate: (
