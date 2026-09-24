@@ -50,6 +50,12 @@ tauri = { version = "2", features = ["test"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# WebKitGTK 的 permission-request 信号 wry 不处理，未连接即拒绝 getUserMedia；
+# 打开 dsh web 窗口时要连上它放行麦克风（见 commands.rs）。与 tauri 内部拉入的
+# 同版本同 feature，共享同一份编译产物。
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
+webkit2gtk = { version = "2", features = ["v2_40"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 16

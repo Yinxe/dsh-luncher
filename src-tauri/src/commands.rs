@@ -2306,7 +2306,7 @@ pub fn open_web_window(
     } else {
         tauri::utils::config::Color(251, 247, 239, 255)
     };
-    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(parsed))
+    let window = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(parsed))
         .title(&win_title)
         .inner_size(1000.0, 720.0)
         .min_inner_size(480.0, 520.0)
@@ -2324,8 +2324,45 @@ pub fn open_web_window(
         ))
         .build()
         .map_err(|e| format!("打开窗口失败：{e}"))?;
+    grant_webview_media_permissions(&window);
     Ok(())
 }
+
+/// Linux（WebKitGTK）下放行 WebView 的媒体采集权限（麦克风/摄像头）。
+///
+/// wry 只在 macOS（WKUIDelegate 直接 Grant）和 Windows（WebView2 默认弹提示）
+/// 处理权限请求；WebKitGTK 的 `permission-request` 信号若无人连接，请求会被
+/// 直接拒绝，dsh web 的语音输入因此始终报「麦克风权限未开启」。这里只自动
+/// 放行 UserMedia 类请求，地理位置、通知等其余请求仍走 WebKit 默认处理。
+/// `with_webview` 会把闭包调度回 GTK 主线程，信号连接必须在主线程做。
+#[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+fn grant_webview_media_permissions(window: &tauri::WebviewWindow) {
+    use webkit2gtk::{glib::Cast, PermissionRequestExt, UserMediaPermissionRequest, WebViewExt};
+    let _ = window.with_webview(|webview| {
+        webview.inner().connect_permission_request(|_, req| {
+            if req.downcast_ref::<UserMediaPermissionRequest>().is_some() {
+                req.allow();
+                return true;
+            }
+            false
+        });
+    });
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+)))]
+fn grant_webview_media_permissions(_window: &tauri::WebviewWindow) {}
 
 /// 一键安装内置 Node 运行时（下载默认走镜像站）
 #[tauri::command]
